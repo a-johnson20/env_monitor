@@ -616,15 +616,33 @@ bool ads1113_single_shot(int16_t &raw) {
 }
 
 // ---------- OLED UI ----------
-enum screen_index : uint8_t { SCR_TIME=0, SCR_CO2, SCR_SHT45_RH, SCR_TMP117_T, SCR_LPS22DF_P, SCR_TGS2611_V, SCR_TGS2616_V, SCR_COUNT };
+enum ScreenPage : uint8_t { SCR_TIME=0, SCR_CO2, SCR_SHT45_RH, SCR_TMP117_T, SCR_LPS22DF_P, SCR_TGS2611_V, SCR_TGS2616_V, SCR_COUNT };
+static ScreenPage screen_index = SCR_TIME;
 unsigned long last_screen_ms = 0;
 const unsigned long SCREEN_PERIOD_MS = 2000;
+
+static uint8_t sub_idx = 0;
+
+static uint8_t subcount_for(uint8_t page) {
+  switch (page) {
+    case SCR_TGS2611_V: return N_TGS2611 ? (uint8_t)N_TGS2611 : 1;
+    case SCR_TGS2616_V: return N_TGS2616 ? (uint8_t)N_TGS2616 : 1;
+    case SCR_CO2:       return N_SCD4X  ? (uint8_t)N_SCD4X  : 1;
+    case SCR_SHT45_RH:  return N_TRHP   ? (uint8_t)N_TRHP   : 1;
+    case SCR_TMP117_T:  return N_TRHP   ? (uint8_t)N_TRHP   : 1;
+    case SCR_LPS22DF_P: return N_TRHP   ? (uint8_t)N_TRHP   : 1;
+    default:            return 1;
+  }
+}
+
+/* NOT USED ANYMORE
 uint8_t screen_index = SCR_TIME;
 
 uint8_t scd4x_oled_idx   = 0;
 uint8_t trhp_oled_idx    = 0;     // used for SHT45 RH, TMP117 T, LPS22DF P
 uint8_t tgs2611_oled_idx = 0;
 uint8_t tgs2616_oled_idx = 0;
+*/
 
 static void oled_show_value_and_graph(const char* title, const char* value, const Spark& s) {
   if (!oled_present) return;
@@ -671,72 +689,73 @@ static void update_oled_if_due() {
     case SCR_CO2: {
       if (N_SCD4X == 0) break;
       char line[24];
-      float co2 = win_scd4x_co2[scd4x_oled_idx].mean();
-      if (win_scd4x_co2[scd4x_oled_idx].count) snprintf(line, sizeof(line), "%.0f ppm", co2);
+      float co2 = win_scd4x_co2[sub_idx].mean();
+      if (win_scd4x_co2[sub_idx].count) snprintf(line, sizeof(line), "%.0f ppm", co2);
       else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "SCD41 CO2 #%u", unsigned(scd4x_oled_idx+1));
-      oled_show_value_and_graph(title, line, hist_scd4x_co2[scd4x_oled_idx]);
-      scd4x_oled_idx = (scd4x_oled_idx + 1) % N_SCD4X;
+      char title[24]; snprintf(title, sizeof(title), "SCD41 CO2 #%u", unsigned(sub_idx+1));
+      oled_show_value_and_graph(title, line, hist_scd4x_co2[sub_idx]);
       break;
     }
 
     case SCR_SHT45_RH: {
       if (N_TRHP == 0) break;
       char line[24];
-      if (win_trhp_sht45_rh[trhp_oled_idx].count) snprintf(line, sizeof(line), "%.2f %%", win_trhp_sht45_rh[trhp_oled_idx].mean());
+      if (win_trhp_sht45_rh[sub_idx].count) snprintf(line, sizeof(line), "%.2f %%", win_trhp_sht45_rh[sub_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "SHT45 RH #%u", unsigned(trhp_oled_idx+1));
-      oled_show_value_and_graph(title, line, hist_trhp_rh[trhp_oled_idx]);
-      trhp_oled_idx = (trhp_oled_idx + 1) % N_TRHP;
+      char title[24]; snprintf(title, sizeof(title), "SHT45 RH #%u", unsigned(sub_idx+1));
+      oled_show_value_and_graph(title, line, hist_trhp_rh[sub_idx]);
       break;
     }
 
     case SCR_TMP117_T: {
       if (N_TRHP == 0) break;
       char line[24];
-      if (win_trhp_tmp117_t[trhp_oled_idx].count) snprintf(line, sizeof(line), "%.2f C", win_trhp_tmp117_t[trhp_oled_idx].mean());
+      if (win_trhp_tmp117_t[sub_idx].count) snprintf(line, sizeof(line), "%.2f C", win_trhp_tmp117_t[sub_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "TMP117 T #%u", unsigned(trhp_oled_idx+1));
-      oled_show_value_and_graph(title, line, hist_tmp117_t[trhp_oled_idx]);
-      trhp_oled_idx = (trhp_oled_idx + 1) % N_TRHP;
+      char title[24]; snprintf(title, sizeof(title), "TMP117 T #%u", unsigned(sub_idx+1));
+      oled_show_value_and_graph(title, line, hist_tmp117_t[sub_idx]);
       break;
     }
 
     case SCR_LPS22DF_P: {
       if (N_TRHP == 0) break;
       char line[24];
-      if (win_trhp_lps_p[trhp_oled_idx].count) snprintf(line, sizeof(line), "%.2f hPa", win_trhp_lps_p[trhp_oled_idx].mean());
+      if (win_trhp_lps_p[sub_idx].count) snprintf(line, sizeof(line), "%.2f hPa", win_trhp_lps_p[sub_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "LPS22DF P #%u", unsigned(trhp_oled_idx+1));
-      oled_show_value_and_graph(title, line, hist_lps22df_p[trhp_oled_idx]);
-      trhp_oled_idx = (trhp_oled_idx + 1) % N_TRHP;
+      char title[24]; snprintf(title, sizeof(title), "LPS22DF P #%u", unsigned(sub_idx+1));
+      oled_show_value_and_graph(title, line, hist_lps22df_p[sub_idx]);
       break;
     }
 
     case SCR_TGS2611_V: {
       if (N_TGS2611 == 0) break;
       char line[24];
-      if (win_tgs2611_v[tgs2611_oled_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2611_v[tgs2611_oled_idx].mean());
+      if (win_tgs2611_v[sub_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2611_v[sub_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "TGS2611 #%u", unsigned(tgs2611_oled_idx+1));
-      oled_show_value_and_graph(title, line, hist_tgs2611_v[tgs2611_oled_idx]);
-      tgs2611_oled_idx = (tgs2611_oled_idx + 1) % N_TGS2611;
+      char title[24]; snprintf(title, sizeof(title), "TGS2611 CH4 #%u", unsigned(sub_idx+1));
+      oled_show_value_and_graph(title, line, hist_tgs2611_v[sub_idx]);
       break;
     }
 
     case SCR_TGS2616_V: {
       if (N_TGS2616 == 0) break;
       char line[24];
-      if (win_tgs2616_v[tgs2616_oled_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2616_v[tgs2616_oled_idx].mean());
+      if (win_tgs2616_v[sub_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2616_v[sub_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "TGS2616 #%u", unsigned(tgs2616_oled_idx+1));
-      oled_show_value_and_graph(title, line, hist_tgs2616_v[tgs2616_oled_idx]);
-      tgs2616_oled_idx = (tgs2616_oled_idx + 1) % N_TGS2616;
+      char title[24]; snprintf(title, sizeof(title), "TGS2616 H2 #%u", unsigned(sub_idx+1));
+      oled_show_value_and_graph(title, line, hist_tgs2616_v[sub_idx]);
       break;
     }
 
   }
-  screen_index = (screen_index + 1) % SCR_COUNT;
+  // advance sub-page; if finished this group, go to next main page
+  sub_idx++;
+  if (sub_idx >= subcount_for(screen_index)) {
+    sub_idx = 0;
+    screen_index = static_cast<ScreenPage>(
+                 (static_cast<uint8_t>(screen_index) + 1) % SCR_COUNT
+               );
+  }
 }
 
 namespace {
