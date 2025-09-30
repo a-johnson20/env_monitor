@@ -100,10 +100,6 @@ struct RunningAvg {
   inline void reset() { sum = 0.0; count = 0; }
 };
 
-struct WindowAverages {
-  RunningAvg sht45_t, sht45_rh, tmp117_t, lps22df_t, lps22df_p, tgs2611_raw, tgs2611_v, tgs2616_raw, tgs2616_v;
-} win;
-
 // Per-probe running windows (counts match config.hpp channel lists)
 constexpr size_t N_SCD4X = Mux::SCD4x.size();
 constexpr size_t N_TRHP  = Mux::TRHP.size();
@@ -895,28 +891,21 @@ void loop() {
 
       readings.sht45.valid = false;
       if (sht45_measure(readings.sht45) && readings.sht45.valid) {
-        // per-station
         win_trhp_sht45_t[i].add(readings.sht45.temp);
         win_trhp_sht45_rh[i].add(readings.sht45.rh);
-        // combined
-        win.sht45_t.add(readings.sht45.temp);
-        win.sht45_rh.add(readings.sht45.rh);
       }
 
       readings.tmp117.valid = false;
       if (tmp117_measure(readings.tmp117) && readings.tmp117.valid) {
         win_trhp_tmp117_t[i].add(readings.tmp117.temp);
-        win.tmp117_t.add(readings.tmp117.temp);
       }
 
       if (lps22df_read_with_autorecover(lps22df_nodes[i])) {
         if (lps22df_nodes[i].p_ready) {
           win_trhp_lps_p[i].add(lps22df_nodes[i].pressure);
-          win.lps22df_p.add(lps22df_nodes[i].pressure);
         }
         if (lps22df_nodes[i].t_ready) {
           win_trhp_lps_t[i].add(lps22df_nodes[i].temp);
-          win.lps22df_t.add(lps22df_nodes[i].temp);
         }
       }
 
@@ -936,15 +925,8 @@ void loop() {
         readings.ads.raw   = raw;
         readings.ads.volts = raw * ADS1113_LSB_V;
         readings.ads.valid = true;
-
-        // per-probe
         win_tgs2611_raw[i].add((float)raw);
         win_tgs2611_v[i].add(readings.ads.volts);
-
-        // keep combined behavior for CSV/OLED
-        win.tgs2611_raw.add((float)raw);
-        win.tgs2611_v.add(readings.ads.volts);
-
         Serial.printf("TGS2611_%u[ch=%u] raw=%d, V=%.5f\n",
                       unsigned(i+1), to_u8(ch), raw, readings.ads.volts);
       }
@@ -964,13 +946,8 @@ void loop() {
         readings.ads.raw   = raw;
         readings.ads.volts = raw * ADS1113_LSB_V;
         readings.ads.valid = true;
-
         win_tgs2616_raw[i].add((float)raw);
         win_tgs2616_v[i].add(readings.ads.volts);
-
-        win.tgs2616_raw.add((float)raw);
-        win.tgs2616_v.add(readings.ads.volts);
-
         Serial.printf("TGS2616_%u[ch=%u] raw=%d, V=%.5f\n",
                       unsigned(i+1), to_u8(ch), raw, readings.ads.volts);
       }
