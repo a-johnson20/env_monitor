@@ -1,3 +1,4 @@
+// Library includes
 #include <Arduino.h>
 #include <esp_idf_version.h>   // for ESP_IDF_VERSION / ESP_IDF_VERSION_VAL
 #include <Wire.h>
@@ -9,6 +10,10 @@
 #include <math.h> // For sparklines
 #include <FS.h>
 #include <SD_MMC.h>
+#include <array>
+
+// Project includes
+#include "config.hpp"
 
 // ---------- I2C buses ----------
 TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors stay on default Wire
@@ -25,10 +30,6 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define RTC_SCL         16
 
 #define LDO_Sensors_EN  41
-#define CH_TRHP         0    // SHT45 + TMP117 + LPS22DF
-#define CH_SCD4X        1    // SCD41/SCD40
-#define CH_TGS2611      4    // TGS2611 with ADS1113 + (future) digipot/EEPROM
-#define CH_TGS2616      5    // TGS2616 with ADS1113 + (future) digipot/EEPROM
 
 // ---------- Pump PWM (GPIO21) ----------
 #define PUMP_PWM_PIN     21
@@ -103,6 +104,42 @@ struct WindowAverages {
   RunningAvg sht45_t, sht45_rh, tmp117_t, lps22df_t, lps22df_p, tgs2611_raw, tgs2611_v, tgs2616_raw, tgs2616_v;
 } win;
 
+// Per-probe running windows (counts match config.hpp channel lists)
+constexpr size_t N_SCD4X = Mux::SCD4x.size();
+constexpr size_t N_TRHP  = Mux::TRHP.size();
+constexpr size_t N_TGS2611 = Mux::TGS2611.size();
+constexpr size_t N_TGS2616 = Mux::TGS2616.size();
+
+// Per-SCD4x instance readings (one struct per node)
+std::array<Scd4xReading, N_SCD4X> scd4x_nodes{};
+
+// Per-SCD4x running windows (one per SCD4x node)
+std::array<RunningAvg, N_SCD4X> win_scd4x_co2{};
+std::array<RunningAvg, N_SCD4X> win_scd4x_t{};
+std::array<RunningAvg, N_SCD4X> win_scd4x_rh{};
+
+// Per-TRHP station averages (one set per mux channel)
+std::array<Lps22dfReading, N_TRHP> lps22df_nodes{};
+
+std::array<RunningAvg, N_TRHP> win_trhp_sht45_t{};
+std::array<RunningAvg, N_TRHP> win_trhp_sht45_rh{};
+std::array<RunningAvg, N_TRHP> win_trhp_tmp117_t{};
+std::array<RunningAvg, N_TRHP> win_trhp_lps_p{};
+std::array<RunningAvg, N_TRHP> win_trhp_lps_t{};
+
+std::array<RunningAvg, N_TGS2611> win_tgs2611_raw{};
+std::array<RunningAvg, N_TGS2611> win_tgs2611_v{};
+std::array<RunningAvg, N_TGS2616> win_tgs2616_raw{};
+std::array<RunningAvg, N_TGS2616> win_tgs2616_v{};
+
+// --- SCD4x sync for aligned commits ---
+static const unsigned long SCD4X_SYNC_TIMEOUT_MS = 10000; // 10s fallback
+std::array<bool, N_SCD4X> scd4x_fresh{};  // new sample since last commit?
+unsigned long scd4x_tick_start_ms = 0;    // start time of the current averaging window
+static unsigned long no_scd_last_commit_ms = 0; // periodic backup commit for the no-SCD4x case
+
+
+
 // ---- 15-minute sparkline history ----
 static const uint16_t SPARK_W   = OLED_WIDTH;              // 128
 static const uint16_t SPARK_H   = OLED_HEIGHT - 16;        // graph area height (below header)
@@ -157,8 +194,12 @@ struct Spark {
   }
 };
 
-// One sparkline per screen/metric
-Spark hist_co2, hist_sht45_rh, hist_tmp117_t, hist_lps22df_p, hist_tgs2611_v, hist_tgs2616_v;
+// One sparkline per *sensor* for the displayed metrics
+std::array<Spark, N_SCD4X>   hist_scd4x_co2{};
+std::array<Spark, N_TRHP>    hist_trhp_rh{}, hist_tmp117_t{}, hist_lps22df_p{};
+std::array<Spark, N_TGS2611> hist_tgs2611_v{};
+std::array<Spark, N_TGS2616> hist_tgs2616_v{};
+
 unsigned long last_graph_sample_ms = 0;
 
 // ---------- Mux state ----------
@@ -291,29 +332,42 @@ static bool sd_begin() {
 }
 
 static void sd_ensure_header(const String& path) {
-  if (!sd_mounted) return;
-  if (!SD_MMC.exists(path)) {
-    File f = SD_MMC.open(path, FILE_WRITE);
-    if (f) {
-      f.println(
-        "Timestamp,"
-        "CO2,"
-        "SCD4x T,"
-        "SCD4x RH,"
-        "SHT45 T(avg),"
-        "SHT45 RH(avg),"
-        "TMP117 T(avg),"
-        "LPS22DF P(avg),"
-        "LPS22DF T(avg),"
-        "TGS2611 raw(avg),"
-        "TGS2611 V(avg),"
-        "TGS2616 raw(avg),"
-        "TGS2616 V(avg)"
-      );
-      f.close();
-    }
+  if (!sd_mounted || SD_MMC.exists(path)) return;
+  File f = SD_MMC.open(path, FILE_WRITE);
+  if (!f) return;
+
+  String h = "timestamp";
+
+  // SCD4x per-node averages
+  for (size_t i = 0; i < N_SCD4X; ++i) {
+    h += ",scd4x_"; h += String(i+1); h += "_co2_avg";
+    h += ",scd4x_"; h += String(i+1); h += "_t_avg";
+    h += ",scd4x_"; h += String(i+1); h += "_rh_avg";
   }
+
+  // TRHP per-station averages
+  for (size_t i = 0; i < N_TRHP; ++i) {
+    h += ",sht45_";  h += String(i+1); h += "_t_avg";
+    h += ",sht45_";  h += String(i+1); h += "_rh_avg";
+    h += ",tmp117_"; h += String(i+1); h += "_t_avg";
+    h += ",lps22df_";h += String(i+1); h += "_p_avg";
+    h += ",lps22df_";h += String(i+1); h += "_t_avg";
+  }
+
+  // TGS per-probe averages
+  for (size_t i = 0; i < N_TGS2611; ++i) {
+    h += ",tgs2611_"; h += String(i+1); h += "_raw_avg";
+    h += ",tgs2611_"; h += String(i+1); h += "_v_avg";
+  }
+  for (size_t i = 0; i < N_TGS2616; ++i) {
+    h += ",tgs2616_"; h += String(i+1); h += "_raw_avg";
+    h += ",tgs2616_"; h += String(i+1); h += "_v_avg";
+  }
+
+  f.println(h);
+  f.close();
 }
+
 
 static void sd_append_current_row() {
   if (!sd_mounted) return;
@@ -322,40 +376,144 @@ static void sd_append_current_row() {
   sd_ensure_header(path);
 
   char ts[24];
-  format_timestamp(ts, sizeof(ts));   // "YYYY-MM-DD HH:MM:SS"
-
-  // compute means or NA
-  float sht45_t   = win.sht45_t.count   ? win.sht45_t.mean()   : NAN;
-  float sht45_rh  = win.sht45_rh.count  ? win.sht45_rh.mean()  : NAN;
-  float tmp117_t  = win.tmp117_t.count  ? win.tmp117_t.mean()  : NAN;
-  float lps_p     = win.lps22df_p.count ? win.lps22df_p.mean() : NAN;
-  float lps_t     = win.lps22df_t.count ? win.lps22df_t.mean() : NAN;
-  float tgs2611_v = win.tgs2611_v.count ? win.tgs2611_v.mean() : NAN;
-  float tgs2616_v = win.tgs2616_v.count ? win.tgs2616_v.mean() : NAN;
-  float scd_t     = readings.scd4x.ready ? readings.scd4x.temp : NAN;
-  float scd_rh    = readings.scd4x.ready ? readings.scd4x.rh   : NAN;
-  int   tgs2611_r = win.tgs2611_raw.count ? (int)round(win.tgs2611_raw.mean()) : (int)NAN;
-  int   tgs2616_r = win.tgs2616_raw.count ? (int)round(win.tgs2616_raw.mean()) : (int)NAN;
+  format_timestamp(ts, sizeof(ts));
 
   File f = SD_MMC.open(path, FILE_APPEND);
   if (!f) { Serial.println("SD open for append failed"); return; }
 
-  f.print(ts);               f.print(',');
-  f.print(readings.scd4x.co2); f.print(',');
-  fprint_float_or_na(f, scd_t, 2);  f.print(',');
-  fprint_float_or_na(f, scd_rh, 2); f.print(',');
-  fprint_float_or_na(f, sht45_t, 2);f.print(',');
-  fprint_float_or_na(f, sht45_rh, 2);f.print(',');
-  fprint_float_or_na(f, tmp117_t, 2);f.print(',');
-  fprint_float_or_na(f, lps_p, 2);  f.print(',');
-  fprint_float_or_na(f, lps_t, 2);  f.print(',');
-  if (isnan((float)tgs2611_r)) f.print("NA"); else f.print(tgs2611_r); f.print(',');
-  fprint_float_or_na(f, tgs2611_v, 5); f.print(',');
-  if (isnan((float)tgs2616_r)) f.print("NA"); else f.print(tgs2616_r); f.print(',');
-  fprint_float_or_na(f, tgs2616_v, 5);
-  f.println();
+  f.print(ts);
 
-  f.close(); // flush to card each write
+  // SCD4x per-node
+  for (size_t i = 0; i < N_SCD4X; ++i) {
+    f.print(','); if (win_scd4x_co2[i].count) f.print(win_scd4x_co2[i].mean(), 0); else f.print("NA");
+    f.print(','); if (win_scd4x_t[i].count)   f.print(win_scd4x_t[i].mean(),   2); else f.print("NA");
+    f.print(','); if (win_scd4x_rh[i].count)  f.print(win_scd4x_rh[i].mean(),  2); else f.print("NA");
+  }
+
+  // TRHP per-station
+  for (size_t i = 0; i < N_TRHP; ++i) {
+    f.print(','); if (win_trhp_sht45_t[i].count) f.print(win_trhp_sht45_t[i].mean(), 2); else f.print("NA");
+    f.print(','); if (win_trhp_sht45_rh[i].count)f.print(win_trhp_sht45_rh[i].mean(),2); else f.print("NA");
+    f.print(','); if (win_trhp_tmp117_t[i].count)f.print(win_trhp_tmp117_t[i].mean(),2); else f.print("NA");
+    f.print(','); if (win_trhp_lps_p[i].count)   f.print(win_trhp_lps_p[i].mean(), 2);  else f.print("NA");
+    f.print(','); if (win_trhp_lps_t[i].count)   f.print(win_trhp_lps_t[i].mean(), 2);  else f.print("NA");
+  }
+
+  // TGS per-probe
+  for (size_t i = 0; i < N_TGS2611; ++i) {
+    f.print(','); if (win_tgs2611_raw[i].count) f.print(win_tgs2611_raw[i].mean(), 0); else f.print("NA");
+    f.print(','); if (win_tgs2611_v[i].count)   f.print(win_tgs2611_v[i].mean(),   5); else f.print("NA");
+  }
+  for (size_t i = 0; i < N_TGS2616; ++i) {
+    f.print(','); if (win_tgs2616_raw[i].count) f.print(win_tgs2616_raw[i].mean(), 0); else f.print("NA");
+    f.print(','); if (win_tgs2616_v[i].count)   f.print(win_tgs2616_v[i].mean(),   5); else f.print("NA");
+  }
+
+  f.println();
+  f.close();
+
+  // Reset ALL per-sensor windows after logging
+  for (auto& a : win_scd4x_co2) a.reset();
+  for (auto& a : win_scd4x_t)   a.reset();
+  for (auto& a : win_scd4x_rh)  a.reset();
+
+  for (auto& a : win_trhp_sht45_t) a.reset();
+  for (auto& a : win_trhp_sht45_rh) a.reset();
+  for (auto& a : win_trhp_tmp117_t) a.reset();
+  for (auto& a : win_trhp_lps_p) a.reset();
+  for (auto& a : win_trhp_lps_t) a.reset();
+
+  for (auto& a : win_tgs2611_raw) a.reset();
+  for (auto& a : win_tgs2611_v)   a.reset();
+  for (auto& a : win_tgs2616_raw) a.reset();
+  for (auto& a : win_tgs2616_v)   a.reset();
+}
+
+static void sample_graphs_if_due() {
+  unsigned long now = millis();
+  if (now - last_graph_sample_ms < GRAPH_SAMPLE_MS) return;
+  last_graph_sample_ms = now;
+
+  // SCD4x (per node)
+  for (size_t i=0;i<N_SCD4X;i++) {
+    bool ok = win_scd4x_co2[i].count > 0;
+    float v = win_scd4x_co2[i].mean();
+    hist_scd4x_co2[i].push(v, ok);
+  }
+
+  // TRHP per station
+  for (size_t i=0;i<N_TRHP;i++) {
+    hist_trhp_rh[i].push(     win_trhp_sht45_rh[i].mean(), win_trhp_sht45_rh[i].count>0);
+    hist_tmp117_t[i].push(    win_trhp_tmp117_t[i].mean(), win_trhp_tmp117_t[i].count>0);
+    hist_lps22df_p[i].push(   win_trhp_lps_p[i].mean(),    win_trhp_lps_p[i].count>0);
+  }
+
+  // TGS per probe
+  for (size_t i=0;i<N_TGS2611;i++) {
+    hist_tgs2611_v[i].push(win_tgs2611_v[i].mean(), win_tgs2611_v[i].count>0);
+  }
+  for (size_t i=0;i<N_TGS2616;i++) {
+    hist_tgs2616_v[i].push(win_tgs2616_v[i].mean(), win_tgs2616_v[i].count>0);
+  }
+
+}
+
+static void commit_and_reset_all_windows() {
+  // 1) Serial per-sensor average prints (already in your loop — moved here)
+  Serial.print("SCD4x avgs: ");
+  for (size_t j=0;j<N_SCD4X;j++) {
+    Serial.printf("#%u CO2=", unsigned(j+1));
+    if (win_scd4x_co2[j].count) Serial.printf("%.0f", win_scd4x_co2[j].mean()); else Serial.print("NA");
+    Serial.print("ppm T=");
+    if (win_scd4x_t[j].count)   Serial.printf("%.2f", win_scd4x_t[j].mean());   else Serial.print("NA");
+    Serial.print("C RH=");
+    if (win_scd4x_rh[j].count)  Serial.printf("%.2f", win_scd4x_rh[j].mean());  else Serial.print("NA");
+    Serial.print("%");
+    Serial.print(j+1==N_SCD4X? "\n" : " | ");
+  }
+
+  Serial.print("TRHP avgs: ");
+  for (size_t j=0;j<N_TRHP;j++) {
+    Serial.printf("#%u SHT45(T=", unsigned(j+1));
+    if (win_trhp_sht45_t[j].count) Serial.printf("%.2f", win_trhp_sht45_t[j].mean()); else Serial.print("NA");
+    Serial.print("C RH=");
+    if (win_trhp_sht45_rh[j].count) Serial.printf("%.2f", win_trhp_sht45_rh[j].mean()); else Serial.print("NA");
+    Serial.print("%) TMP117(T=");
+    if (win_trhp_tmp117_t[j].count) Serial.printf("%.2f", win_trhp_tmp117_t[j].mean()); else Serial.print("NA");
+    Serial.print("C) LPS22DF(P=");
+    if (win_trhp_lps_p[j].count)    Serial.printf("%.2f", win_trhp_lps_p[j].mean());    else Serial.print("NA");
+    Serial.print("hPa T=");
+    if (win_trhp_lps_t[j].count)    Serial.printf("%.2f", win_trhp_lps_t[j].mean());    else Serial.print("NA");
+    Serial.print("C)");
+    Serial.print(j+1==N_TRHP? "\n" : " | ");
+  }
+
+  Serial.print("TGS2611 avgs: ");
+  for (size_t j=0;j<N_TGS2611;j++) {
+    Serial.printf("#%u raw=", unsigned(j+1));
+    if (win_tgs2611_raw[j].count) Serial.printf("%.0f", win_tgs2611_raw[j].mean()); else Serial.print("NA");
+    Serial.print(" V=");
+    if (win_tgs2611_v[j].count)   Serial.printf("%.5f", win_tgs2611_v[j].mean());   else Serial.print("NA");
+    Serial.print(j+1==N_TGS2611? "\n" : " | ");
+  }
+
+  Serial.print("TGS2616 avgs: ");
+  for (size_t j=0;j<N_TGS2616;j++) {
+    Serial.printf("#%u raw=", unsigned(j+1));
+    if (win_tgs2616_raw[j].count) Serial.printf("%.0f", win_tgs2616_raw[j].mean()); else Serial.print("NA");
+    Serial.print(" V=");
+    if (win_tgs2616_v[j].count)   Serial.printf("%.5f", win_tgs2616_v[j].mean());   else Serial.print("NA");
+    Serial.print(j+1==N_TGS2616? "\n" : " | ");
+  }
+
+  // 2) Log CSV (uses per-sensor windows)
+  sd_append_current_row();  // already writes per-sensor averages and NAs
+
+  // 3) Push one OLED sample now so the sparkline aligns with the commit (optional but nice)
+  sample_graphs_if_due();  // or make a sample_graphs_now() that doesn’t time-check
+
+  // 4) Reset the scd4x_fresh flags
+  for (auto& f : scd4x_fresh) f = false;
 }
 
 // ---------- SCD4x ----------
@@ -467,6 +625,11 @@ unsigned long last_screen_ms = 0;
 const unsigned long SCREEN_PERIOD_MS = 2000;
 uint8_t screen_index = SCR_TIME;
 
+uint8_t scd4x_oled_idx   = 0;
+uint8_t trhp_oled_idx    = 0;     // used for SHT45 RH, TMP117 T, LPS22DF P
+uint8_t tgs2611_oled_idx = 0;
+uint8_t tgs2616_oled_idx = 0;
+
 static void oled_show_value_and_graph(const char* title, const char* value, const Spark& s) {
   if (!oled_present) return;
   display.clearDisplay();
@@ -502,56 +665,77 @@ static void update_oled_if_due() {
 
   char line[48];
   switch (screen_index) {
-    case SCR_TIME:
+    case SCR_TIME: {
+    char line[48];
     format_timestamp_no_sec(line, sizeof(line));
     oled_show_text("Date & Time", line);
     break;
+    }
 
     case SCR_CO2: {
+      if (N_SCD4X == 0) break;
       char line[24];
-      if (readings.scd4x.ready) snprintf(line, sizeof(line), "%u ppm", readings.scd4x.co2);
+      float co2 = win_scd4x_co2[scd4x_oled_idx].mean();
+      if (win_scd4x_co2[scd4x_oled_idx].count) snprintf(line, sizeof(line), "%.0f ppm", co2);
       else snprintf(line, sizeof(line), "NA");
-      oled_show_value_and_graph("SCD41 CO2", line, hist_co2);
+      char title[24]; snprintf(title, sizeof(title), "SCD41 CO2 #%u", unsigned(scd4x_oled_idx+1));
+      oled_show_value_and_graph(title, line, hist_scd4x_co2[scd4x_oled_idx]);
+      scd4x_oled_idx = (scd4x_oled_idx + 1) % N_SCD4X;
       break;
     }
 
     case SCR_SHT45_RH: {
+      if (N_TRHP == 0) break;
       char line[24];
-      if (win.sht45_rh.count) snprintf(line, sizeof(line), "%.2f %%", win.sht45_rh.mean());
+      if (win_trhp_sht45_rh[trhp_oled_idx].count) snprintf(line, sizeof(line), "%.2f %%", win_trhp_sht45_rh[trhp_oled_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      oled_show_value_and_graph("SHT45 RH", line, hist_sht45_rh);
+      char title[24]; snprintf(title, sizeof(title), "SHT45 RH #%u", unsigned(trhp_oled_idx+1));
+      oled_show_value_and_graph(title, line, hist_trhp_rh[trhp_oled_idx]);
+      trhp_oled_idx = (trhp_oled_idx + 1) % N_TRHP;
       break;
     }
 
     case SCR_TMP117_T: {
+      if (N_TRHP == 0) break;
       char line[24];
-      if (win.tmp117_t.count) snprintf(line, sizeof(line), "%.2f C", win.tmp117_t.mean());
+      if (win_trhp_tmp117_t[trhp_oled_idx].count) snprintf(line, sizeof(line), "%.2f C", win_trhp_tmp117_t[trhp_oled_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      oled_show_value_and_graph("TMP117 temp", line, hist_tmp117_t);
+      char title[24]; snprintf(title, sizeof(title), "TMP117 T #%u", unsigned(trhp_oled_idx+1));
+      oled_show_value_and_graph(title, line, hist_tmp117_t[trhp_oled_idx]);
+      trhp_oled_idx = (trhp_oled_idx + 1) % N_TRHP;
       break;
     }
 
     case SCR_LPS22DF_P: {
+      if (N_TRHP == 0) break;
       char line[24];
-      if (win.lps22df_p.count) snprintf(line, sizeof(line), "%.2f hPa", win.lps22df_p.mean());
+      if (win_trhp_lps_p[trhp_oled_idx].count) snprintf(line, sizeof(line), "%.2f hPa", win_trhp_lps_p[trhp_oled_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      oled_show_value_and_graph("LPS22DF pressure", line, hist_lps22df_p);
+      char title[24]; snprintf(title, sizeof(title), "LPS22DF P #%u", unsigned(trhp_oled_idx+1));
+      oled_show_value_and_graph(title, line, hist_lps22df_p[trhp_oled_idx]);
+      trhp_oled_idx = (trhp_oled_idx + 1) % N_TRHP;
       break;
     }
 
     case SCR_TGS2611_V: {
+      if (N_TGS2611 == 0) break;
       char line[24];
-      if (win.tgs2611_v.count) snprintf(line, sizeof(line), "%.5f V", win.tgs2611_v.mean());
+      if (win_tgs2611_v[tgs2611_oled_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2611_v[tgs2611_oled_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      oled_show_value_and_graph("TGS2611 CH4", line, hist_tgs2611_v);
+      char title[24]; snprintf(title, sizeof(title), "TGS2611 #%u", unsigned(tgs2611_oled_idx+1));
+      oled_show_value_and_graph(title, line, hist_tgs2611_v[tgs2611_oled_idx]);
+      tgs2611_oled_idx = (tgs2611_oled_idx + 1) % N_TGS2611;
       break;
     }
 
     case SCR_TGS2616_V: {
+      if (N_TGS2616 == 0) break;
       char line[24];
-      if (win.tgs2616_v.count) snprintf(line, sizeof(line), "%.5f V", win.tgs2616_v.mean());
+      if (win_tgs2616_v[tgs2616_oled_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2616_v[tgs2616_oled_idx].mean());
       else snprintf(line, sizeof(line), "NA");
-      oled_show_value_and_graph("TGS2616 H2", line, hist_tgs2616_v);
+      char title[24]; snprintf(title, sizeof(title), "TGS2616 #%u", unsigned(tgs2616_oled_idx+1));
+      oled_show_value_and_graph(title, line, hist_tgs2616_v[tgs2616_oled_idx]);
+      tgs2616_oled_idx = (tgs2616_oled_idx + 1) % N_TGS2616;
       break;
     }
 
@@ -559,20 +743,9 @@ static void update_oled_if_due() {
   screen_index = (screen_index + 1) % SCR_COUNT;
 }
 
-static void sample_graphs_if_due() {
-  unsigned long now = millis();
-  if (now - last_graph_sample_ms < GRAPH_SAMPLE_MS) return;
-  last_graph_sample_ms = now;
-
-  // Use current window means (nice smoothing). If no data → push invalid.
-  hist_co2.push(           readings.scd4x.co2,            readings.scd4x.ready);
-  hist_sht45_rh.push(      win.sht45_rh.mean(),           win.sht45_rh.count > 0);
-  hist_tmp117_t.push(      win.tmp117_t.mean(),           win.tmp117_t.count > 0);
-  hist_lps22df_p.push(     win.lps22df_p.mean(),          win.lps22df_p.count > 0);
-  hist_tgs2611_v.push(     win.tgs2611_v.mean(),          win.tgs2611_v.count > 0);
-  hist_tgs2616_v.push(     win.tgs2616_v.mean(),          win.tgs2616_v.count > 0);
+namespace {
+  static inline uint8_t to_u8(Mux::Ch ch) { return static_cast<uint8_t>(ch); }
 }
-
 
 void setup() {
   Serial.begin(115200);
@@ -615,22 +788,27 @@ void setup() {
   }
   Serial.println("TCA9548A connected");
 
-  // Bind SCD4x driver and fetch serial (on CH_SCD4X)
+  // Bind SCD4x driver once
   scd4x.begin(Wire, SCD41_I2C_ADDR_62);
-  if (select_exclusive(CH_SCD4X)) {
+
+  // Print SCD4x serial numbers
+  for (auto ch : Mux::SCD4x) if (select_exclusive(to_u8(ch))) {
     uint64_t sn = 0;
     if (scd4x.getSerialNumber(sn) == NO_ERROR) {
-      Serial.print("SCD4x serial: ");
-      Serial.print((uint32_t)(sn >> 32), HEX);
-      Serial.println((uint32_t)(sn & 0xFFFFFFFF), HEX);
+      Serial.printf("SCD4x[ch=%u] serial: %08X%08X\n",
+                    to_u8(ch), (uint32_t)(sn >> 32), (uint32_t)(sn & 0xFFFFFFFF));
     }
   }
 
-  // Init LPS22DF on its own channel
-  if (select_exclusive(CH_TRHP)) {
-    if (!lps22df_begin_on_selected(readings.lps22df)) {
-      Serial.println("LPS22DF init failed");
+  // Init LPS22DF on every configured TRHP channel
+  size_t i = 0;
+  for (auto ch : Mux::TRHP) {
+    if (select_exclusive(to_u8(ch))) {
+      if (!lps22df_begin_on_selected(lps22df_nodes[i])) {
+        Serial.printf("LPS22DF init failed on ch %u\n", to_u8(ch));
+      }
     }
+    ++i;
   }
 
   if (!sd_begin()) {
@@ -642,94 +820,165 @@ void setup() {
 }
 
 void loop() {
-  // --------- SCD4x on channel 1 ---------
-  if (select_exclusive(CH_SCD4X)) {
-    scd4x_ensure_running(readings.scd4x);
 
-    // When SCD4x has a fresh sample (~every 5 s), print it + the averaged window,
-    // then clear the window accumulators.
-    if (scd4x_read_if_ready(readings.scd4x)) {
-      // Single, combined line with timestamp + all readings
-      print_timestamp();
-      Serial.print("CO2: ");     Serial.print(readings.scd4x.co2);      Serial.print("ppm, ");
-      Serial.print("SCD4x T: "); Serial.print(readings.scd4x.temp, 2);  Serial.print("°C, ");
-      Serial.print("SCD4x RH: ");Serial.print(readings.scd4x.rh, 2);    Serial.print("%, ");
+  // --------- SCD4x ---------
+  {
+    size_t i = 0;
+    for (auto ch : Mux::SCD4x) {
+      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
 
-      // Window averages since previous SCD4x read
-      print_avg_kv("SHT45 T(avg): ",    win.sht45_t,   2, "°C");
-      print_avg_kv("SHT45 RH(avg): ",   win.sht45_rh,  2, "%");
-      print_avg_kv("TMP117 T(avg): ",   win.tmp117_t,  2, "°C");
-      print_avg_kv("LPS22DF P(avg): ",  win.lps22df_p, 2, "hPa");
-      print_avg_kv("LPS22DF T(avg): ",  win.lps22df_t, 2, "°C");
-      print_avg_kv("TGS2611 raw(avg): ",    win.tgs2611_raw,   0, "", true);
-      print_avg_kv("TGS2611 V(avg): ",      win.tgs2611_v,     5, "V", false);
-      print_avg_kv("TGS2616 raw(avg): ",    win.tgs2616_raw,   0, "", true);
-      print_avg_kv("TGS2616 V(avg): ",      win.tgs2616_v,     5, "V", false);
-      Serial.println();
+      // Ensure running (sets .present if detected)
+      scd4x_ensure_running(scd4x_nodes[i]);
 
-      sd_append_current_row(); // Write to SD card
+      // Try read
+      if (scd4x_read_if_ready(scd4x_nodes[i])) {
+        // per-node windows
+        win_scd4x_co2[i].add((float)scd4x_nodes[i].co2);
+        win_scd4x_t[i].add(scd4x_nodes[i].temp);
+        win_scd4x_rh[i].add(scd4x_nodes[i].rh);
 
-      // Reset window for the next ~5 s span
-      win.sht45_t.reset(); 
-      win.sht45_rh.reset(); 
-      win.tmp117_t.reset();
-      win.lps22df_p.reset(); 
-      win.lps22df_t.reset(); 
-      win.tgs2611_raw.reset(); 
-      win.tgs2611_v.reset();
-      win.tgs2616_raw.reset(); 
-      win.tgs2616_v.reset();
+        scd4x_fresh[i] = true;
+        if (scd4x_tick_start_ms == 0) scd4x_tick_start_ms = millis(); // start on first fresh
+
+        // optional per-node debug
+        readings.scd4x = scd4x_nodes[i];
+        print_timestamp();
+        Serial.printf("SCD4x#%u CO2:%u ppm T:%.2f C RH:%.2f %%\n",
+                      unsigned(i+1), readings.scd4x.co2, readings.scd4x.temp, readings.scd4x.rh);
+      }
+
+      ++i;
+    }
+
+    // --- decide if we should commit this window ---
+    // How many SCDs are actually present right now?
+    size_t scd_present_count = 0;
+    for (size_t k=0; k<N_SCD4X; ++k) if (scd4x_nodes[k].present) scd_present_count++;
+
+    // If at least one SCD is present but none have ever gone fresh, start the timeout now
+    if (scd_present_count > 0 && scd4x_tick_start_ms == 0) scd4x_tick_start_ms = millis();
+
+    bool all_ready = true;
+    for (size_t k=0; k<N_SCD4X; ++k) if (scd4x_nodes[k].present && !scd4x_fresh[k]) { all_ready = false; break; }
+
+    const bool timeout_hit =
+        (scd4x_tick_start_ms != 0) &&
+        (millis() - scd4x_tick_start_ms >= SCD4X_SYNC_TIMEOUT_MS);
+
+    bool should_commit = false;
+    if (scd_present_count > 0) {
+      // Normal: wait for all present SCDs, or timeout if one is lagging/broken
+      should_commit = all_ready || timeout_hit;
+    } else {
+      // No connected SCDs at all: commit every 10s using a separate timer
+      if (millis() - no_scd_last_commit_ms >= 10000UL) {
+        no_scd_last_commit_ms = millis();
+        should_commit = true;
+      }
+    }
+
+    if (should_commit) {
+      // (optional) push a sparkline sample right now so graphs move at commit time
+      // sample_graphs_now();  // make this call push unconditionally without the time check
+
+      commit_and_reset_all_windows();   // prints Serial, writes CSV, resets all per-sensor RunningAvg and scd4x_fresh[]
+      scd4x_tick_start_ms = 0;          // reset window timer
     }
   }
 
-  // --------- T/RH/P on channel 0 ---------
-  if (select_exclusive(CH_TRHP)) {
-    readings.sht45.valid = false;
-    if (sht45_measure(readings.sht45) && readings.sht45.valid) {
-      win.sht45_t.add(readings.sht45.temp);
-      win.sht45_rh.add(readings.sht45.rh);
-    }
 
-    readings.tmp117.valid = false;
-    if (tmp117_measure(readings.tmp117) && readings.tmp117.valid) {
-      win.tmp117_t.add(readings.tmp117.temp);
-    }
+  // --------- T/RH/P (SHT45/TMP117/LPS22DF) ---------
+  {
+    size_t i = 0;
+    for (auto ch : Mux::TRHP) {
+      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
 
-    if (lps22df_read_with_autorecover(readings.lps22df)) {
-      if (readings.lps22df.p_ready) win.lps22df_p.add(readings.lps22df.pressure);
-      if (readings.lps22df.t_ready) win.lps22df_t.add(readings.lps22df.temp);
+      readings.sht45.valid = false;
+      if (sht45_measure(readings.sht45) && readings.sht45.valid) {
+        // per-station
+        win_trhp_sht45_t[i].add(readings.sht45.temp);
+        win_trhp_sht45_rh[i].add(readings.sht45.rh);
+        // combined
+        win.sht45_t.add(readings.sht45.temp);
+        win.sht45_rh.add(readings.sht45.rh);
+      }
+
+      readings.tmp117.valid = false;
+      if (tmp117_measure(readings.tmp117) && readings.tmp117.valid) {
+        win_trhp_tmp117_t[i].add(readings.tmp117.temp);
+        win.tmp117_t.add(readings.tmp117.temp);
+      }
+
+      if (lps22df_read_with_autorecover(lps22df_nodes[i])) {
+        if (lps22df_nodes[i].p_ready) {
+          win_trhp_lps_p[i].add(lps22df_nodes[i].pressure);
+          win.lps22df_p.add(lps22df_nodes[i].pressure);
+        }
+        if (lps22df_nodes[i].t_ready) {
+          win_trhp_lps_t[i].add(lps22df_nodes[i].temp);
+          win.lps22df_t.add(lps22df_nodes[i].temp);
+        }
+      }
+
+      ++i;
     }
   }
 
-  // --------- TGS2611 on channel 4 ---------
-  if (select_exclusive(CH_TGS2611)) {
-    readings.ads.valid = false;
-    int16_t raw;
-    if (ads1113_single_shot(raw)) {
-      readings.ads.raw = raw;
-      readings.ads.volts = raw * ADS1113_LSB_V;
-      readings.ads.valid = true;
-      win.tgs2611_raw.add((float)raw);
-      win.tgs2611_v.add(readings.ads.volts);
+  // --------- TGS2611 ---------
+  {
+    size_t i = 0;
+    for (auto ch : Mux::TGS2611) {
+      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
+
+      readings.ads.valid = false;
+      int16_t raw;
+      if (ads1113_single_shot(raw)) {
+        readings.ads.raw   = raw;
+        readings.ads.volts = raw * ADS1113_LSB_V;
+        readings.ads.valid = true;
+
+        // per-probe
+        win_tgs2611_raw[i].add((float)raw);
+        win_tgs2611_v[i].add(readings.ads.volts);
+
+        // keep combined behavior for CSV/OLED
+        win.tgs2611_raw.add((float)raw);
+        win.tgs2611_v.add(readings.ads.volts);
+
+        Serial.printf("TGS2611_%u[ch=%u] raw=%d, V=%.5f\n",
+                      unsigned(i+1), to_u8(ch), raw, readings.ads.volts);
+      }
+      ++i;
     }
   }
 
-  // --------- TGS2616 on channel 5 ---------
-  if (select_exclusive(CH_TGS2616)) {
-    readings.ads.valid = false;
-    int16_t raw;
-    if (ads1113_single_shot(raw)) {
-      readings.ads.raw = raw;
-      readings.ads.volts = raw * ADS1113_LSB_V;
-      readings.ads.valid = true;
-      win.tgs2616_raw.add((float)raw);
-      win.tgs2616_v.add(readings.ads.volts);
+  // --------- TGS2616 ---------
+  {
+    size_t i = 0;
+    for (auto ch : Mux::TGS2616) {
+      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
+
+      readings.ads.valid = false;
+      int16_t raw;
+      if (ads1113_single_shot(raw)) {
+        readings.ads.raw   = raw;
+        readings.ads.volts = raw * ADS1113_LSB_V;
+        readings.ads.valid = true;
+
+        win_tgs2616_raw[i].add((float)raw);
+        win_tgs2616_v[i].add(readings.ads.volts);
+
+        win.tgs2616_raw.add((float)raw);
+        win.tgs2616_v.add(readings.ads.volts);
+
+        Serial.printf("TGS2616_%u[ch=%u] raw=%d, V=%.5f\n",
+                      unsigned(i+1), to_u8(ch), raw, readings.ads.volts);
+      }
+      ++i;
     }
   }
 
   sample_graphs_if_due();
-  // OLED rotates every 2 seconds with latest available values
   update_oled_if_due();
-
-  delay(100); // light pacing
+  delay(100);
 }
