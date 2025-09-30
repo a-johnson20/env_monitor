@@ -835,12 +835,6 @@ void loop() {
 
         scd4x_fresh[i] = true;
         if (scd4x_tick_start_ms == 0) scd4x_tick_start_ms = millis(); // start on first fresh
-
-        // optional per-node debug
-        readings.scd4x = scd4x_nodes[i];
-        print_timestamp();
-        Serial.printf("SCD4x#%u CO2:%u ppm T:%.2f C RH:%.2f %%\n",
-                      unsigned(i+1), readings.scd4x.co2, readings.scd4x.temp, readings.scd4x.rh);
       }
 
       ++i;
@@ -927,8 +921,6 @@ void loop() {
         readings.ads.valid = true;
         win_tgs2611_raw[i].add((float)raw);
         win_tgs2611_v[i].add(readings.ads.volts);
-        Serial.printf("TGS2611_%u[ch=%u] raw=%d, V=%.5f\n",
-                      unsigned(i+1), to_u8(ch), raw, readings.ads.volts);
       }
       ++i;
     }
@@ -948,8 +940,6 @@ void loop() {
         readings.ads.valid = true;
         win_tgs2616_raw[i].add((float)raw);
         win_tgs2616_v[i].add(readings.ads.volts);
-        Serial.printf("TGS2616_%u[ch=%u] raw=%d, V=%.5f\n",
-                      unsigned(i+1), to_u8(ch), raw, readings.ads.volts);
       }
       ++i;
     }
