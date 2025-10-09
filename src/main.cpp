@@ -407,22 +407,6 @@ static void sd_append_current_row() {
 
   f.println();
   f.close();
-
-  // Reset ALL per-sensor windows after logging
-  for (auto& a : win_scd4x_co2) a.reset();
-  for (auto& a : win_scd4x_t)   a.reset();
-  for (auto& a : win_scd4x_rh)  a.reset();
-
-  for (auto& a : win_trhp_sht45_t) a.reset();
-  for (auto& a : win_trhp_sht45_rh) a.reset();
-  for (auto& a : win_trhp_tmp117_t) a.reset();
-  for (auto& a : win_trhp_lps_p) a.reset();
-  for (auto& a : win_trhp_lps_t) a.reset();
-
-  for (auto& a : win_tgs2611_raw) a.reset();
-  for (auto& a : win_tgs2611_v)   a.reset();
-  for (auto& a : win_tgs2616_raw) a.reset();
-  for (auto& a : win_tgs2616_v)   a.reset();
 }
 
 static void sample_graphs_if_due() {
@@ -455,7 +439,7 @@ static void sample_graphs_if_due() {
 }
 
 static void commit_and_reset_all_windows() {
-  // 1) Serial per-sensor average prints (already in your loop — moved here)
+  // Serial per-sensor average prints
   Serial.print("SCD4x avgs: ");
   for (size_t j=0;j<N_SCD4X;j++) {
     Serial.printf("#%u CO2=", unsigned(j+1));
@@ -502,13 +486,29 @@ static void commit_and_reset_all_windows() {
     Serial.print(j+1==N_TGS2616? "\n" : " | ");
   }
 
-  // 2) Log CSV (uses per-sensor windows)
+  // Log CSV (uses per-sensor windows)
   sd_append_current_row();  // already writes per-sensor averages and NAs
 
-  // 3) Push one OLED sample now so the sparkline aligns with the commit (optional but nice)
+  // Push one OLED sample now so the sparkline aligns with the commit (optional but nice)
   sample_graphs_if_due();  // or make a sample_graphs_now() that doesn’t time-check
 
-  // 4) Reset the scd4x_fresh flags
+  // Reset ALL per-sensor windows after logging
+  for (auto& a : win_scd4x_co2) a.reset();
+  for (auto& a : win_scd4x_t)   a.reset();
+  for (auto& a : win_scd4x_rh)  a.reset();
+
+  for (auto& a : win_trhp_sht45_t) a.reset();
+  for (auto& a : win_trhp_sht45_rh) a.reset();
+  for (auto& a : win_trhp_tmp117_t) a.reset();
+  for (auto& a : win_trhp_lps_p) a.reset();
+  for (auto& a : win_trhp_lps_t) a.reset();
+
+  for (auto& a : win_tgs2611_raw) a.reset();
+  for (auto& a : win_tgs2611_v)   a.reset();
+  for (auto& a : win_tgs2616_raw) a.reset();
+  for (auto& a : win_tgs2616_v)   a.reset();
+
+  // Reset the scd4x_fresh flags
   for (auto& f : scd4x_fresh) f = false;
 }
 
