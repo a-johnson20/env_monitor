@@ -71,6 +71,7 @@ bool rtc_present = false;
 struct Scd4xReading {
   bool present = false, started = false, ready = false;
   unsigned long started_at_ms = 0;
+  unsigned long last_ok_ms = 0; // timestamp of last good read - to check freshness
   uint16_t co2 = 0;
   float temp = NAN, rh = NAN;
 };
@@ -109,11 +110,6 @@ constexpr size_t N_TGS2616 = Mux::TGS2616.size();
 // Per-SCD4x instance readings (one struct per node)
 std::array<Scd4xReading, N_SCD4X> scd4x_nodes{};
 
-// Per-SCD4x running windows (one per SCD4x node)
-std::array<RunningAvg, N_SCD4X> win_scd4x_co2{};
-std::array<RunningAvg, N_SCD4X> win_scd4x_t{};
-std::array<RunningAvg, N_SCD4X> win_scd4x_rh{};
-
 // Per-TRHP station averages (one set per mux channel)
 std::array<Lps22dfReading, N_TRHP> lps22df_nodes{};
 
@@ -130,6 +126,7 @@ std::array<RunningAvg, N_TGS2616> win_tgs2616_v{};
 
 // --- SCD4x sync for aligned commits ---
 static const unsigned long SCD4X_SYNC_TIMEOUT_MS = 10000; // 10s fallback
+constexpr unsigned long SCD_FRESH_MS = 10000UL;  // 10s limit for freshness
 std::array<bool, N_SCD4X> scd4x_fresh{};  // new sample since last commit?
 unsigned long scd4x_tick_start_ms = 0;    // start time of the current averaging window
 static unsigned long no_scd_last_commit_ms = 0; // periodic backup commit for the no-SCD4x case
@@ -334,11 +331,11 @@ static void sd_ensure_header(const String& path) {
 
   String h = "timestamp";
 
-  // SCD4x per-node averages
+  // SCD4x
   for (size_t i = 0; i < N_SCD4X; ++i) {
-    h += ",scd4x_"; h += String(i+1); h += "_co2_avg";
-    h += ",scd4x_"; h += String(i+1); h += "_t_avg";
-    h += ",scd4x_"; h += String(i+1); h += "_rh_avg";
+    h += ",scd4x_"; h += String(i+1); h += "_co2";
+    h += ",scd4x_"; h += String(i+1); h += "_t";
+    h += ",scd4x_"; h += String(i+1); h += "_rh";
   }
 
   // TRHP per-station averages
@@ -381,9 +378,11 @@ static void sd_append_current_row() {
 
   // SCD4x per-node
   for (size_t i = 0; i < N_SCD4X; ++i) {
-    f.print(','); if (win_scd4x_co2[i].count) f.print(win_scd4x_co2[i].mean(), 0); else f.print("NA");
-    f.print(','); if (win_scd4x_t[i].count)   f.print(win_scd4x_t[i].mean(),   2); else f.print("NA");
-    f.print(','); if (win_scd4x_rh[i].count)  f.print(win_scd4x_rh[i].mean(),  2); else f.print("NA");
+    const auto& n = scd4x_nodes[i];
+    bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+    f.print(','); if (fresh) f.print((unsigned long)n.co2); else f.print("NA");
+    f.print(','); if (fresh) f.print(n.temp, 2);         else f.print("NA");
+    f.print(','); if (fresh) f.print(n.rh,   2);         else f.print("NA");
   }
 
   // TRHP per-station
@@ -416,8 +415,9 @@ static void sample_graphs_if_due() {
 
   // SCD4x (per node)
   for (size_t i=0;i<N_SCD4X;i++) {
-    bool ok = win_scd4x_co2[i].count > 0;
-    float v = win_scd4x_co2[i].mean();
+    const auto& n = scd4x_nodes[i];
+    bool ok = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+    float v = ok ? (float)n.co2 : NAN;
     hist_scd4x_co2[i].push(v, ok);
   }
 
@@ -440,14 +440,16 @@ static void sample_graphs_if_due() {
 
 static void commit_and_reset_all_windows() {
   // Serial per-sensor average prints
-  Serial.print("SCD4x avgs: ");
+  Serial.print("SCD4x: ");
   for (size_t j=0;j<N_SCD4X;j++) {
+    const auto& n = scd4x_nodes[j];
+    bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
     Serial.printf("#%u CO2=", unsigned(j+1));
-    if (win_scd4x_co2[j].count) Serial.printf("%.0f", win_scd4x_co2[j].mean()); else Serial.print("NA");
+    if (fresh) Serial.printf("%u", (unsigned)n.co2); else Serial.print("NA");
     Serial.print("ppm T=");
-    if (win_scd4x_t[j].count)   Serial.printf("%.2f", win_scd4x_t[j].mean());   else Serial.print("NA");
+    if (fresh) Serial.printf("%.2f", n.temp); else Serial.print("NA");
     Serial.print("C RH=");
-    if (win_scd4x_rh[j].count)  Serial.printf("%.2f", win_scd4x_rh[j].mean());  else Serial.print("NA");
+    if (fresh) Serial.printf("%.2f", n.rh);  else Serial.print("NA");
     Serial.print("%");
     Serial.print(j+1==N_SCD4X? "\n" : " | ");
   }
@@ -486,17 +488,13 @@ static void commit_and_reset_all_windows() {
     Serial.print(j+1==N_TGS2616? "\n" : " | ");
   }
 
-  // Log CSV (uses per-sensor windows)
+  // Log CSV (uses per-sensor windows)+
   sd_append_current_row();  // already writes per-sensor averages and NAs
 
   // Push one OLED sample now so the sparkline aligns with the commit (optional but nice)
   sample_graphs_if_due();  // or make a sample_graphs_now() that doesn’t time-check
 
   // Reset ALL per-sensor windows after logging
-  for (auto& a : win_scd4x_co2) a.reset();
-  for (auto& a : win_scd4x_t)   a.reset();
-  for (auto& a : win_scd4x_rh)  a.reset();
-
   for (auto& a : win_trhp_sht45_t) a.reset();
   for (auto& a : win_trhp_sht45_rh) a.reset();
   for (auto& a : win_trhp_tmp117_t) a.reset();
@@ -528,7 +526,7 @@ bool scd4x_read_if_ready(Scd4xReading &out) {
   if (!ready) return false;
   uint16_t co2; float t, rh;
   if (scd4x.readMeasurement(co2, t, rh) != NO_ERROR) { out.started = false; return false; }
-  out.co2 = co2; out.temp = t; out.rh = rh; out.ready = true; return true;
+  out.co2 = co2; out.temp = t; out.rh = rh; out.ready = true; out.last_ok_ms = millis(); return true;
 }
 
 // ---------- SHT45 ----------
@@ -680,7 +678,6 @@ static void update_oled_if_due() {
   char line[48];
   switch (screen_index) {
     case SCR_TIME: {
-    char line[48];
     format_timestamp_no_sec(line, sizeof(line));
     oled_show_text("Date & Time", line);
     break;
@@ -688,10 +685,11 @@ static void update_oled_if_due() {
 
     case SCR_CO2: {
       if (N_SCD4X == 0) break;
+      const auto& n = scd4x_nodes[sub_idx];
       char line[24];
-      float co2 = win_scd4x_co2[sub_idx].mean();
-      if (win_scd4x_co2[sub_idx].count) snprintf(line, sizeof(line), "%.0f ppm", co2);
-      else snprintf(line, sizeof(line), "NA");
+      bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+      if (fresh) snprintf(line, sizeof(line), "%u ppm", (unsigned)n.co2);
+      else       snprintf(line, sizeof(line), "NA");
       char title[24]; snprintf(title, sizeof(title), "SCD41 CO2 #%u", unsigned(sub_idx+1));
       oled_show_value_and_graph(title, line, hist_scd4x_co2[sub_idx]);
       break;
@@ -847,11 +845,6 @@ void loop() {
 
       // Try read
       if (scd4x_read_if_ready(scd4x_nodes[i])) {
-        // per-node windows
-        win_scd4x_co2[i].add((float)scd4x_nodes[i].co2);
-        win_scd4x_t[i].add(scd4x_nodes[i].temp);
-        win_scd4x_rh[i].add(scd4x_nodes[i].rh);
-
         scd4x_fresh[i] = true;
         if (scd4x_tick_start_ms == 0) scd4x_tick_start_ms = millis(); // start on first fresh
       }
