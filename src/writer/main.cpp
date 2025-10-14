@@ -1,6 +1,9 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+// Project includes
+#include "common/eeprom/at24_ll.h"
+
 /* ================== Pins / Addresses (adjust if needed) ================== */
 #define I2C_SDA        5
 #define I2C_SCL        6
