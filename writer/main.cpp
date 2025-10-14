@@ -1,29 +1,29 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// ====== BOARD/I2C/MUX PINS & ADDRS (adjust if needed) ======
-#define I2C_SDA      5
-#define I2C_SCL      6
-#define TCA_ADDR     0x70        // TCA9548A
-#define AT24_ADDR    0x50        // 0x50..0x57 depending on A2/A1/A0 straps
-#define LDO_SENS_EN  41          // sensor rail enable, if applicable
+/* ================== Pins / Addresses (adjust if needed) ================== */
+#define I2C_SDA        5
+#define I2C_SCL        6
+#define TCA_ADDR       0x70          // TCA9548A mux
+#define AT24_ADDR      0x50          // 0x50
+#define LDO_SENS_EN    41            // sensor rail enable (if applicable)
 
-// ====== MUX ======
-bool tcaSelect(uint8_t ch) {
+/* ================== Mux helpers ================== */
+static bool tcaSelect(uint8_t ch) {
   Wire.beginTransmission(TCA_ADDR);
   Wire.write(1 << ch);
   if (Wire.endTransmission() != 0) return false;
-  delay(2);                      // small settle
+  delay(2);                          // small settle
   return true;
 }
-void tcaOff() {
+static void tcaOff() {
   Wire.beginTransmission(TCA_ADDR);
   Wire.write(0);
   Wire.endTransmission();
 }
 
-// ====== I2C SCAN (on currently-selected channel) ======
-void i2c_scan_channel() {
+/* ================== I2C scan (on selected channel) ================== */
+static void i2c_scan_channel() {
   for (uint8_t a = 1; a < 127; a++) {
     Wire.beginTransmission(a);
     if (Wire.endTransmission() == 0) {
@@ -32,17 +32,17 @@ void i2c_scan_channel() {
   }
 }
 
-// ====== AT24C02C (8-byte pages) ======
+/* ================== AT24C0x (8-byte pages) ================== */
 static const uint8_t AT24_PAGE = 8;
 
-bool at24_write_bytes(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n){
+static bool at24_write_bytes(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n){
   while (n) {
     uint8_t pageOff = word % AT24_PAGE;
     uint8_t chunk   = min<uint8_t>(AT24_PAGE - pageOff, n);
     Wire.beginTransmission(dev); Wire.write(word); Wire.write(d, chunk);
     if (Wire.endTransmission() != 0) return false;
 
-    // ACK polling (tWR ~5ms)
+    // ACK polling (tWR typ ~5ms)
     uint32_t t0 = millis();
     while (millis() - t0 < 20) {
       Wire.beginTransmission(dev);
@@ -54,55 +54,135 @@ bool at24_write_bytes(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n){
   return true;
 }
 
-bool at24_read_bytes(uint8_t dev, uint8_t word, uint8_t* d, uint8_t n){
+static bool at24_read_bytes(uint8_t dev, uint8_t word, uint8_t* d, uint8_t n){
   Wire.beginTransmission(dev); Wire.write(word);
-  if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(dev, n) != n)   return false;
+  if (Wire.endTransmission(false) != 0) return false;     // repeated start
+  if (Wire.requestFrom(dev, n) != n) return false;
   for (uint8_t i=0; i<n; i++) d[i] = Wire.read();
   return true;
 }
 
-uint8_t crc8(const uint8_t* p, uint8_t n){
+/* ================== CRC8 (simple XOR — enough for tiny headers) ================== */
+static uint8_t crc8(const uint8_t* p, uint8_t n){
   uint8_t c = 0; for (uint8_t i=0; i<n; i++) c ^= p[i]; return c;
 }
 
-// ====== ID writer helpers ======
-bool write_id(uint16_t id){
+/* ================== ID block (0x00..0x02) ================== */
+static bool write_id(uint16_t id){
   uint8_t buf[3] = { uint8_t(id>>8), uint8_t(id&0xFF), 0 };
   buf[2] = crc8(buf, 2);
   if (!at24_write_bytes(AT24_ADDR, 0x00, buf, 3)) return false;
 
-  // Read-back verify
+  // verify
   uint8_t rb[3] = {0};
-  if (!at24_read_bytes(AT24_ADDR, 0x00, rb, 3))   return false;
+  if (!at24_read_bytes(AT24_ADDR, 0x00, rb, 3)) return false;
   uint16_t rid = (uint16_t(rb[0])<<8) | rb[1];
   return (rid == id) && (crc8(rb, 2) == rb[2]);
 }
 
-// ====== Simple CLI ======
-uint8_t currentCh = 0xFF;
+static bool read_id(uint16_t &out_id, bool &crc_ok){
+  uint8_t rb[3] = {0};
+  if (!at24_read_bytes(AT24_ADDR, 0x00, rb, 3)) return false;
+  out_id = (uint16_t(rb[0])<<8) | rb[1];
+  crc_ok = (crc8(rb, 2) == rb[2]);
+  return true;
+}
 
-void help() {
+/* ================== Lot# block (separate, backward-compatible) ================== */
+/* Layout:
+   0x20: len (0..15)
+   0x21..0x30: ASCII payload (up to 15 chars, rest zero-padded)
+   0x31: CRC8 over [len + payload[0..len-1]]
+*/
+#define LOT_OFF       0x20
+#define LOT_MAX_LEN   15
+#define LOT_DATA_OFF  (LOT_OFF + 1)                 // 0x21
+#define LOT_CRC_OFF   (LOT_OFF + 1 + LOT_MAX_LEN)   // 0x31
+
+static uint8_t sanitize_lot(const char* in, char* out) {
+  // allow A-Z 0-9 '-' ; convert to uppercase, drop others
+  uint8_t n = 0;
+  while (*in && n < LOT_MAX_LEN) {
+    char c = *in++;
+    if (c >= 'a' && c <= 'z') c -= 32;
+    if ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c=='-') {
+      out[n++] = c;
+    }
+  }
+  return n;
+}
+
+static bool write_lot(const char* lot_str) {
+  char payload[LOT_MAX_LEN];
+  uint8_t len = sanitize_lot(lot_str, payload);
+
+  // write len + padded payload
+  uint8_t page[1 + LOT_MAX_LEN];
+  page[0] = len;
+  for (uint8_t i=0; i<LOT_MAX_LEN; i++) page[i+1] = (i < len) ? uint8_t(payload[i]) : 0;
+
+  if (!at24_write_bytes(AT24_ADDR, LOT_OFF, page, sizeof(page))) return false;
+
+  // write CRC
+  uint8_t crc = crc8(page, 1 + len);
+  if (!at24_write_bytes(AT24_ADDR, LOT_CRC_OFF, &crc, 1)) return false;
+
+  // verify
+  uint8_t len_rb=0, data_rb[LOT_MAX_LEN]={0}, crc_rb=0;
+  if (!at24_read_bytes(AT24_ADDR, LOT_OFF, &len_rb, 1)) return false;
+  if (len_rb > LOT_MAX_LEN) return false;
+  if (!at24_read_bytes(AT24_ADDR, LOT_DATA_OFF, data_rb, LOT_MAX_LEN)) return false;
+  if (!at24_read_bytes(AT24_ADDR, LOT_CRC_OFF, &crc_rb, 1)) return false;
+
+  uint8_t crc_chk = crc8(&len_rb, 1);
+  for (uint8_t i=0; i<len_rb; i++) crc_chk ^= data_rb[i];
+  return (crc_rb == crc_chk);
+}
+
+static bool read_lot(char* out, uint8_t out_size) {
+  if (out_size == 0) return false;
+  uint8_t len=0, crc=0, data[LOT_MAX_LEN]={0};
+  if (!at24_read_bytes(AT24_ADDR, LOT_OFF, &len, 1)) return false;
+  if (len > LOT_MAX_LEN) return false;
+  if (!at24_read_bytes(AT24_ADDR, LOT_DATA_OFF, data, LOT_MAX_LEN)) return false;
+  if (!at24_read_bytes(AT24_ADDR, LOT_CRC_OFF, &crc, 1)) return false;
+
+  uint8_t crc_chk = crc8(&len, 1);
+  for (uint8_t i=0; i<len; i++) crc_chk ^= data[i];
+  if (crc_chk != crc) return false;
+
+  uint8_t n = min<uint8_t>(len, out_size-1);
+  memcpy(out, data, n);
+  out[n] = '\0';
+  return true;
+}
+
+/* ================== CLI ================== */
+static uint8_t currentCh = 0xFF;
+
+static void print_help() {
   Serial.println("Commands:");
-  Serial.println("  CH <n>   - select mux channel n (0..7)");
-  Serial.println("  SCAN     - scan I2C on current channel");
-  Serial.println("  W <id>   - write ID to AT24 (0x00..0x02) and verify");
-  Serial.println("  R        - read back ID + CRC");
-  Serial.println("  OFF      - deselect mux (all channels off)");
-  Serial.println("  HELP     - show this help");
+  Serial.println("  CH <n>    - select mux channel n (0..7)");
+  Serial.println("  SCAN      - scan I2C on current channel");
+  Serial.println("  W <id>    - write ID at 0x00..0x02 and verify");
+  Serial.println("  R         - read back ID + CRC");
+  Serial.println("  LOT <txt> - store Lot# (A-Z 0-9 -), max 15 chars");
+  Serial.println("  LR        - read back Lot#");
+  Serial.println("  OFF       - deselect mux (all channels off)");
+  Serial.println("  HELP      - show this help");
 }
 
 void setup(){
   pinMode(LDO_SENS_EN, OUTPUT);
-  digitalWrite(LDO_SENS_EN, HIGH);   // power sensors if needed
+  digitalWrite(LDO_SENS_EN, HIGH);     // power sensors if needed
   delay(10);
 
   Serial.begin(115200);
   Wire.begin(I2C_SDA, I2C_SCL);
   delay(100);
 
-  Serial.println("\nTGS2611 ID Writer (mux-aware, no wiper programming)");
-  help();
+  Serial.println("\nTGS2611 Module Writer (ID + Lot, mux-aware, no digipot programming)");
+  print_help();
 }
 
 void loop(){
@@ -127,19 +207,15 @@ void loop(){
           if (currentCh>7) Serial.println("Select CH first"); else i2c_scan_channel();
 
         } else if (cmd == "R") {
-          if (currentCh>7) Serial.println("Select CH first");
+          if (currentCh>7) { Serial.println("Select CH first"); }
           else {
-            uint8_t rb[3];
-            if (at24_read_bytes(AT24_ADDR, 0x00, rb, 3)) {
-              uint16_t rid = (uint16_t(rb[0])<<8) | rb[1];
-              Serial.printf("ID=%u, CRC=%02X (%s)\n", rid, rb[2], crc8(rb,2)==rb[2]?"OK":"BAD");
-            } else {
-              Serial.println("EEPROM read FAILED");
-            }
+            uint16_t id=0; bool ok=false;
+            if (read_id(id, ok)) Serial.printf("ID=%u, CRC=%s\n", id, ok?"OK":"BAD");
+            else Serial.println("EEPROM read FAILED");
           }
 
         } else if (cmd.startsWith("W ")) {
-          if (currentCh>7) Serial.println("Select CH first");
+          if (currentCh>7) { Serial.println("Select CH first"); }
           else {
             uint16_t id = cmd.substring(2).toInt();
             Serial.printf("CH=%u  Writing ID %u ...\n", currentCh, id);
@@ -147,8 +223,24 @@ void loop(){
             else Serial.println("DONE.");
           }
 
+        } else if (cmd.startsWith("LOT ")) {
+          if (currentCh>7) Serial.println("Select CH first");
+          else {
+            String s = line.substring(4);
+            if (write_lot(s.c_str())) Serial.println("Lot stored.");
+            else Serial.println("Lot write FAILED");
+          }
+
+        } else if (cmd == "LR") {
+          if (currentCh>7) Serial.println("Select CH first");
+          else {
+            char lot[LOT_MAX_LEN+1];
+            if (read_lot(lot, sizeof(lot))) Serial.printf("Lot=%s\n", lot);
+            else Serial.println("Lot read FAILED");
+          }
+
         } else if (cmd == "HELP") {
-          help();
+          print_help();
 
         } else {
           Serial.println("Unknown. Type HELP.");
