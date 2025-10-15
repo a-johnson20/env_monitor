@@ -5,6 +5,8 @@
 #include "../sensors/tgs_eeprom.hpp"
 #include "../drivers/isl22317.hpp"
 
+struct CalEntry;    // forward declaration from tgs_lookup_tables.hpp
+
 // Look up ID in table; set digipot; log to Serial.
 // Returns true if a wiper was written (table match or default path).
 bool calibrate_tgs_on_selected(const CalEntry* tab, size_t n,

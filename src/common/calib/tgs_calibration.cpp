@@ -1,5 +1,6 @@
 // Project includes
 #include "tgs_calibration.hpp"
+#include "tgs_lookup_tables.hpp"
 
 static bool find_wiper_for(const CalEntry* tab, size_t n, uint16_t id, uint8_t &wiper_out){
   for (size_t i=0;i<n;i++) if (tab[i].id == id) { wiper_out = tab[i].wiper; return true; }
