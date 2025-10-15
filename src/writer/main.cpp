@@ -2,13 +2,15 @@
 #include <Wire.h>
 
 // Project includes
-#include "common/eeprom/at24_ll.h"
+#include "config.hpp"
+#include "tgs_lookup_tables.hpp"
+#include "../common/eeprom/at24_11.hpp"
+#include "../common/calib/tgs_calibration.hpp"
 
 /* ================== Pins / Addresses (adjust if needed) ================== */
 #define I2C_SDA        5
 #define I2C_SCL        6
 #define TCA_ADDR       0x70          // TCA9548A mux
-#define AT24_ADDR      0x50          // 0x50
 #define LDO_SENS_EN    41            // sensor rail enable (if applicable)
 
 /* ================== Mux helpers ================== */
@@ -35,72 +37,37 @@ static void i2c_scan_channel() {
   }
 }
 
-/* ================== AT24C0x (8-byte pages) ================== */
-static const uint8_t AT24_PAGE = 8;
-
-static bool at24_write_bytes(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n){
-  while (n) {
-    uint8_t pageOff = word % AT24_PAGE;
-    uint8_t chunk   = min<uint8_t>(AT24_PAGE - pageOff, n);
-    Wire.beginTransmission(dev); Wire.write(word); Wire.write(d, chunk);
-    if (Wire.endTransmission() != 0) return false;
-
-    // ACK polling (tWR typ ~5ms)
-    uint32_t t0 = millis();
-    while (millis() - t0 < 20) {
-      Wire.beginTransmission(dev);
-      if (Wire.endTransmission() == 0) break;
-      delay(1);
-    }
-    word += chunk; d += chunk; n -= chunk;
-  }
-  return true;
-}
-
-static bool at24_read_bytes(uint8_t dev, uint8_t word, uint8_t* d, uint8_t n){
-  Wire.beginTransmission(dev); Wire.write(word);
-  if (Wire.endTransmission(false) != 0) return false;     // repeated start
-  if (Wire.requestFrom(dev, n) != n) return false;
-  for (uint8_t i=0; i<n; i++) d[i] = Wire.read();
-  return true;
-}
-
-/* ================== CRC8 (simple XOR — enough for tiny headers) ================== */
-static uint8_t crc8(const uint8_t* p, uint8_t n){
-  uint8_t c = 0; for (uint8_t i=0; i<n; i++) c ^= p[i]; return c;
-}
-
 /* ================== ID block (0x00..0x02) ================== */
 static bool write_id(uint16_t id){
   uint8_t buf[3] = { uint8_t(id>>8), uint8_t(id&0xFF), 0 };
-  buf[2] = crc8(buf, 2);
-  if (!at24_write_bytes(AT24_ADDR, 0x00, buf, 3)) return false;
+  buf[2] = crc8_xor(buf, 2);
+  if (!at24_write(I2CAddr::AT24, 0x00, buf, 3)) return false;
 
   // verify
   uint8_t rb[3] = {0};
-  if (!at24_read_bytes(AT24_ADDR, 0x00, rb, 3)) return false;
+  if (!at24_read(I2CAddr::AT24, 0x00, rb, 3)) return false;
   uint16_t rid = (uint16_t(rb[0])<<8) | rb[1];
-  return (rid == id) && (crc8(rb, 2) == rb[2]);
+  return (rid == id) && (crc8_xor(rb, 2) == rb[2]);
 }
 
 static bool read_id(uint16_t &out_id, bool &crc_ok){
   uint8_t rb[3] = {0};
-  if (!at24_read_bytes(AT24_ADDR, 0x00, rb, 3)) return false;
+  if (!at24_read(I2CAddr::AT24, 0x00, rb, 3)) return false;
   out_id = (uint16_t(rb[0])<<8) | rb[1];
-  crc_ok = (crc8(rb, 2) == rb[2]);
+  crc_ok = (crc8_xor(rb, 2) == rb[2]);
   return true;
 }
 
 /* ================== Lot# block (separate, backward-compatible) ================== */
 /* Layout:
    0x20: len (0..15)
-   0x21..0x30: ASCII payload (up to 15 chars, rest zero-padded)
-   0x31: CRC8 over [len + payload[0..len-1]]
+   0x21..0x2F: ASCII payload (up to 15 chars, rest zero-padded)
+   0x30: CRC8 over [len + payload[0..len-1]]
 */
 #define LOT_OFF       0x20
 #define LOT_MAX_LEN   15
-#define LOT_DATA_OFF  (LOT_OFF + 1)                 // 0x21
-#define LOT_CRC_OFF   (LOT_OFF + 1 + LOT_MAX_LEN)   // 0x31
+#define LOT_DATA_OFF  (LOT_OFF + 1)
+#define LOT_CRC_OFF   (LOT_OFF + 1 + LOT_MAX_LEN)
 
 static uint8_t sanitize_lot(const char* in, char* out) {
   // allow A-Z 0-9 '-' ; convert to uppercase, drop others
@@ -124,20 +91,20 @@ static bool write_lot(const char* lot_str) {
   page[0] = len;
   for (uint8_t i=0; i<LOT_MAX_LEN; i++) page[i+1] = (i < len) ? uint8_t(payload[i]) : 0;
 
-  if (!at24_write_bytes(AT24_ADDR, LOT_OFF, page, sizeof(page))) return false;
+  if (!at24_write(I2CAddr::AT24, LOT_OFF, page, sizeof(page))) return false;
 
   // write CRC
-  uint8_t crc = crc8(page, 1 + len);
-  if (!at24_write_bytes(AT24_ADDR, LOT_CRC_OFF, &crc, 1)) return false;
+  uint8_t crc = crc8_xor(page, 1 + len);
+  if (!at24_write(I2CAddr::AT24, LOT_CRC_OFF, &crc, 1)) return false;
 
   // verify
   uint8_t len_rb=0, data_rb[LOT_MAX_LEN]={0}, crc_rb=0;
-  if (!at24_read_bytes(AT24_ADDR, LOT_OFF, &len_rb, 1)) return false;
+  if (!at24_read(I2CAddr::AT24, LOT_OFF, &len_rb, 1)) return false;
   if (len_rb > LOT_MAX_LEN) return false;
-  if (!at24_read_bytes(AT24_ADDR, LOT_DATA_OFF, data_rb, LOT_MAX_LEN)) return false;
-  if (!at24_read_bytes(AT24_ADDR, LOT_CRC_OFF, &crc_rb, 1)) return false;
+  if (!at24_read(I2CAddr::AT24, LOT_DATA_OFF, data_rb, LOT_MAX_LEN)) return false;
+  if (!at24_read(I2CAddr::AT24, LOT_CRC_OFF, &crc_rb, 1)) return false;
 
-  uint8_t crc_chk = crc8(&len_rb, 1);
+  uint8_t crc_chk = crc8_xor(&len_rb, 1);
   for (uint8_t i=0; i<len_rb; i++) crc_chk ^= data_rb[i];
   return (crc_rb == crc_chk);
 }
@@ -145,12 +112,12 @@ static bool write_lot(const char* lot_str) {
 static bool read_lot(char* out, uint8_t out_size) {
   if (out_size == 0) return false;
   uint8_t len=0, crc=0, data[LOT_MAX_LEN]={0};
-  if (!at24_read_bytes(AT24_ADDR, LOT_OFF, &len, 1)) return false;
+  if (!at24_read(I2CAddr::AT24, LOT_OFF, &len, 1)) return false;
   if (len > LOT_MAX_LEN) return false;
-  if (!at24_read_bytes(AT24_ADDR, LOT_DATA_OFF, data, LOT_MAX_LEN)) return false;
-  if (!at24_read_bytes(AT24_ADDR, LOT_CRC_OFF, &crc, 1)) return false;
+  if (!at24_read(I2CAddr::AT24, LOT_DATA_OFF, data, LOT_MAX_LEN)) return false;
+  if (!at24_read(I2CAddr::AT24, LOT_CRC_OFF, &crc, 1)) return false;
 
-  uint8_t crc_chk = crc8(&len, 1);
+  uint8_t crc_chk = crc8_xor(&len, 1);
   for (uint8_t i=0; i<len; i++) crc_chk ^= data[i];
   if (crc_chk != crc) return false;
 

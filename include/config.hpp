@@ -12,3 +12,8 @@ namespace Mux {
   inline constexpr std::array<Ch, 3> TGS2611 { Ch::C3, Ch::C4, Ch::C5 }; // TGS2611 with ADS1113 + (future) digipot/EEPROM
   inline constexpr std::array<Ch, 0> TGS2616 {  }; // TGS2616 with ADS1113 + (future) digipot/EEPROM
 }
+
+namespace I2CAddr {
+  inline constexpr uint8_t AT24     = 0x50;
+  inline constexpr uint8_t ISL22317 = 0x2C; // app-only
+}

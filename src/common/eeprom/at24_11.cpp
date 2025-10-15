@@ -1,22 +1,24 @@
-#include "at24_ll.h"
+// Project includes
+#include "at24_11.hpp"
 
 static const uint8_t AT24_PAGE = 8;  // AT24C02-compatible (8-byte pages)
 
 bool at24_write(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n){
   while (n) {
-    uint8_t pageOff = word % AT24_PAGE;
-    uint8_t chunk   = (uint8_t)min<int>(AT24_PAGE - pageOff, n);
+    const uint8_t pageOff = word % AT24_PAGE;
+    const uint8_t chunk   = (uint8_t)min<int>(AT24_PAGE - pageOff, n);
 
     Wire.beginTransmission(dev);
     Wire.write(word);
     Wire.write(d, chunk);
     if (Wire.endTransmission() != 0) return false;
 
-    // ACK polling (tWR ~5ms)
+    // ACK polling (tWR ~5ms typ, guard at ~20ms)
     uint32_t t0 = millis();
-    while (millis() - t0 < 20) {
+    while (true) {
       Wire.beginTransmission(dev);
-      if (Wire.endTransmission() == 0) break;
+      if (Wire.endTransmission() == 0) break; // device responded
+      if (millis() - t0 > 20) return false;   // timeout guard
       delay(1);
     }
 

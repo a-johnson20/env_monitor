@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
 #include <Wire.h>
+
+// Project includes
 #include "config.hpp"   // for I2CAddr::AT24 etc.
 
 // Simple XOR CRC used for tiny on-module headers
