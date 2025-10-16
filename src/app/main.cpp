@@ -14,6 +14,8 @@
 
 // Project includes
 #include "config.hpp"
+#include "tgs_lookup_tables.hpp"
+#include "../common/calib/tgs_calibration.hpp"
 
 // ---------- I2C buses ----------
 TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors stay on default Wire
@@ -800,6 +802,28 @@ void setup() {
     while (1) delay(1000);
   }
   Serial.println("TCA9548A connected");
+
+  // Calibrate TGS2611 channels
+{
+  uint8_t default_wiper = 80; // tweak as you like
+  size_t i = 0;
+  for (auto ch : Mux::TGS2611) {
+    if (select_exclusive(static_cast<uint8_t>(ch))) {
+      calibrate_tgs_on_selected(TGS2611_CAL, N_TGS2611_CAL, "TGS2611", default_wiper);
+    }
+    ++i;
+  }
+}
+
+// If you later use TGS2616 too:
+{
+  uint8_t default_wiper = 70;
+  for (auto ch : Mux::TGS2616) {
+    if (select_exclusive(static_cast<uint8_t>(ch))) {
+      calibrate_tgs_on_selected(TGS2616_CAL, N_TGS2616_CAL, "TGS2616", default_wiper);
+    }
+  }
+}
 
   // Bind SCD4x driver once
   scd4x.begin(Wire, SCD41_I2C_ADDR_62);
