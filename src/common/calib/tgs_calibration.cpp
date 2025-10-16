@@ -4,13 +4,12 @@
 #include "../sensors/tgs_eeprom.hpp"
 #include "../drivers/isl22317.hpp"
 
-static bool find_wiper_for(const CalEntry* tab, size_t n, uint16_t id, uint8_t &wiper_out){
+static bool find_wiper_for( const CalEntry* tab, size_t n, uint16_t id, uint8_t &wiper_out) {
   for (size_t i=0;i<n;i++) if (tab[i].id == id) { wiper_out = tab[i].wiper; return true; }
   return false;
 }
 
-bool calibrate_tgs_on_selected(const CalEntry* tab, size_t n,
-                               const char* label, uint8_t default_wiper) {
+bool calibrate_tgs_on_selected( const CalEntry* tab, size_t n, const char* label, uint8_t default_wiper) {
   uint16_t id = 0; bool crc_ok = false;
   if (!tgs_read_sensor_id_on_selected(id, crc_ok)) {
     Serial.printf("%s: EEPROM read FAILED\n", label);
