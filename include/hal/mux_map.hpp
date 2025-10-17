@@ -2,7 +2,7 @@
 #include <array>
 #include <cstdint>
 
-namespace Mux {
+namespace hal::Mux { // nested namespace
   enum class Ch : uint8_t { C0, C1, C2, C3, C4, C5, C6, C7 };
 
   // <Ch, 2> means "channel Ch, two devices expected"
@@ -11,9 +11,4 @@ namespace Mux {
   inline constexpr std::array<Ch, 1> SCD4x   { Ch::C1 }; // SCD41 / SCD40
   inline constexpr std::array<Ch, 3> TGS2611 { Ch::C3, Ch::C4, Ch::C5 }; // TGS2611 with ADS1113 + (future) digipot/EEPROM
   inline constexpr std::array<Ch, 0> TGS2616 {  }; // TGS2616 with ADS1113 + (future) digipot/EEPROM
-}
-
-namespace I2CAddr {
-  inline constexpr uint8_t AT24     = 0x50;
-  inline constexpr uint8_t ISL22317 = 0x2C; // app-only
 }

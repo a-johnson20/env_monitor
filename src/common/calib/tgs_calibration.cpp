@@ -1,6 +1,6 @@
 // Project includes
 #include "tgs_calibration.hpp"
-#include "tgs_lookup_tables.hpp"
+#include "common/tgs_lookup_tables.hpp"
 #include "../sensors/tgs_eeprom.hpp"
 #include "../drivers/isl22317.hpp"
 

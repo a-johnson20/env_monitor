@@ -2,8 +2,8 @@
 #include <Wire.h>
 
 // Project includes
-#include "config.hpp"
-#include "tgs_lookup_tables.hpp"
+#include "hal/i2c_addresses.hpp"
+#include "common/tgs_lookup_tables.hpp"
 #include "../common/eeprom/at24_11.hpp"
 #include "../common/calib/tgs_calibration.hpp"
 
@@ -91,18 +91,18 @@ static bool write_lot(const char* lot_str) {
   page[0] = len;
   for (uint8_t i=0; i<LOT_MAX_LEN; i++) page[i+1] = (i < len) ? uint8_t(payload[i]) : 0;
 
-  if (!at24_write(I2CAddr::AT24, LOT_OFF, page, sizeof(page))) return false;
+  if (!at24_write(hal::I2CAddr::AT24, LOT_OFF, page, sizeof(page))) return false;
 
   // write CRC
   uint8_t crc = crc8_xor(page, 1 + len);
-  if (!at24_write(I2CAddr::AT24, LOT_CRC_OFF, &crc, 1)) return false;
+  if (!at24_write(hal::I2CAddr::AT24, LOT_CRC_OFF, &crc, 1)) return false;
 
   // verify
   uint8_t len_rb=0, data_rb[LOT_MAX_LEN]={0}, crc_rb=0;
-  if (!at24_read(I2CAddr::AT24, LOT_OFF, &len_rb, 1)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, LOT_OFF, &len_rb, 1)) return false;
   if (len_rb > LOT_MAX_LEN) return false;
-  if (!at24_read(I2CAddr::AT24, LOT_DATA_OFF, data_rb, LOT_MAX_LEN)) return false;
-  if (!at24_read(I2CAddr::AT24, LOT_CRC_OFF, &crc_rb, 1)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, LOT_DATA_OFF, data_rb, LOT_MAX_LEN)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, LOT_CRC_OFF, &crc_rb, 1)) return false;
 
   uint8_t crc_chk = crc8_xor(&len_rb, 1);
   for (uint8_t i=0; i<len_rb; i++) crc_chk ^= data_rb[i];
@@ -112,10 +112,10 @@ static bool write_lot(const char* lot_str) {
 static bool read_lot(char* out, uint8_t out_size) {
   if (out_size == 0) return false;
   uint8_t len=0, crc=0, data[LOT_MAX_LEN]={0};
-  if (!at24_read(I2CAddr::AT24, LOT_OFF, &len, 1)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, LOT_OFF, &len, 1)) return false;
   if (len > LOT_MAX_LEN) return false;
-  if (!at24_read(I2CAddr::AT24, LOT_DATA_OFF, data, LOT_MAX_LEN)) return false;
-  if (!at24_read(I2CAddr::AT24, LOT_CRC_OFF, &crc, 1)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, LOT_DATA_OFF, data, LOT_MAX_LEN)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, LOT_CRC_OFF, &crc, 1)) return false;
 
   uint8_t crc_chk = crc8_xor(&len, 1);
   for (uint8_t i=0; i<len; i++) crc_chk ^= data[i];

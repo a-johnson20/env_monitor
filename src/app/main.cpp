@@ -13,9 +13,12 @@
 #include <array>
 
 // Project includes
-#include "config.hpp"
-#include "tgs_lookup_tables.hpp"
+#include "hal/mux_map.hpp"
+#include "common/tgs_lookup_tables.hpp"
 #include "../common/calib/tgs_calibration.hpp"
+
+// Namespaces using
+using hal::Mux::Ch;
 
 // ---------- I2C buses ----------
 TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors stay on default Wire
@@ -24,12 +27,12 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define TCA9548A_ADDR   0x70
 
 // Sensor bus (through TCA9548A)
-#define SDA             5
-#define SCL             6
+#define SDA 5
+#define SCL 6
 
 // RTC + OLED on a separate I2C bus (no mux)
-#define RTC_SDA         15
-#define RTC_SCL         16
+#define RTC_SDA 15
+#define RTC_SCL 16
 
 #define LDO_Sensors_EN  41
 
@@ -42,19 +45,19 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define PUMP_LEDC_CH     LEDC_CHANNEL_0
 
 // ---------- OLED ----------
-#define OLED_WIDTH   128
+#define OLED_WIDTH    128
 #define OLED_HEIGHT   64
-#define OLED_ADDR   0x3D
+#define OLED_ADDR     0x3D
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &WireRTC, -1);
 bool oled_present = false;
 
 // ---- SDMMC (4-bit) pins on ESP32-S3 ----
-#define SD_CLK   12
-#define SD_CMD   11
-#define SD_D0    13
-#define SD_D1    14
+#define SD_CLK    12
+#define SD_CMD    11
+#define SD_D0     13
+#define SD_D1     14
 #define SD_D2     9
-#define SD_D3    10
+#define SD_D3     10
 
 // ---------- Error Definition ----------
 #ifdef NO_ERROR
@@ -104,10 +107,10 @@ struct RunningAvg {
 };
 
 // Per-probe running windows (counts match config.hpp channel lists)
-constexpr size_t N_SCD4X = Mux::SCD4x.size();
-constexpr size_t N_TRHP  = Mux::TRHP.size();
-constexpr size_t N_TGS2611 = Mux::TGS2611.size();
-constexpr size_t N_TGS2616 = Mux::TGS2616.size();
+constexpr size_t N_SCD4X =    hal::Mux::SCD4x.size();
+constexpr size_t N_TRHP  =    hal::Mux::TRHP.size();
+constexpr size_t N_TGS2611 =  hal::Mux::TGS2611.size();
+constexpr size_t N_TGS2616 =  hal::Mux::TGS2616.size();
 
 // Per-SCD4x instance readings (one struct per node)
 std::array<Scd4xReading, N_SCD4X> scd4x_nodes{};

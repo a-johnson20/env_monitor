@@ -2,9 +2,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// Project includes
-#include "config.hpp"   // for I2CAddr::AT24 etc.
-
 // Simple XOR CRC used for tiny on-module headers
 inline uint8_t crc8_xor(const uint8_t* p, 
                         uint8_t n) {
