@@ -762,7 +762,7 @@ static void update_oled_if_due() {
 }
 
 namespace {
-  static inline uint8_t to_u8(Mux::Ch ch) { return static_cast<uint8_t>(ch); }
+  static inline uint8_t to_u8(hal::Mux::Ch ch) { return static_cast<uint8_t>(ch); }
 }
 
 void setup() {
@@ -810,7 +810,7 @@ void setup() {
 {
   uint8_t default_wiper = 80; // tweak as you like
   size_t i = 0;
-  for (auto ch : Mux::TGS2611) {
+  for (auto ch : hal::Mux::TGS2611) {
     if (select_exclusive(static_cast<uint8_t>(ch))) {
       calibrate_tgs_on_selected(TGS2611_CAL, N_TGS2611_CAL, "TGS2611", default_wiper);
     }
@@ -821,7 +821,7 @@ void setup() {
 // If you later use TGS2616 too:
 {
   uint8_t default_wiper = 70;
-  for (auto ch : Mux::TGS2616) {
+  for (auto ch : hal::Mux::TGS2616) {
     if (select_exclusive(static_cast<uint8_t>(ch))) {
       calibrate_tgs_on_selected(TGS2616_CAL, N_TGS2616_CAL, "TGS2616", default_wiper);
     }
@@ -832,7 +832,7 @@ void setup() {
   scd4x.begin(Wire, SCD41_I2C_ADDR_62);
 
   // Print SCD4x serial numbers
-  for (auto ch : Mux::SCD4x) if (select_exclusive(to_u8(ch))) {
+  for (auto ch : hal::Mux::SCD4x) if (select_exclusive(to_u8(ch))) {
     uint64_t sn = 0;
     if (scd4x.getSerialNumber(sn) == NO_ERROR) {
       Serial.printf("SCD4x[ch=%u] serial: %08X%08X\n",
@@ -842,7 +842,7 @@ void setup() {
 
   // Init LPS22DF on every configured TRHP channel
   size_t i = 0;
-  for (auto ch : Mux::TRHP) {
+  for (auto ch : hal::Mux::TRHP) {
     if (select_exclusive(to_u8(ch))) {
       if (!lps22df_begin_on_selected(lps22df_nodes[i])) {
         Serial.printf("LPS22DF init failed on ch %u\n", to_u8(ch));
@@ -864,7 +864,7 @@ void loop() {
   // --------- SCD4x ---------
   {
     size_t i = 0;
-    for (auto ch : Mux::SCD4x) {
+    for (auto ch : hal::Mux::SCD4x) {
       if (!select_exclusive(to_u8(ch))) { ++i; continue; }
 
       // Ensure running (sets .present if detected)
@@ -919,7 +919,7 @@ void loop() {
   // --------- T/RH/P (SHT45/TMP117/LPS22DF) ---------
   {
     size_t i = 0;
-    for (auto ch : Mux::TRHP) {
+    for (auto ch : hal::Mux::TRHP) {
       if (!select_exclusive(to_u8(ch))) { ++i; continue; }
 
       readings.sht45.valid = false;
@@ -949,7 +949,7 @@ void loop() {
   // --------- TGS2611 ---------
   {
     size_t i = 0;
-    for (auto ch : Mux::TGS2611) {
+    for (auto ch : hal::Mux::TGS2611) {
       if (!select_exclusive(to_u8(ch))) { ++i; continue; }
 
       readings.ads.valid = false;
@@ -968,7 +968,7 @@ void loop() {
   // --------- TGS2616 ---------
   {
     size_t i = 0;
-    for (auto ch : Mux::TGS2616) {
+    for (auto ch : hal::Mux::TGS2616) {
       if (!select_exclusive(to_u8(ch))) { ++i; continue; }
 
       readings.ads.valid = false;

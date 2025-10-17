@@ -41,18 +41,18 @@ static void i2c_scan_channel() {
 static bool write_id(uint16_t id){
   uint8_t buf[3] = { uint8_t(id>>8), uint8_t(id&0xFF), 0 };
   buf[2] = crc8_xor(buf, 2);
-  if (!at24_write(I2CAddr::AT24, 0x00, buf, 3)) return false;
+  if (!at24_write(hal::I2CAddr::AT24, 0x00, buf, 3)) return false;
 
   // verify
   uint8_t rb[3] = {0};
-  if (!at24_read(I2CAddr::AT24, 0x00, rb, 3)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, 0x00, rb, 3)) return false;
   uint16_t rid = (uint16_t(rb[0])<<8) | rb[1];
   return (rid == id) && (crc8_xor(rb, 2) == rb[2]);
 }
 
 static bool read_id(uint16_t &out_id, bool &crc_ok){
   uint8_t rb[3] = {0};
-  if (!at24_read(I2CAddr::AT24, 0x00, rb, 3)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, 0x00, rb, 3)) return false;
   out_id = (uint16_t(rb[0])<<8) | rb[1];
   crc_ok = (crc8_xor(rb, 2) == rb[2]);
   return true;
