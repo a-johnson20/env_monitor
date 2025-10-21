@@ -1,3 +1,4 @@
+#include <algorithm>
 #include "at24_11.hpp"
 
 static const uint8_t AT24_PAGE = 8;  // AT24C02-compatible (8-byte pages)
@@ -5,7 +6,7 @@ static const uint8_t AT24_PAGE = 8;  // AT24C02-compatible (8-byte pages)
 bool at24_write(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n) {
   while (n) {
     const uint8_t pageOff = word % AT24_PAGE;
-    const uint8_t chunk   = (uint8_t)min<int>(AT24_PAGE - pageOff, n);
+    const uint8_t chunk = static_cast<uint8_t>(std::min<uint8_t>(AT24_PAGE - pageOff, n));
 
     Wire.beginTransmission(dev);
     Wire.write(word);

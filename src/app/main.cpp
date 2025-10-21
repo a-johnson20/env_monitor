@@ -16,9 +16,13 @@
 #include "hal/tca9548a.hpp"
 #include "common/tgs_lookup_tables.hpp"
 #include "../common/calib/tgs_calibration.hpp"
+#include "hal/board.hpp"
+#include "app/calibration.hpp"
 
 // Namespaces using
 using hal::Mux::Ch;
+
+static hal::Mux::Tca9548State muxStateWire;
 
 // ---------- I2C buses ----------
 TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors stay on default Wire
@@ -199,18 +203,6 @@ std::array<Spark, N_TGS2611> hist_tgs2611_v{};
 std::array<Spark, N_TGS2616> hist_tgs2616_v{};
 
 unsigned long last_graph_sample_ms = 0;
-
-// ---------- Mux state ----------
-uint8_t current_channel = 0xFF;
-bool select_exclusive(uint8_t ch) {
-  if (ch > 7) return false;
-  if (current_channel == ch) return true;
-  Wire.beginTransmission(TCA9548A_ADDR);
-  Wire.write(1 << ch);
-  bool ok = (Wire.endTransmission() == 0);
-  if (ok) { current_channel = ch; delay(2); }
-  return ok;
-}
 
 // ---------- Utils ----------
 uint8_t crc8(const uint8_t* data, int len) {
@@ -807,32 +799,16 @@ void setup() {
   Serial.println("TCA9548A connected");
 
   // Calibrate TGS2611 channels
-{
-  uint8_t default_wiper = 80; // tweak as you like
-  size_t i = 0;
-  for (auto ch : hal::Mux::TGS2611) {
-    if (select_exclusive(static_cast<uint8_t>(ch))) {
-      calibrate_tgs_on_selected(TGS2611_CAL, N_TGS2611_CAL, "TGS2611", default_wiper);
-    }
-    ++i;
-  }
-}
+  app::calibrate_all_tgs2611(muxStateWire);
 
-// If you later use TGS2616 too:
-{
-  uint8_t default_wiper = 70;
-  for (auto ch : hal::Mux::TGS2616) {
-    if (select_exclusive(static_cast<uint8_t>(ch))) {
-      calibrate_tgs_on_selected(TGS2616_CAL, N_TGS2616_CAL, "TGS2616", default_wiper);
-    }
-  }
-}
+  // Calibrate TGS2616 channels
+  app::calibrate_all_tgs2616(muxStateWire);
 
   // Bind SCD4x driver once
   scd4x.begin(Wire, SCD41_I2C_ADDR_62);
 
   // Print SCD4x serial numbers
-  for (auto ch : hal::Mux::SCD4x) if (select_exclusive(to_u8(ch))) {
+  for (auto ch : hal::Mux::SCD4x) if (select_channel(Wire, ch, muxStateWire)) {
     uint64_t sn = 0;
     if (scd4x.getSerialNumber(sn) == NO_ERROR) {
       Serial.printf("SCD4x[ch=%u] serial: %08X%08X\n",
@@ -843,7 +819,7 @@ void setup() {
   // Init LPS22DF on every configured TRHP channel
   size_t i = 0;
   for (auto ch : hal::Mux::TRHP) {
-    if (select_exclusive(to_u8(ch))) {
+    if (select_channel(Wire, ch, muxStateWire)) {
       if (!lps22df_begin_on_selected(lps22df_nodes[i])) {
         Serial.printf("LPS22DF init failed on ch %u\n", to_u8(ch));
       }
@@ -865,7 +841,7 @@ void loop() {
   {
     size_t i = 0;
     for (auto ch : hal::Mux::SCD4x) {
-      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
+      if (!select_channel(Wire, ch, muxStateWire)) { ++i; continue; }
 
       // Ensure running (sets .present if detected)
       scd4x_ensure_running(scd4x_nodes[i]);
@@ -920,7 +896,7 @@ void loop() {
   {
     size_t i = 0;
     for (auto ch : hal::Mux::TRHP) {
-      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
+      if (!select_channel(Wire, ch, muxStateWire)) { ++i; continue; }
 
       readings.sht45.valid = false;
       if (sht45_measure(readings.sht45) && readings.sht45.valid) {
@@ -950,7 +926,7 @@ void loop() {
   {
     size_t i = 0;
     for (auto ch : hal::Mux::TGS2611) {
-      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
+      if (!select_channel(Wire, ch, muxStateWire)) { ++i; continue; }
 
       readings.ads.valid = false;
       int16_t raw;
@@ -969,7 +945,7 @@ void loop() {
   {
     size_t i = 0;
     for (auto ch : hal::Mux::TGS2616) {
-      if (!select_exclusive(to_u8(ch))) { ++i; continue; }
+      if (!select_channel(Wire, ch, muxStateWire)) { ++i; continue; }
 
       readings.ads.valid = false;
       int16_t raw;
