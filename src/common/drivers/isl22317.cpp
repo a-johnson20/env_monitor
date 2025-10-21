@@ -1,4 +1,3 @@
-// Project includes
 #include "isl22317.hpp"
 
 bool isl22317_set_wiper_on_selected(uint8_t wiper) {

@@ -1,4 +1,3 @@
-// Project includes
 #include "tgs_eeprom.hpp"
 #include "../eeprom/at24_11.hpp"
 #include "hal/i2c_addresses.hpp"

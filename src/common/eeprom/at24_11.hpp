@@ -9,5 +9,5 @@ inline uint8_t crc8_xor(const uint8_t* p,
 }
 
 // Low-level AT24 helpers (handle page-splitting + ACK polling)
-bool at24_write(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n);
+bool at24_write(uint8_t dev, uint8_t word, const uint8_t* d, uint8_t n); // uses generic device id 'dev' as this is supplied by the caller so as to not be hard coded
 bool at24_read (uint8_t dev, uint8_t word, uint8_t* d, uint8_t n);

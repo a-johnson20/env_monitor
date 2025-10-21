@@ -1,7 +1,6 @@
 #include <Arduino.h>
 #include <Wire.h>
 
-// Project includes
 #include "hal/i2c_addresses.hpp"
 #include "common/tgs_lookup_tables.hpp"
 #include "../common/eeprom/at24_11.hpp"

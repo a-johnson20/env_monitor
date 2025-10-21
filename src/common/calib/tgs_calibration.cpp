@@ -1,4 +1,3 @@
-// Project includes
 #include "tgs_calibration.hpp"
 #include "common/tgs_lookup_tables.hpp"
 #include "../sensors/tgs_eeprom.hpp"
