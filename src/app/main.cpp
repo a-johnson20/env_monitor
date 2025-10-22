@@ -14,10 +14,10 @@
 
 #include "hal/mux_map.hpp"
 #include "hal/tca9548a.hpp"
-#include "common/tgs_lookup_tables.hpp"
-#include "../common/calib/tgs_calibration.hpp"
 #include "hal/board.hpp"
 #include "app/calibration.hpp"
+#include "common/tgs_lookup_tables.hpp"
+#include "../common/calib/tgs_calibration.hpp"
 
 // Namespaces using
 using hal::Mux::Ch;
