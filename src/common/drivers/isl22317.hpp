@@ -9,3 +9,6 @@
 
 // Set volatile wiper (0..127) on the currently selected mux channel
 bool isl22317_set_wiper_on_selected(uint8_t wiper);
+
+// Read current volatile wiper (0..127) on the selected mux channel
+bool isl22317_read_wiper_on_selected(uint8_t &wiper_out);

@@ -11,6 +11,13 @@ constexpr inline uint8_t wiper_code_for_kohms(float Rk_target, float RAB_kohm = 
   return static_cast<uint8_t>(d);
 }
 
+// NEW: Convert the volatile wiper code back to the pot resistance in kΩ.
+// Note: this returns the POT value only. If you want the series "safety" 1 kΩ
+// included (your comment in tgs_lookup_tables.hpp), add 1.0f.
+constexpr inline float kohms_for_wiper_code(uint8_t code, float RAB_kohm = 10.0f) {
+  return (static_cast<float>(code) / 127.0f) * RAB_kohm;
+}
+
 struct CalEntry;    // forward declaration from tgs_lookup_tables.hpp
 
 // Look up ID in table; set digipot; log to Serial.

@@ -10,9 +10,11 @@
 #include <math.h> // For sparklines
 #include <array>
 
+#include "app/boot_read.hpp"
 #include "hal/mux_map.hpp"
 #include "hal/tca9548a.hpp"
 #include "hal/board.hpp"
+#include "hal/i2c_addresses.hpp"
 #include "logging/sd_logger.hpp"
 #include "app/log_format.hpp"
 #include "app/calibration.hpp"
@@ -676,6 +678,15 @@ void setup() {
 
   pump_begin();
   pump_set_percent(50.0f);  // start at 50% (pick what you want)
+
+  // Print TGS state on boot (ID + CRC + wiper + kΩ).
+  // Set 'true' to include the extra +1 kΩ series resistor in the reported value.
+  app::print_tgs_boot_status(
+      muxStateWire,      // your local mux state
+      Wire,                        // I²C bus you use for sensors
+      hal::I2CAddr::TCA9548A,      // mux address from your central header
+      /*include_series_1k=*/false  // set true if you want +1 kΩ added in the printout
+  );
 }
 
 void loop() {
