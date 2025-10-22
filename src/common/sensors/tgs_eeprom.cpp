@@ -1,6 +1,6 @@
 #include "tgs_eeprom.hpp"
-#include "../eeprom/at24_11.hpp"
 #include "hal/i2c_addresses.hpp"
+#include "../eeprom/at24_11.hpp"
 
 bool tgs_read_sensor_id_on_selected(uint16_t &out_id, bool &crc_ok) {
   uint8_t rb[3] = {0};

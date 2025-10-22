@@ -1,7 +1,7 @@
 #pragma once
+
 #include <Arduino.h>
 
-// Project includes
 #include "../src/common/calib/tgs_calibration.hpp"
 
 struct CalEntry { uint16_t id; uint8_t wiper; };

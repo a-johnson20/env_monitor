@@ -8,13 +8,13 @@
 #include <Adafruit_SSD1306.h> // OLED
 #include <driver/ledc.h>   // ESP-IDF LEDC driver
 #include <math.h> // For sparklines
-#include <FS.h>
-#include <SD_MMC.h>
 #include <array>
 
 #include "hal/mux_map.hpp"
 #include "hal/tca9548a.hpp"
 #include "hal/board.hpp"
+#include "logging/sd_logger.hpp"
+#include "app/log_format.hpp"
 #include "app/calibration.hpp"
 #include "common/tgs_lookup_tables.hpp"
 #include "../common/calib/tgs_calibration.hpp"
@@ -54,14 +54,6 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define OLED_ADDR     0x3D
 Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &WireRTC, -1);
 bool oled_present = false;
-
-// ---- SDMMC (4-bit) pins on ESP32-S3 ----
-#define SD_CLK    12
-#define SD_CMD    11
-#define SD_D0     13
-#define SD_D1     14
-#define SD_D2     9
-#define SD_D3     10
 
 // ---------- Error Definition ----------
 #ifdef NO_ERROR
@@ -283,128 +275,6 @@ static void format_timestamp_no_sec(char* out, size_t n) {
   }
 }
 
-// ---- SD logging helpers ----
-bool sd_mounted = false;
-
-static void format_date(char* out, size_t n) {
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
-    snprintf(out, n, "%04d%02d%02d", y, rtc.getMonth(), rtc.getDate());
-  } else {
-    snprintf(out, n, "nodate");
-  }
-}
-
-static String current_log_path() {
-  char d[16];
-  format_date(d, sizeof(d));
-  String p = "/logs/";
-  p += d;
-  p += ".csv";
-  return p;
-}
-
-static void fprint_float_or_na(File& f, float v, int digits) {
-  if (isnan(v)) f.print("NA"); else f.print(v, digits);
-}
-
-static bool sd_begin() {
-  // route SDMMC signals to your pins (needs recent Arduino-ESP32)
-  SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3);
-  // 4-bit mode = second arg false
-  if (!SD_MMC.begin("/sdcard", false, false)) {
-    Serial.println("SD_MMC mount failed (check wiring/pins).");
-    return false;
-  }
-  SD_MMC.mkdir("/logs"); // ensure folder exists
-  Serial.printf("SD card OK: %llu MB\n", SD_MMC.cardSize() / (1024ULL*1024ULL));
-  return (sd_mounted = true);
-}
-
-static void sd_ensure_header(const String& path) {
-  if (!sd_mounted || SD_MMC.exists(path)) return;
-  File f = SD_MMC.open(path, FILE_WRITE);
-  if (!f) return;
-
-  String h = "timestamp";
-
-  // SCD4x
-  for (size_t i = 0; i < N_SCD4X; ++i) {
-    h += ",scd4x_"; h += String(i+1); h += "_co2";
-    h += ",scd4x_"; h += String(i+1); h += "_t";
-    h += ",scd4x_"; h += String(i+1); h += "_rh";
-  }
-
-  // TRHP per-station averages
-  for (size_t i = 0; i < N_TRHP; ++i) {
-    h += ",sht45_";  h += String(i+1); h += "_t_avg";
-    h += ",sht45_";  h += String(i+1); h += "_rh_avg";
-    h += ",tmp117_"; h += String(i+1); h += "_t_avg";
-    h += ",lps22df_";h += String(i+1); h += "_p_avg";
-    h += ",lps22df_";h += String(i+1); h += "_t_avg";
-  }
-
-  // TGS per-probe averages
-  for (size_t i = 0; i < N_TGS2611; ++i) {
-    h += ",tgs2611_"; h += String(i+1); h += "_raw_avg";
-    h += ",tgs2611_"; h += String(i+1); h += "_v_avg";
-  }
-  for (size_t i = 0; i < N_TGS2616; ++i) {
-    h += ",tgs2616_"; h += String(i+1); h += "_raw_avg";
-    h += ",tgs2616_"; h += String(i+1); h += "_v_avg";
-  }
-
-  f.println(h);
-  f.close();
-}
-
-
-static void sd_append_current_row() {
-  if (!sd_mounted) return;
-
-  String path = current_log_path();
-  sd_ensure_header(path);
-
-  char ts[24];
-  format_timestamp(ts, sizeof(ts));
-
-  File f = SD_MMC.open(path, FILE_APPEND);
-  if (!f) { Serial.println("SD open for append failed"); return; }
-
-  f.print(ts);
-
-  // SCD4x per-node
-  for (size_t i = 0; i < N_SCD4X; ++i) {
-    const auto& n = scd4x_nodes[i];
-    bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
-    f.print(','); if (fresh) f.print((unsigned long)n.co2); else f.print("NA");
-    f.print(','); if (fresh) f.print(n.temp, 2);         else f.print("NA");
-    f.print(','); if (fresh) f.print(n.rh,   2);         else f.print("NA");
-  }
-
-  // TRHP per-station
-  for (size_t i = 0; i < N_TRHP; ++i) {
-    f.print(','); if (win_trhp_sht45_t[i].count) f.print(win_trhp_sht45_t[i].mean(), 2); else f.print("NA");
-    f.print(','); if (win_trhp_sht45_rh[i].count)f.print(win_trhp_sht45_rh[i].mean(),2); else f.print("NA");
-    f.print(','); if (win_trhp_tmp117_t[i].count)f.print(win_trhp_tmp117_t[i].mean(),2); else f.print("NA");
-    f.print(','); if (win_trhp_lps_p[i].count)   f.print(win_trhp_lps_p[i].mean(), 2);  else f.print("NA");
-    f.print(','); if (win_trhp_lps_t[i].count)   f.print(win_trhp_lps_t[i].mean(), 2);  else f.print("NA");
-  }
-
-  // TGS per-probe
-  for (size_t i = 0; i < N_TGS2611; ++i) {
-    f.print(','); if (win_tgs2611_raw[i].count) f.print(win_tgs2611_raw[i].mean(), 0); else f.print("NA");
-    f.print(','); if (win_tgs2611_v[i].count)   f.print(win_tgs2611_v[i].mean(),   5); else f.print("NA");
-  }
-  for (size_t i = 0; i < N_TGS2616; ++i) {
-    f.print(','); if (win_tgs2616_raw[i].count) f.print(win_tgs2616_raw[i].mean(), 0); else f.print("NA");
-    f.print(','); if (win_tgs2616_v[i].count)   f.print(win_tgs2616_v[i].mean(),   5); else f.print("NA");
-  }
-
-  f.println();
-  f.close();
-}
-
 static void sample_graphs_if_due() {
   unsigned long now = millis();
   if (now - last_graph_sample_ms < GRAPH_SAMPLE_MS) return;
@@ -436,75 +306,48 @@ static void sample_graphs_if_due() {
 }
 
 static void commit_and_reset_all_windows() {
-  // Serial per-sensor average prints
-  Serial.print("SCD4x: ");
-  for (size_t j=0;j<N_SCD4X;j++) {
-    const auto& n = scd4x_nodes[j];
-    bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
-    Serial.printf("#%u CO2=", unsigned(j+1));
-    if (fresh) Serial.printf("%u", (unsigned)n.co2); else Serial.print("NA");
-    Serial.print("ppm T=");
-    if (fresh) Serial.printf("%.2f", n.temp); else Serial.print("NA");
-    Serial.print("C RH=");
-    if (fresh) Serial.printf("%.2f", n.rh);  else Serial.print("NA");
-    Serial.print("%");
-    Serial.print(j+1==N_SCD4X? "\n" : " | ");
+  // ---- write CSV (same fields as before) ----
+  if (sd_logger::is_mounted()) {
+    const String path = logfmt::current_log_path(rtc_present, rtc);
+    sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
+
+    char ts[24];
+    format_timestamp(ts, sizeof(ts));  // you already have this helper
+
+    String line;
+    line.reserve(512); // cheap speedup
+    line += ts;
+
+    // SCD4x per-node (unchanged)
+    for (size_t i = 0; i < N_SCD4X; ++i) {
+      const auto& n = scd4x_nodes[i];
+      bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+      line += ','; if (fresh) line += String((unsigned long)n.co2); else line += "NA";
+      line += ','; if (fresh) line += String(n.temp, 2);              else line += "NA";
+      line += ','; if (fresh) line += String(n.rh,   2);              else line += "NA";
+    }
+
+    // TRHP per-station avgs (unchanged)
+    for (size_t i = 0; i < N_TRHP; ++i) {
+      line += ','; line += (win_trhp_sht45_t[i].count ? String(win_trhp_sht45_t[i].mean(), 2) : "NA");
+      line += ','; line += (win_trhp_sht45_rh[i].count ? String(win_trhp_sht45_rh[i].mean(), 2) : "NA");
+      line += ','; line += (win_trhp_tmp117_t[i].count ? String(win_trhp_tmp117_t[i].mean(), 2) : "NA");
+      line += ','; line += (win_trhp_lps_p[i].count    ? String(win_trhp_lps_p[i].mean(),  2) : "NA");
+      line += ','; line += (win_trhp_lps_t[i].count    ? String(win_trhp_lps_t[i].mean(),  2) : "NA");
+    }
+
+    // TGS per-probe avgs (unchanged)
+    for (size_t i = 0; i < N_TGS2611; ++i) {
+      line += ','; line += (win_tgs2611_raw[i].count ? String(win_tgs2611_raw[i].mean(), 0) : "NA");
+      line += ','; line += (win_tgs2611_v[i].count   ? String(win_tgs2611_v[i].mean(),   5) : "NA");
+    }
+    for (size_t i = 0; i < N_TGS2616; ++i) {
+      line += ','; line += (win_tgs2616_raw[i].count ? String(win_tgs2616_raw[i].mean(), 0) : "NA");
+      line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
+    }
+
+    sd_logger::append_line(path, line);
   }
-
-  Serial.print("TRHP avgs: ");
-  for (size_t j=0;j<N_TRHP;j++) {
-    Serial.printf("#%u SHT45(T=", unsigned(j+1));
-    if (win_trhp_sht45_t[j].count) Serial.printf("%.2f", win_trhp_sht45_t[j].mean()); else Serial.print("NA");
-    Serial.print("C RH=");
-    if (win_trhp_sht45_rh[j].count) Serial.printf("%.2f", win_trhp_sht45_rh[j].mean()); else Serial.print("NA");
-    Serial.print("%) TMP117(T=");
-    if (win_trhp_tmp117_t[j].count) Serial.printf("%.2f", win_trhp_tmp117_t[j].mean()); else Serial.print("NA");
-    Serial.print("C) LPS22DF(P=");
-    if (win_trhp_lps_p[j].count)    Serial.printf("%.2f", win_trhp_lps_p[j].mean());    else Serial.print("NA");
-    Serial.print("hPa T=");
-    if (win_trhp_lps_t[j].count)    Serial.printf("%.2f", win_trhp_lps_t[j].mean());    else Serial.print("NA");
-    Serial.print("C)");
-    Serial.print(j+1==N_TRHP? "\n" : " | ");
-  }
-
-  Serial.print("TGS2611 avgs: ");
-  for (size_t j=0;j<N_TGS2611;j++) {
-    Serial.printf("#%u raw=", unsigned(j+1));
-    if (win_tgs2611_raw[j].count) Serial.printf("%.0f", win_tgs2611_raw[j].mean()); else Serial.print("NA");
-    Serial.print(" V=");
-    if (win_tgs2611_v[j].count)   Serial.printf("%.5f", win_tgs2611_v[j].mean());   else Serial.print("NA");
-    Serial.print(j+1==N_TGS2611? "\n" : " | ");
-  }
-
-  Serial.print("TGS2616 avgs: ");
-  for (size_t j=0;j<N_TGS2616;j++) {
-    Serial.printf("#%u raw=", unsigned(j+1));
-    if (win_tgs2616_raw[j].count) Serial.printf("%.0f", win_tgs2616_raw[j].mean()); else Serial.print("NA");
-    Serial.print(" V=");
-    if (win_tgs2616_v[j].count)   Serial.printf("%.5f", win_tgs2616_v[j].mean());   else Serial.print("NA");
-    Serial.print(j+1==N_TGS2616? "\n" : " | ");
-  }
-
-  // Log CSV (uses per-sensor windows)+
-  sd_append_current_row();  // already writes per-sensor averages and NAs
-
-  // Push one OLED sample now so the sparkline aligns with the commit (optional but nice)
-  sample_graphs_if_due();  // or make a sample_graphs_now() that doesn’t time-check
-
-  // Reset ALL per-sensor windows after logging
-  for (auto& a : win_trhp_sht45_t) a.reset();
-  for (auto& a : win_trhp_sht45_rh) a.reset();
-  for (auto& a : win_trhp_tmp117_t) a.reset();
-  for (auto& a : win_trhp_lps_p) a.reset();
-  for (auto& a : win_trhp_lps_t) a.reset();
-
-  for (auto& a : win_tgs2611_raw) a.reset();
-  for (auto& a : win_tgs2611_v)   a.reset();
-  for (auto& a : win_tgs2616_raw) a.reset();
-  for (auto& a : win_tgs2616_v)   a.reset();
-
-  // Reset the scd4x_fresh flags
-  for (auto& f : scd4x_fresh) f = false;
 }
 
 // ---------- SCD4x ----------
@@ -827,7 +670,7 @@ void setup() {
     ++i;
   }
 
-  if (!sd_begin()) {
+  if (!sd_logger::begin()) {
     Serial.println("WARNING: SD logging disabled.");
   }
 

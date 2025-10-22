@@ -1,4 +1,5 @@
 #pragma once
+
 #include <cstdint>
 
 namespace hal::I2CAddr {

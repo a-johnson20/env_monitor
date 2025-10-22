@@ -1,4 +1,5 @@
 #include <algorithm>
+
 #include "at24_11.hpp"
 
 static const uint8_t AT24_PAGE = 8;  // AT24C02-compatible (8-byte pages)
