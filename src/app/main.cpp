@@ -134,8 +134,6 @@ std::array<bool, N_SCD4X> scd4x_fresh{};  // new sample since last commit?
 unsigned long scd4x_tick_start_ms = 0;    // start time of the current averaging window
 static unsigned long no_scd_last_commit_ms = 0; // periodic backup commit for the no-SCD4x case
 
-
-
 // ---- 15-minute sparkline history ----
 static const uint16_t SPARK_W   = OLED_WIDTH;              // 128
 static const uint16_t SPARK_H   = OLED_HEIGHT - 16;        // graph area height (below header)
@@ -307,51 +305,74 @@ static void sample_graphs_if_due() {
 
 }
 
+static void reset_windows_and_flags() {
+  for (auto &w : win_trhp_sht45_t) w.reset();
+  for (auto &w : win_trhp_sht45_rh) w.reset();
+  for (auto &w : win_trhp_tmp117_t) w.reset();
+  for (auto &w : win_trhp_lps_p)    w.reset();
+  for (auto &w : win_trhp_lps_t)    w.reset();
+
+  for (auto &w : win_tgs2611_raw) w.reset();
+  for (auto &w : win_tgs2611_v)   w.reset();
+  for (auto &w : win_tgs2616_raw) w.reset();
+  for (auto &w : win_tgs2616_v)   w.reset();
+
+  for (size_t k = 0; k < N_SCD4X; ++k) scd4x_fresh[k] = false;
+}
+
+
 static void commit_and_reset_all_windows() {
-  // ---- write CSV (same fields as before) ----
+  // Timestamp (always)
+  char ts[24];
+  format_timestamp(ts, sizeof(ts));
+
+  // Build the line (always)
+  String line;
+  line.reserve(512);
+  line += ts;
+
+  // SCD4x
+  for (size_t i = 0; i < N_SCD4X; ++i) {
+    const auto& n = scd4x_nodes[i];
+    bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+    line += ','; line += (fresh ? String((unsigned long)n.co2) : "NA");
+    line += ','; line += (fresh ? String(n.temp, 2)             : "NA");
+    line += ','; line += (fresh ? String(n.rh,   2)             : "NA");
+  }
+
+  // TRHP avgs
+  for (size_t i = 0; i < N_TRHP; ++i) {
+    line += ','; line += (win_trhp_sht45_t[i].count ? String(win_trhp_sht45_t[i].mean(), 2) : "NA");
+    line += ','; line += (win_trhp_sht45_rh[i].count ? String(win_trhp_sht45_rh[i].mean(), 2) : "NA");
+    line += ','; line += (win_trhp_tmp117_t[i].count ? String(win_trhp_tmp117_t[i].mean(), 2) : "NA");
+    line += ','; line += (win_trhp_lps_p[i].count    ? String(win_trhp_lps_p[i].mean(),  2) : "NA");
+    line += ','; line += (win_trhp_lps_t[i].count    ? String(win_trhp_lps_t[i].mean(),  2) : "NA");
+  }
+
+  // TGS avgs
+  for (size_t i = 0; i < N_TGS2611; ++i) {
+    line += ','; line += (win_tgs2611_raw[i].count ? String(win_tgs2611_raw[i].mean(), 0) : "NA");
+    line += ','; line += (win_tgs2611_v[i].count   ? String(win_tgs2611_v[i].mean(),   5) : "NA");
+  }
+  for (size_t i = 0; i < N_TGS2616; ++i) {
+    line += ','; line += (win_tgs2616_raw[i].count ? String(win_tgs2616_raw[i].mean(), 0) : "NA");
+    line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
+  }
+
+  // Always print to Serial
+  Serial.println(line);
+
+  // Only SD work is gated
   if (sd_logger::is_mounted()) {
     const String path = logfmt::current_log_path(rtc_present, rtc);
     sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
-
-    char ts[24];
-    format_timestamp(ts, sizeof(ts));  // you already have this helper
-
-    String line;
-    line.reserve(512); // cheap speedup
-    line += ts;
-
-    // SCD4x per-node (unchanged)
-    for (size_t i = 0; i < N_SCD4X; ++i) {
-      const auto& n = scd4x_nodes[i];
-      bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
-      line += ','; if (fresh) line += String((unsigned long)n.co2); else line += "NA";
-      line += ','; if (fresh) line += String(n.temp, 2);              else line += "NA";
-      line += ','; if (fresh) line += String(n.rh,   2);              else line += "NA";
-    }
-
-    // TRHP per-station avgs (unchanged)
-    for (size_t i = 0; i < N_TRHP; ++i) {
-      line += ','; line += (win_trhp_sht45_t[i].count ? String(win_trhp_sht45_t[i].mean(), 2) : "NA");
-      line += ','; line += (win_trhp_sht45_rh[i].count ? String(win_trhp_sht45_rh[i].mean(), 2) : "NA");
-      line += ','; line += (win_trhp_tmp117_t[i].count ? String(win_trhp_tmp117_t[i].mean(), 2) : "NA");
-      line += ','; line += (win_trhp_lps_p[i].count    ? String(win_trhp_lps_p[i].mean(),  2) : "NA");
-      line += ','; line += (win_trhp_lps_t[i].count    ? String(win_trhp_lps_t[i].mean(),  2) : "NA");
-    }
-
-    // TGS per-probe avgs (unchanged)
-    for (size_t i = 0; i < N_TGS2611; ++i) {
-      line += ','; line += (win_tgs2611_raw[i].count ? String(win_tgs2611_raw[i].mean(), 0) : "NA");
-      line += ','; line += (win_tgs2611_v[i].count   ? String(win_tgs2611_v[i].mean(),   5) : "NA");
-    }
-    for (size_t i = 0; i < N_TGS2616; ++i) {
-      line += ','; line += (win_tgs2616_raw[i].count ? String(win_tgs2616_raw[i].mean(), 0) : "NA");
-      line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
-    }
-
-    sd_logger::append_line(path, line); // save to SD
-    Serial.println(line); // print to serial as well
+    sd_logger::append_line(path, line);
   }
+
+  // Reset per-window state (your new helper)
+  reset_windows_and_flags();
 }
+
 
 // ---------- SCD4x ----------
 bool scd4x_present() { Wire.beginTransmission(SCD41_I2C_ADDR_62); return Wire.endTransmission() == 0; }
