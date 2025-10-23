@@ -348,7 +348,8 @@ static void commit_and_reset_all_windows() {
       line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
     }
 
-    sd_logger::append_line(path, line);
+    sd_logger::append_line(path, line); // save to SD
+    Serial.println(line); // print to serial as well
   }
 }
 
@@ -679,13 +680,15 @@ void setup() {
   pump_begin();
   pump_set_percent(50.0f);  // start at 50% (pick what you want)
 
+  delay(10000); // Give time to open serial monitor
+
   // Print TGS state on boot (ID + CRC + wiper + kΩ).
   // Set 'true' to include the extra +1 kΩ series resistor in the reported value.
   app::print_tgs_boot_status(
       muxStateWire,      // your local mux state
       Wire,                        // I²C bus you use for sensors
       hal::I2CAddr::TCA9548A,      // mux address from your central header
-      /*include_series_1k=*/false  // set true if you want +1 kΩ added in the printout
+      false  // set true if you want +1 kΩ added in the printout
   );
 }
 

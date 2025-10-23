@@ -29,4 +29,4 @@ void calibrate_all_tgs2616(hal::Mux::Tca9548State& muxState,
   }
 }
 
-} // namespace app
+}
