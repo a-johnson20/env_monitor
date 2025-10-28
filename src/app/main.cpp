@@ -20,6 +20,8 @@
 #include "app/calibration.hpp"
 #include "common/tgs_lookup_tables.hpp"
 #include "../common/calib/tgs_calibration.hpp"
+#include "ui/serial_menu.hpp"
+#include "net/wifi_manager.hpp"
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -359,8 +361,10 @@ static void commit_and_reset_all_windows() {
     line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
   }
 
-  // Always print to Serial
-  Serial.println(line);
+  // Print to Serial ONLY when "Live data" is selected in the menu
+  if (ui::live_stream_enabled()) {
+    Serial.println(line);
+  }
 
   // Only SD work is gated
   if (sd_logger::is_mounted()) {
@@ -628,6 +632,9 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Serial open");
 
+  wifi::begin();
+  ui::begin();
+
   pinMode(LDO_Sensors_EN, OUTPUT);
   digitalWrite(LDO_Sensors_EN, HIGH); // power sensors
 
@@ -714,6 +721,8 @@ void setup() {
 }
 
 void loop() {
+
+  ui::poll();
 
   // --------- SCD4x ---------
   {
