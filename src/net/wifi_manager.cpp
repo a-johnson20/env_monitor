@@ -56,26 +56,42 @@ std::vector<NetInfo> scan() {
   std::vector<NetInfo> out;
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(); // ensures fresh scan
-  int n = WiFi.scanNetworks(/*async=*/false, /*hidden=*/true);
-  for (int i=0;i<n;++i) {
+  int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
+
+  for (int i = 0; i < n; ++i) {
     NetInfo ni;
     String ssid;
-    uint8_t enc;                // <- uint8_t
+    uint8_t enc;
     int32_t rssi;
     uint8_t* bssid = nullptr;
     int32_t channel;
 
-    WiFi.getNetworkInfo(i, ssid, enc, rssi, bssid, channel); // <- no 'hidden'
+    WiFi.getNetworkInfo(i, ssid, enc, rssi, bssid, channel);
 
     ni.ssid   = ssid;
     ni.rssi   = rssi;
     ni.channel= (uint8_t)(channel & 0xFF);
-    ni.sec    = map_auth_mode((wifi_auth_mode_t)enc); // <- cast to map
+    ni.sec    = map_auth_mode((wifi_auth_mode_t)enc);
     out.push_back(ni);
   }
-  // sort by RSSI desc
-  std::sort(out.begin(), out.end(), [](const NetInfo&a, const NetInfo&b){ return a.rssi>b.rssi; });
-  return out;
+
+  // Sort by strongest first
+  std::sort(out.begin(), out.end(),
+            [](const NetInfo& a, const NetInfo& b) { return a.rssi > b.rssi; });
+
+  // Collapse duplicates by SSID (keep first = strongest); skip hidden (empty SSID)
+  std::vector<NetInfo> dedup;
+  dedup.reserve(out.size());
+  for (const auto& n : out) {
+    if (n.ssid.length() == 0) continue;           // skip hidden
+    bool seen = false;
+    for (const auto& d : dedup) {
+      if (d.ssid == n.ssid) { seen = true; break; }
+    }
+    if (!seen) dedup.push_back(n);
+  }
+
+  return dedup;
 }
 
 static bool wait_for_ip(uint32_t timeout_ms) {
