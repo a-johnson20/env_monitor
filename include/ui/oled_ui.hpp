@@ -36,6 +36,14 @@ struct Model {
 
   float tgs2616_v = NAN;
   bool  tgs2616_v_fresh = false;
+
+  // Channel index & count (for titles like "CO2 #2")
+  uint8_t co2_idx = 0,    co2_n = 1;
+  uint8_t rh_idx  = 0,    rh_n  = 1;
+  uint8_t t_idx   = 0,    t_n   = 1;
+  uint8_t p_idx   = 0,    p_n   = 1;
+  uint8_t v2611_idx = 0,  v2611_n = 1;
+  uint8_t v2616_idx = 0,  v2616_n = 1;
 };
 
 // Encapsulates the SSD1306 and all drawing/screen-rotation logic.
@@ -51,6 +59,13 @@ public:
   // Update the screen at most every `min_period_ms`. Safe to call each loop.
   void update(const Model& m, unsigned long min_period_ms = 2000);
 
+  // --- Paging API ---
+  enum class Page : uint8_t { Time, CO2, RH, T, P, V2611, V2616, Count };
+  void setPage(Page p);                       // switch immediately
+  void nextPage();                            // advance 1 page
+  void setAutoRotate(bool on, unsigned long period_ms = 2000);
+  Page currentPage() const { return page_; }
+
   // Manually clear and splash a short message (e.g., during boot).
   void splash(const __FlashStringHelper* line1, const __FlashStringHelper* line2 = nullptr);
 
@@ -60,6 +75,7 @@ public:
 private:
   void drawHeader_(const Model& m);
   void drawGraph_(float value, bool fresh, const char* label);
+  void renderPage_(const Model& m);
   void pushSample_(float value, bool fresh, uint8_t which);
 
 private:
@@ -86,6 +102,12 @@ private:
   static constexpr unsigned long GRAPH_SPAN_MS_   = 15UL * 60UL * 1000UL; // 15 min
   unsigned long GRAPH_SAMPLE_MS_ = 7000; // computed from W_
   Spark sparks_[M_COUNT];
+
+  // Paging state
+  Page page_ = Page::CO2;
+  bool autorotate_ = true;
+  unsigned long page_period_ms_ = 2000;
+  unsigned long last_page_ms_ = 0;
 };
 
 } // namespace ui

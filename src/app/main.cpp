@@ -52,11 +52,6 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define PUMP_LEDC_TIMER  LEDC_TIMER_0
 #define PUMP_LEDC_CH     LEDC_CHANNEL_0
 
-// ---------- OLED ----------
-// #define OLED_WIDTH    128
-// #define OLED_HEIGHT   64
-// #define OLED_ADDR     0x3D
-
 // ---------- Error Definition ----------
 #ifdef NO_ERROR
 #undef NO_ERROR
@@ -205,8 +200,9 @@ static void print_timestamp() { char buf[24]; format_timestamp(buf, sizeof(buf))
 static void format_timestamp_no_sec(char* out, size_t n) {
   if (rtc_present && rtc.updateTime()) {
     int y = rtc.getYear(); if (y < 100) y += 2000;
-    snprintf(out, n, "%04d-%02d-%02d %02d:%02d",
-             y, rtc.getMonth(), rtc.getDate(),
+    // DD/MM/YYYY HH:MM
+    snprintf(out, n, "%02d/%02d/%04d %02d:%02d",
+             rtc.getDate(), rtc.getMonth(), y,
              rtc.getHours(), rtc.getMinutes());
   } else {
     snprintf(out, n, "RTC NA");
@@ -407,8 +403,11 @@ void setup() {
   WireRTC.begin(RTC_SDA, RTC_SCL);
 
   bool ok = oled.begin(WireRTC, hal::I2CAddr::SSD1306, /* W */128, /* H */64);
-  // (optional) show boot splash
+
   if (ok) oled.splash(F("Booting..."), F("Sensors..."));
+  oled.setAutoRotate(true, 2000);                  // rotate pages every 2s
+  oled.setPage(ui::OledUi::Page::Time);            // start on Time page (optional)
+
 
   WireRTC.setClock(400000);
 
@@ -479,6 +478,56 @@ void setup() {
 void loop() {
 
   ui::poll();
+
+  // --- Channel rotation state (ADD THIS BLOCK) ---
+  static uint8_t idx_co2 = 0, idx_trhp = 0, idx_2611 = 0, idx_2616 = 0;
+  static unsigned long last_idx_ms = 0;
+  const unsigned long IDX_PERIOD_MS = 2000; // match your page period if you like
+
+  if (millis() - last_idx_ms >= IDX_PERIOD_MS) {
+    last_idx_ms = millis();
+
+    // RUNTIME (non-const) sizes so the compiler won't fold them
+    uint8_t scdN   = static_cast<uint8_t>(N_SCD4X);
+    uint8_t trhpN  = static_cast<uint8_t>(N_TRHP);
+    uint8_t v2611N = static_cast<uint8_t>(N_TGS2611);
+    uint8_t v2616N = static_cast<uint8_t>(N_TGS2616);
+
+    switch (oled.currentPage()) {
+      case ui::OledUi::Page::CO2:
+        if (scdN) {                      // increment + wrap (no modulo)
+          idx_co2++;
+          if (idx_co2 >= scdN) idx_co2 = 0;
+        }
+        break;
+
+      case ui::OledUi::Page::RH:
+      case ui::OledUi::Page::T:
+      case ui::OledUi::Page::P:
+        if (trhpN) {
+          idx_trhp++;
+          if (idx_trhp >= trhpN) idx_trhp = 0;
+        }
+        break;
+
+      case ui::OledUi::Page::V2611:
+        if (v2611N) {
+          idx_2611++;
+          if (idx_2611 >= v2611N) idx_2611 = 0;
+        }
+        break;
+
+      case ui::OledUi::Page::V2616:
+        if (v2616N) {
+          idx_2616++;
+          if (idx_2616 >= v2616N) idx_2616 = 0;
+        }
+        break;
+
+      default: break; // Time page
+    }
+  }
+
 
   // --------- SCD4x ---------
   {
@@ -606,41 +655,48 @@ void loop() {
   // Fill the UI model from your freshest values
   ui::Model m;
 
-  // Clock (uses your RTC helper)
   static char clock_buf[24];
   format_timestamp_no_sec(clock_buf, sizeof(clock_buf));
   m.clock_text = clock_buf;
 
-  // CO2 (pick one SCD4x to feature, or compute an average)
+  // CO2 from rotating index
   if (N_SCD4X > 0) {
-    const auto& n = scd4x_nodes[0];
+    const auto& n = scd4x_nodes[idx_co2];
     m.co2_ppm   = n.co2;
     m.co2_fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+    m.co2_idx = idx_co2;
+    m.co2_n   = N_SCD4X;
   }
 
-  // RH (use your running window on TRHP[0] as an example)
+  // TRHP-derived metrics (same rotating index)
   if (N_TRHP > 0) {
-    m.sht45_rh       = win_trhp_sht45_rh[0].mean();
-    m.sht45_rh_fresh = (win_trhp_sht45_rh[0].count > 0);
+    m.sht45_rh       = win_trhp_sht45_rh[idx_trhp].mean();
+    m.sht45_rh_fresh = (win_trhp_sht45_rh[idx_trhp].count > 0);
 
-    m.tmp117_t       = win_trhp_tmp117_t[0].mean();
-    m.tmp117_t_fresh = (win_trhp_tmp117_t[0].count > 0);
+    m.tmp117_t       = win_trhp_tmp117_t[idx_trhp].mean();
+    m.tmp117_t_fresh = (win_trhp_tmp117_t[idx_trhp].count > 0);
 
-    m.lps22df_p       = win_trhp_lps_p[0].mean();
-    m.lps22df_p_fresh = (win_trhp_lps_p[0].count > 0);
+    m.lps22df_p       = win_trhp_lps_p[idx_trhp].mean();
+    m.lps22df_p_fresh = (win_trhp_lps_p[idx_trhp].count > 0);
+
+    m.rh_idx = m.t_idx = m.p_idx = idx_trhp;
+    m.rh_n   = m.t_n   = m.p_n   = N_TRHP;
   }
 
-  // TGS voltages (first channel as example)
+  // TGS voltages (rotating indices)
   if (N_TGS2611 > 0) {
-    m.tgs2611_v       = win_tgs2611_v[0].mean();
-    m.tgs2611_v_fresh = (win_tgs2611_v[0].count > 0);
+    m.tgs2611_v       = win_tgs2611_v[idx_2611].mean();
+    m.tgs2611_v_fresh = (win_tgs2611_v[idx_2611].count > 0);
+    m.v2611_idx = idx_2611;
+    m.v2611_n   = N_TGS2611;
   }
   if (N_TGS2616 > 0) {
-    m.tgs2616_v       = win_tgs2616_v[0].mean();
-    m.tgs2616_v_fresh = (win_tgs2616_v[0].count > 0);
+    m.tgs2616_v       = win_tgs2616_v[idx_2616].mean();
+    m.tgs2616_v_fresh = (win_tgs2616_v[idx_2616].count > 0);
+    m.v2616_idx = idx_2616;
+    m.v2616_n   = N_TGS2616;
   }
 
-  // Let the UI decide when to refresh/spark-sample
   oled.update(m);
   delay(100);
 }
