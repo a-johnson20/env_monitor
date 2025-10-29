@@ -4,10 +4,8 @@
 #include <Wire.h>
 #include <SensirionI2cScd4x.h>
 #include <RV-3028-C7.h>          // constiko / RV-3028_C7-Arduino_Library
-#include <Adafruit_GFX.h>
-#include <Adafruit_SSD1306.h> // OLED
+#include <math.h>
 #include <driver/ledc.h>   // ESP-IDF LEDC driver
-#include <math.h> // For sparklines
 #include <array>
 
 #include "app/boot_read.hpp"
@@ -22,17 +20,19 @@
 #include "../common/calib/tgs_calibration.hpp"
 #include "ui/serial_menu.hpp"
 #include "net/wifi_manager.hpp"
+#include "ui/oled_ui.hpp"
 
 // Namespaces using
 using hal::Mux::Ch;
 
 static hal::Mux::Tca9548State muxStateWire;
 
+static ui::OledUi oled;
+
 // ---------- I2C buses ----------
 TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors stay on default Wire
 
 // ---------- Pins / I2C / MUX ----------
-#define TCA9548A_ADDR   0x70
 
 // Sensor bus (through TCA9548A)
 #define SDA 5
@@ -53,11 +53,9 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define PUMP_LEDC_CH     LEDC_CHANNEL_0
 
 // ---------- OLED ----------
-#define OLED_WIDTH    128
-#define OLED_HEIGHT   64
-#define OLED_ADDR     0x3D
-Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &WireRTC, -1);
-bool oled_present = false;
+// #define OLED_WIDTH    128
+// #define OLED_HEIGHT   64
+// #define OLED_ADDR     0x3D
 
 // ---------- Error Definition ----------
 #ifdef NO_ERROR
@@ -135,68 +133,6 @@ constexpr unsigned long SCD_FRESH_MS = 10000UL;  // 10s limit for freshness
 std::array<bool, N_SCD4X> scd4x_fresh{};  // new sample since last commit?
 unsigned long scd4x_tick_start_ms = 0;    // start time of the current averaging window
 static unsigned long no_scd_last_commit_ms = 0; // periodic backup commit for the no-SCD4x case
-
-// ---- 15-minute sparkline history ----
-static const uint16_t SPARK_W   = OLED_WIDTH;              // 128
-static const uint16_t SPARK_H   = OLED_HEIGHT - 16;        // graph area height (below header)
-static const uint16_t SPARK_Y0  = 16;                       // graph top
-static const unsigned long GRAPH_SPAN_MS   = 15UL * 60UL * 1000UL; // 15 min
-static const unsigned long GRAPH_SAMPLE_MS = GRAPH_SPAN_MS / SPARK_W; // ~7031 ms
-
-struct Spark {
-  float   v[SPARK_W];
-  uint8_t valid[SPARK_W];
-  uint16_t head = SPARK_W - 1; // last written index
-  bool filled = false;
-
-  inline void push(float x, bool ok) {
-    head = (head + 1) % SPARK_W;
-    v[head] = x;
-    valid[head] = ok ? 1 : 0;
-    if (head == SPARK_W - 1) filled = true;
-  }
-
-  inline bool hasData() const { 
-    if (filled) return true;
-    for (uint16_t i=0;i<=head;i++) if (valid[i]) return true;
-    return false;
-  }
-
-  void draw(Adafruit_SSD1306& d, int y0, int h) const {
-    if (!hasData()) return;
-    float mn = INFINITY, mx = -INFINITY;
-    for (uint16_t i=0;i<SPARK_W;i++) if (valid[i]) { if (v[i]<mn) mn=v[i]; if (v[i]>mx) mx=v[i]; }
-    if (!(mx>mn)) {               // all same or single point
-      if (isfinite(mn)) {
-        int y = y0 + h/2;
-        d.drawLine(0, y, SPARK_W-1, y, SSD1306_WHITE);
-      }
-      return;
-    }
-    // small padding so the trace doesn't touch edges
-    float pad = 0.05f * (mx - mn);
-    mn -= pad; mx += pad;
-
-    int prevx = -1, prevy = -1;
-    for (uint16_t i=0;i<SPARK_W;i++) {
-      uint16_t idx = (head + 1 + i) % SPARK_W;   // oldest → newest maps to x=0..127
-      if (!valid[idx]) { prevx = -1; continue; }
-      float val = v[idx];
-      int x = i;
-      int y = y0 + h - 1 - (int)((val - mn) * (h - 1) / (mx - mn));
-      if (prevx >= 0) d.drawLine(prevx, prevy, x, y, SSD1306_WHITE);
-      prevx = x; prevy = y;
-    }
-  }
-};
-
-// One sparkline per *sensor* for the displayed metrics
-std::array<Spark, N_SCD4X>   hist_scd4x_co2{};
-std::array<Spark, N_TRHP>    hist_trhp_rh{}, hist_tmp117_t{}, hist_lps22df_p{};
-std::array<Spark, N_TGS2611> hist_tgs2611_v{};
-std::array<Spark, N_TGS2616> hist_tgs2616_v{};
-
-unsigned long last_graph_sample_ms = 0;
 
 // ---------- Utils ----------
 uint8_t crc8(const uint8_t* data, int len) {
@@ -277,36 +213,6 @@ static void format_timestamp_no_sec(char* out, size_t n) {
   }
 }
 
-static void sample_graphs_if_due() {
-  unsigned long now = millis();
-  if (now - last_graph_sample_ms < GRAPH_SAMPLE_MS) return;
-  last_graph_sample_ms = now;
-
-  // SCD4x (per node)
-  for (size_t i=0;i<N_SCD4X;i++) {
-    const auto& n = scd4x_nodes[i];
-    bool ok = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
-    float v = ok ? (float)n.co2 : NAN;
-    hist_scd4x_co2[i].push(v, ok);
-  }
-
-  // TRHP per station
-  for (size_t i=0;i<N_TRHP;i++) {
-    hist_trhp_rh[i].push(     win_trhp_sht45_rh[i].mean(), win_trhp_sht45_rh[i].count>0);
-    hist_tmp117_t[i].push(    win_trhp_tmp117_t[i].mean(), win_trhp_tmp117_t[i].count>0);
-    hist_lps22df_p[i].push(   win_trhp_lps_p[i].mean(),    win_trhp_lps_p[i].count>0);
-  }
-
-  // TGS per probe
-  for (size_t i=0;i<N_TGS2611;i++) {
-    hist_tgs2611_v[i].push(win_tgs2611_v[i].mean(), win_tgs2611_v[i].count>0);
-  }
-  for (size_t i=0;i<N_TGS2616;i++) {
-    hist_tgs2616_v[i].push(win_tgs2616_v[i].mean(), win_tgs2616_v[i].count>0);
-  }
-
-}
-
 static void reset_windows_and_flags() {
   for (auto &w : win_trhp_sht45_t) w.reset();
   for (auto &w : win_trhp_sht45_rh) w.reset();
@@ -379,7 +285,7 @@ static void commit_and_reset_all_windows() {
 
 
 // ---------- SCD4x ----------
-bool scd4x_present() { Wire.beginTransmission(SCD41_I2C_ADDR_62); return Wire.endTransmission() == 0; }
+bool scd4x_present() { Wire.beginTransmission(hal::I2CAddr::SCD41); return Wire.endTransmission() == 0; }
 void scd4x_ensure_running(Scd4xReading &st) {
   if (st.started) return;
   st.present = scd4x_present(); if (!st.present) return;
@@ -426,12 +332,11 @@ bool tmp117_measure(Tmp117Reading &out) {
 
 // ---------- LPS22DF ----------
 static const unsigned long LPS22DF_RECFG_MS = 1500;
-static void lps22df_write(uint8_t reg, uint8_t val) { const uint8_t a = 0x5D; Wire.beginTransmission(a); Wire.write(reg); Wire.write(val); Wire.endTransmission(); }
-static const uint8_t LPS22DF_ADDR = 0x5D;
+static void lps22df_write(uint8_t reg, uint8_t val) { Wire.beginTransmission(hal::I2CAddr::LPS22DF); Wire.write(reg); Wire.write(val); Wire.endTransmission(); }
 static bool lps22df_read_u8(uint8_t reg, uint8_t& v) {
-  Wire.beginTransmission(LPS22DF_ADDR); Wire.write(reg);
+  Wire.beginTransmission(hal::I2CAddr::LPS22DF); Wire.write(reg);
   if (Wire.endTransmission(false) != 0) return false;
-  if (Wire.requestFrom(LPS22DF_ADDR, (uint8_t)1) != 1) return false;
+  if (Wire.requestFrom(hal::I2CAddr::LPS22DF, (uint8_t)1) != 1) return false;
   v = Wire.read(); return true;
 }
 bool lps22df_begin_on_selected(Lps22dfReading &state) {
@@ -442,20 +347,19 @@ bool lps22df_begin_on_selected(Lps22dfReading &state) {
   state.present=true; state.configured=true; state.last_ok_ms=millis(); return true;
 }
 bool lps22df_read(Lps22dfReading &out) {
-  const uint8_t a = 0x5D;
-  Wire.beginTransmission(a); Wire.write(0x27); Wire.endTransmission(false);
-  Wire.requestFrom(a, (uint8_t)1); if (!Wire.available()) return false;
+  Wire.beginTransmission(hal::I2CAddr::LPS22DF); Wire.write(0x27); Wire.endTransmission(false);
+  Wire.requestFrom(hal::I2CAddr::LPS22DF, (uint8_t)1); if (!Wire.available()) return false;
   uint8_t status = Wire.read(); bool got=false;
   if (status & 0x01) {
-    Wire.beginTransmission(a); Wire.write(0x28); Wire.endTransmission(false);
-    Wire.requestFrom(a, (uint8_t)3);
+    Wire.beginTransmission(hal::I2CAddr::LPS22DF); Wire.write(0x28); Wire.endTransmission(false);
+    Wire.requestFrom(hal::I2CAddr::LPS22DF, (uint8_t)3);
     if (Wire.available()==3) { uint8_t xl=Wire.read(), l=Wire.read(), h=Wire.read();
       int32_t raw = (int32_t)((h<<16)|(l<<8)|xl); if (raw & 0x800000) raw |= 0xFF000000;
       out.pressure = raw / 4096.0f; out.p_ready=true; got=true; }
   }
   if (status & 0x02) {
-    Wire.beginTransmission(a); Wire.write(0x2B); Wire.endTransmission(false);
-    Wire.requestFrom(a, (uint8_t)2);
+    Wire.beginTransmission(hal::I2CAddr::LPS22DF); Wire.write(0x2B); Wire.endTransmission(false);
+    Wire.requestFrom(hal::I2CAddr::LPS22DF, (uint8_t)2);
     if (Wire.available()==2) { uint8_t tl=Wire.read(), th=Wire.read(); int16_t raw=(int16_t)((th<<8)|tl);
       out.temp = raw / 100.0f; out.t_ready=true; got=true; }
   }
@@ -468,10 +372,9 @@ bool lps22df_read_with_autorecover(Lps22dfReading &st) {
 }
 
 // ---------- ADS1113 ----------
-static const uint8_t ADS1113_ADDR = 0x48;
 static const float    ADS1113_LSB_V = 0.000125f;
 bool ads1113_single_shot(int16_t &raw) {
-  const uint8_t a = ADS1113_ADDR;
+  const uint8_t a = hal::I2CAddr::ADS1113;
   uint16_t cfg = (1u<<15)|(0b100<<12)|(0b001<<9)|(1u<<8)|(0b100<<5)|(0b11);
   Wire.beginTransmission(a); Wire.write(0x01); Wire.write((uint8_t)(cfg>>8)); Wire.write((uint8_t)(cfg&0xFF));
   if (Wire.endTransmission()!=0) return false;
@@ -479,149 +382,6 @@ bool ads1113_single_shot(int16_t &raw) {
   Wire.beginTransmission(a); Wire.write(0x00); Wire.endTransmission(false);
   Wire.requestFrom(a, (uint8_t)2); if (Wire.available()!=2) return false;
   raw = (int16_t)((Wire.read()<<8)|Wire.read()); return true;
-}
-
-// ---------- OLED UI ----------
-enum ScreenPage : uint8_t { SCR_TIME=0, SCR_CO2, SCR_SHT45_RH, SCR_TMP117_T, SCR_LPS22DF_P, SCR_TGS2611_V, SCR_TGS2616_V, SCR_COUNT };
-static ScreenPage screen_index = SCR_TIME;
-unsigned long last_screen_ms = 0;
-const unsigned long SCREEN_PERIOD_MS = 2000;
-
-static uint8_t sub_idx = 0;
-
-static uint8_t subcount_for(uint8_t page) {
-  switch (page) {
-    case SCR_TGS2611_V: return N_TGS2611 ? (uint8_t)N_TGS2611 : 1;
-    case SCR_TGS2616_V: return N_TGS2616 ? (uint8_t)N_TGS2616 : 1;
-    case SCR_CO2:       return N_SCD4X  ? (uint8_t)N_SCD4X  : 1;
-    case SCR_SHT45_RH:  return N_TRHP   ? (uint8_t)N_TRHP   : 1;
-    case SCR_TMP117_T:  return N_TRHP   ? (uint8_t)N_TRHP   : 1;
-    case SCR_LPS22DF_P: return N_TRHP   ? (uint8_t)N_TRHP   : 1;
-    default:            return 1;
-  }
-}
-
-/* NOT USED ANYMORE
-uint8_t screen_index = SCR_TIME;
-
-uint8_t scd4x_oled_idx   = 0;
-uint8_t trhp_oled_idx    = 0;     // used for SHT45 RH, TMP117 T, LPS22DF P
-uint8_t tgs2611_oled_idx = 0;
-uint8_t tgs2616_oled_idx = 0;
-*/
-
-static void oled_show_value_and_graph(const char* title, const char* value, const Spark& s) {
-  if (!oled_present) return;
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-
-  // Header + value
-  display.setTextSize(1);
-  display.setCursor(0, 0);
-  display.print(title);
-  display.setCursor(0, 8);
-  display.print(value);
-
-  // Graph (no axes/labels)
-  s.draw(display, SPARK_Y0, SPARK_H);
-
-  display.display();
-}
-
-// e.g. for time
-static void oled_show_text(const char* title, const char* value) {
-  if (!oled_present) return;
-  display.clearDisplay();
-  display.setTextColor(SSD1306_WHITE);
-  display.setTextSize(1); display.setCursor(0, 0); display.print(title);
-  display.setTextSize(2); display.setCursor(0, 24); display.print(value);
-  display.display();
-}
-
-static void update_oled_if_due() {
-  if (!oled_present) return;
-  unsigned long now = millis(); if (now - last_screen_ms < SCREEN_PERIOD_MS) return;
-  last_screen_ms = now;
-
-  char line[48];
-  switch (screen_index) {
-    case SCR_TIME: {
-    format_timestamp_no_sec(line, sizeof(line));
-    oled_show_text("Date & Time", line);
-    break;
-    }
-
-    case SCR_CO2: {
-      if (N_SCD4X == 0) break;
-      const auto& n = scd4x_nodes[sub_idx];
-      char line[24];
-      bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
-      if (fresh) snprintf(line, sizeof(line), "%u ppm", (unsigned)n.co2);
-      else       snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "SCD41 CO2 #%u", unsigned(sub_idx+1));
-      oled_show_value_and_graph(title, line, hist_scd4x_co2[sub_idx]);
-      break;
-    }
-
-    case SCR_SHT45_RH: {
-      if (N_TRHP == 0) break;
-      char line[24];
-      if (win_trhp_sht45_rh[sub_idx].count) snprintf(line, sizeof(line), "%.2f %%", win_trhp_sht45_rh[sub_idx].mean());
-      else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "SHT45 RH #%u", unsigned(sub_idx+1));
-      oled_show_value_and_graph(title, line, hist_trhp_rh[sub_idx]);
-      break;
-    }
-
-    case SCR_TMP117_T: {
-      if (N_TRHP == 0) break;
-      char line[24];
-      if (win_trhp_tmp117_t[sub_idx].count) snprintf(line, sizeof(line), "%.2f C", win_trhp_tmp117_t[sub_idx].mean());
-      else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "TMP117 T #%u", unsigned(sub_idx+1));
-      oled_show_value_and_graph(title, line, hist_tmp117_t[sub_idx]);
-      break;
-    }
-
-    case SCR_LPS22DF_P: {
-      if (N_TRHP == 0) break;
-      char line[24];
-      if (win_trhp_lps_p[sub_idx].count) snprintf(line, sizeof(line), "%.2f hPa", win_trhp_lps_p[sub_idx].mean());
-      else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "LPS22DF P #%u", unsigned(sub_idx+1));
-      oled_show_value_and_graph(title, line, hist_lps22df_p[sub_idx]);
-      break;
-    }
-
-    case SCR_TGS2611_V: {
-      if (N_TGS2611 == 0) break;
-      char line[24];
-      if (win_tgs2611_v[sub_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2611_v[sub_idx].mean());
-      else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "TGS2611 CH4 #%u", unsigned(sub_idx+1));
-      oled_show_value_and_graph(title, line, hist_tgs2611_v[sub_idx]);
-      break;
-    }
-
-    case SCR_TGS2616_V: {
-      if (N_TGS2616 == 0) break;
-      char line[24];
-      if (win_tgs2616_v[sub_idx].count) snprintf(line, sizeof(line), "%.5f V", win_tgs2616_v[sub_idx].mean());
-      else snprintf(line, sizeof(line), "NA");
-      char title[24]; snprintf(title, sizeof(title), "TGS2616 H2 #%u", unsigned(sub_idx+1));
-      oled_show_value_and_graph(title, line, hist_tgs2616_v[sub_idx]);
-      break;
-    }
-
-  }
-  // advance sub-page; if finished this group, go to next main page
-  sub_idx++;
-  if (sub_idx >= subcount_for(screen_index)) {
-    sub_idx = 0;
-    screen_index = static_cast<ScreenPage>(
-                 (static_cast<uint8_t>(screen_index) + 1) % SCR_COUNT
-               );
-  }
 }
 
 namespace {
@@ -645,16 +405,12 @@ void setup() {
 
   // RTC + OLED I2C (direct, no mux) on GPIO 15/16
   WireRTC.begin(RTC_SDA, RTC_SCL);
-  WireRTC.setClock(400000);
 
-  // OLED on WireRTC
-  oled_present = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDR, false, false); // periphBegin=false (we already began WireRTC)
-  if (oled_present) {
-    display.clearDisplay(); display.setTextSize(1); display.setTextColor(SSD1306_WHITE);
-    display.setCursor(0,0); display.println("OLED ready"); display.display();
-  } else {
-    Serial.println("WARNING: SSD1306 OLED not found on RTC bus.");
-  }
+  bool ok = oled.begin(WireRTC, hal::I2CAddr::SSD1306, /* W */128, /* H */64);
+  // (optional) show boot splash
+  if (ok) oled.splash(F("Booting..."), F("Sensors..."));
+
+  WireRTC.setClock(400000);
 
   // RTC on WireRTC
   rtc_present = rtc.begin(WireRTC);
@@ -665,7 +421,7 @@ void setup() {
   }
 
   // Mux present?
-  Wire.beginTransmission(TCA9548A_ADDR);
+  Wire.beginTransmission(hal::I2CAddr::TCA9548A);
   if (Wire.endTransmission() != 0) {
     Serial.println("ERROR: TCA9548A not found at 0x70!");
     while (1) delay(1000);
@@ -679,7 +435,7 @@ void setup() {
   app::calibrate_all_tgs2616(muxStateWire);
 
   // Bind SCD4x driver once
-  scd4x.begin(Wire, SCD41_I2C_ADDR_62);
+  scd4x.begin(Wire, hal::I2CAddr::SCD41);
 
   // Print SCD4x serial numbers
   for (auto ch : hal::Mux::SCD4x) if (select_channel(Wire, ch, muxStateWire)) {
@@ -847,7 +603,44 @@ void loop() {
     }
   }
 
-  sample_graphs_if_due();
-  update_oled_if_due();
+  // Fill the UI model from your freshest values
+  ui::Model m;
+
+  // Clock (uses your RTC helper)
+  static char clock_buf[24];
+  format_timestamp_no_sec(clock_buf, sizeof(clock_buf));
+  m.clock_text = clock_buf;
+
+  // CO2 (pick one SCD4x to feature, or compute an average)
+  if (N_SCD4X > 0) {
+    const auto& n = scd4x_nodes[0];
+    m.co2_ppm   = n.co2;
+    m.co2_fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+  }
+
+  // RH (use your running window on TRHP[0] as an example)
+  if (N_TRHP > 0) {
+    m.sht45_rh       = win_trhp_sht45_rh[0].mean();
+    m.sht45_rh_fresh = (win_trhp_sht45_rh[0].count > 0);
+
+    m.tmp117_t       = win_trhp_tmp117_t[0].mean();
+    m.tmp117_t_fresh = (win_trhp_tmp117_t[0].count > 0);
+
+    m.lps22df_p       = win_trhp_lps_p[0].mean();
+    m.lps22df_p_fresh = (win_trhp_lps_p[0].count > 0);
+  }
+
+  // TGS voltages (first channel as example)
+  if (N_TGS2611 > 0) {
+    m.tgs2611_v       = win_tgs2611_v[0].mean();
+    m.tgs2611_v_fresh = (win_tgs2611_v[0].count > 0);
+  }
+  if (N_TGS2616 > 0) {
+    m.tgs2616_v       = win_tgs2616_v[0].mean();
+    m.tgs2616_v_fresh = (win_tgs2616_v[0].count > 0);
+  }
+
+  // Let the UI decide when to refresh/spark-sample
+  oled.update(m);
   delay(100);
 }
