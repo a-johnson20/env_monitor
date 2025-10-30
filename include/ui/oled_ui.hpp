@@ -45,7 +45,7 @@ enum class Signal : uint8_t { CO2, RH, T, P, V2611, V2616, COUNT };
 class OledUi {
  public:
   // Pages we can render
-  enum class Page : uint8_t { Time, CO2, RH, T, P, V2611, V2616, Count };
+  enum class Page : uint8_t { CO2, RH, T, P, V2611, V2616, Count };
 
   OledUi();
   ~OledUi() = default;
@@ -113,7 +113,7 @@ class OledUi {
   unsigned long last_page_ms_   = 0;
 
   // Page rotation
-  Page page_ = Page::Time;
+  Page page_ = Page::CO2;
   bool autorotate_ = false;
   unsigned long page_period_ms_ = 2000;
 

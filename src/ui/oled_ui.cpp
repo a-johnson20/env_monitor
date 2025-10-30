@@ -25,7 +25,7 @@ bool OledUi::begin(TwoWire& wire, uint8_t i2c_addr, uint16_t width, uint16_t hei
   disp_->println(F("OLED ready"));
   disp_->display();
   last_update_ms_ = last_sample_ms_ = last_page_ms_ = 0;
-  page_ = Page::Time;
+  page_ = Page::CO2;
   autorotate_ = false;   // main.cpp controls pages unless you turn this on
   page_period_ms_ = 2000;
   return true;
@@ -152,16 +152,6 @@ void OledUi::pushSample_(float value, bool fresh, uint8_t which) {
 
 void OledUi::renderPage_(const ui::Model& m) {
   switch (page_) {
-    case Page::Time: {
-      disp_->setTextSize(1);
-      disp_->setCursor(0,8);
-      disp_->print(F("Date & Time"));
-      disp_->setTextSize(2);
-      disp_->setCursor(0, 24);
-      if (m.clock_text) disp_->print(m.clock_text);
-      else              disp_->print(F("NA"));
-      break;
-    }
     case Page::CO2: {
       char lab[24];
       if (m.co2_n > 1) snprintf(lab, sizeof(lab), "CO2 #%u (ppm)", unsigned(m.co2_idx + 1));

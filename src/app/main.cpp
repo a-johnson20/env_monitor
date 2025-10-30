@@ -408,7 +408,7 @@ void setup() {
   // IMPORTANT: disable the library's auto-rotate so only our code rotates pages
   oled.setAutoRotate(false);
 
-  oled.setPage(ui::OledUi::Page::Time);  // keep your chosen start page
+  oled.setPage(ui::OledUi::Page::CO2);  // keep your chosen start page
 
   WireRTC.setClock(400000);
 
@@ -521,17 +521,15 @@ void loop() {
     auto advance_to_next_page = [&]() {
       for (uint8_t tries = 0; tries < 8; ++tries) {
         switch (cur) {
-          case ui::OledUi::Page::Time:   cur = ui::OledUi::Page::CO2;    break;
           case ui::OledUi::Page::CO2:    cur = ui::OledUi::Page::RH;     break;
           case ui::OledUi::Page::RH:     cur = ui::OledUi::Page::T;      break;
           case ui::OledUi::Page::T:      cur = ui::OledUi::Page::P;      break;
           case ui::OledUi::Page::P:      cur = ui::OledUi::Page::V2611;  break;
           case ui::OledUi::Page::V2611:  cur = ui::OledUi::Page::V2616;  break;
-          case ui::OledUi::Page::V2616:  cur = ui::OledUi::Page::Time;   break;
-          default:                       cur = ui::OledUi::Page::Time;   break;
+          case ui::OledUi::Page::V2616:  cur = ui::OledUi::Page::CO2;   break;
+          default:                       cur = ui::OledUi::Page::CO2;   break;
         }
         bool ok =
-          (cur == ui::OledUi::Page::Time) ||
           (cur == ui::OledUi::Page::CO2   && scdN)   ||
           (cur == ui::OledUi::Page::RH    && trhpN)  ||
           (cur == ui::OledUi::Page::T     && trhpN)  ||
@@ -545,10 +543,6 @@ void loop() {
 
     // step sub-index for the current page; if wrapped, advance page
     switch (cur) {
-      case ui::OledUi::Page::Time:
-        advance_to_next_page();
-        break;
-
       case ui::OledUi::Page::CO2:
         if (scdN) { idx_co2++; if (idx_co2 >= scdN) { idx_co2 = 0; advance_to_next_page(); } }
         else advance_to_next_page();
