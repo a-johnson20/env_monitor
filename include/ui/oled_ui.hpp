@@ -2,6 +2,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#include "hal/mux_map.hpp"
+
 class Adafruit_SSD1306;  // fwd decl; real header is included in the .cpp
 
 namespace ui {
@@ -71,6 +73,35 @@ class OledUi {
   // Accessor
   bool present() const { return present_; }
 
+  // --- Adaptive per-channel sparklines for TGS, CO2 & TRHP ---
+  // Push one sample into the per-physical-slot history
+  inline void pushSample2611(uint8_t ch, float v, bool fresh) {
+    if (ch < TGS2611_SLOTS_) sparks_2611_[ch].push(v, fresh);
+  }
+  inline void pushSample2616(uint8_t ch, float v, bool fresh) {
+    if (ch < TGS2616_SLOTS_) sparks_2616_[ch].push(v, fresh);
+  }
+  inline void pushSampleCO2(uint8_t ch, float v, bool fresh) {
+    if (ch < CO2_SLOTS_) sparks_co2_[ch].push(v, fresh);
+  }
+  inline void pushSampleTRHP_RH(uint8_t ch, float v, bool fresh) {
+    if (ch < TRHP_SLOTS_) sparks_rh_[ch].push(v, fresh);
+  }
+  inline void pushSampleTRHP_T(uint8_t ch, float v, bool fresh) {
+    if (ch < TRHP_SLOTS_) sparks_t_[ch].push(v, fresh);
+  }
+  inline void pushSampleTRHP_P(uint8_t ch, float v, bool fresh) {
+    if (ch < TRHP_SLOTS_) sparks_p_[ch].push(v, fresh);
+  }
+  // Tell the UI which physical slot is currently displayed as #k
+  inline void setV2611Phys(uint8_t ch) { v2611_phys_ = (ch < TGS2611_SLOTS_) ? ch : 0; }
+  inline void setV2616Phys(uint8_t ch) { v2616_phys_ = (ch < TGS2616_SLOTS_) ? ch : 0; }
+  inline void setCO2Phys(uint8_t ch)  { co2_phys_  = (ch < CO2_SLOTS_)  ? ch : 0; }
+  inline void setTRHPPhys(uint8_t ch) { trhp_phys_ = (ch < TRHP_SLOTS_) ? ch : 0; }
+
+  // Expose the current graph sample period so main.cpp can push at the same cadence.
+  inline unsigned long graphSamplePeriodMs() const { return GRAPH_SAMPLE_MS_; }
+
  private:
   // Internal spark buffer (one per Signal)
   struct Spark {
@@ -121,8 +152,25 @@ class OledUi {
   static constexpr unsigned long GRAPH_SPAN_MS_ = 15UL * 60UL * 1000UL; // 15 min
   unsigned long GRAPH_SAMPLE_MS_ = 7000; // computed from W_ in begin()
 
-  // One spark per signal
+  // One spark per signal (shared signals)
   Spark sparks_[static_cast<size_t>(Signal::COUNT)];
+
+  // Per-physical-slot spark histories for adaptive identical sensors.
+  // Use at least size 1 to keep arrays valid when no slots are compiled.
+  static constexpr size_t TGS2611_SLOTS_ = hal::Mux::TGS2611.size() ? hal::Mux::TGS2611.size() : 1;
+  static constexpr size_t TGS2616_SLOTS_ = hal::Mux::TGS2616.size() ? hal::Mux::TGS2616.size() : 1;
+  static constexpr size_t CO2_SLOTS_  = (hal::Mux::SCD4x.size() > 0 ? hal::Mux::SCD4x.size() : 1);
+  static constexpr size_t TRHP_SLOTS_ = (hal::Mux::TRHP.size()  > 0 ? hal::Mux::TRHP.size()  : 1);
+  Spark sparks_2611_[TGS2611_SLOTS_];
+  Spark sparks_2616_[TGS2616_SLOTS_];
+  Spark  sparks_co2_[CO2_SLOTS_];
+  Spark  sparks_rh_[TRHP_SLOTS_];
+  Spark  sparks_t_[TRHP_SLOTS_];
+  Spark  sparks_p_[TRHP_SLOTS_];
+  uint8_t v2611_phys_ = 0;
+  uint8_t v2616_phys_ = 0;
+  uint8_t co2_phys_  = 0;
+  uint8_t trhp_phys_ = 0;
 };
 
 } // namespace ui

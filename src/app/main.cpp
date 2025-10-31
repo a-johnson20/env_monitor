@@ -711,44 +711,38 @@ void loop() {
   for (size_t i=0;i<N_TGS2611;++i) if (win_tgs2611_v[i].count > 0) v2611N++;
   for (size_t i=0;i<N_TGS2616;++i) if (win_tgs2616_v[i].count > 0) v2616N++;
 
-  // --- CO2 (SCD4x)
-  if (scdN) {
-    uint8_t ord = 0, ch = 0;
-    for (; ch < N_SCD4X; ++ch)
-      if (scd4x_nodes[ch].present && ord++ == idx_co2) break;
-    size_t k = (ch < N_SCD4X) ? ch : 0;
-
-    const auto& n = scd4x_nodes[k];
-    m.co2_ppm   = n.co2;
-    m.co2_fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
-    m.co2_idx   = idx_co2;
-    m.co2_n     = scdN;
+  // Build present list (same criterion you already use: window.count > 0)
+  uint8_t present[ N_TRHP ];
+  uint8_t n = 0;
+  for (uint8_t i=0;i<N_TRHP;++i) {
+    if (win_trhp_sht45_rh[i].count > 0 || win_trhp_tmp117_t[i].count > 0 || win_trhp_lps_p[i].count > 0) {
+      present[n++] = i;
+    }
+  }
+  if (n == 0) {
+    oled.setTRHPPhys(0);
+  } else {
+    // assume you already maintain idx_trhp rotating in [0..n)
+    if (idx_trhp >= n) idx_trhp = 0;
+    const uint8_t phys = present[idx_trhp];
+    oled.setTRHPPhys(phys);
+    // your printed numbers already come from the same phys via win_*[phys].mean()
   }
 
-  // --- TRHP (RH/T/P share the same rotating station)
-  if (trhpN) {
-    uint8_t ord = 0, ch = 0;
-    for (; ch < N_TRHP; ++ch) {
-      bool present =
-        lps22df_nodes[ch].present ||
-        win_trhp_sht45_rh[ch].count > 0 ||
-        win_trhp_tmp117_t[ch].count > 0 ||
-        win_trhp_lps_p[ch].count    > 0;
-      if (present && ord++ == idx_trhp) break;
+  // --- Decide which physical SCD4x slot maps to CO2 page
+  {
+    uint8_t present_idxs[N_SCD4X];
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < N_SCD4X; ++i) {
+      if (scd4x_nodes[i].present) present_idxs[n++] = i;
     }
-    size_t k = (ch < N_TRHP) ? ch : 0;
-
-    m.sht45_rh       = win_trhp_sht45_rh[k].mean();
-    m.sht45_rh_fresh = (win_trhp_sht45_rh[k].count > 0);
-
-    m.tmp117_t       = win_trhp_tmp117_t[k].mean();
-    m.tmp117_t_fresh = (win_trhp_tmp117_t[k].count > 0);
-
-    m.lps22df_p       = win_trhp_lps_p[k].mean();
-    m.lps22df_p_fresh = (win_trhp_lps_p[k].count > 0);
-
-    m.rh_idx = m.t_idx = m.p_idx = idx_trhp;
-    m.rh_n   = m.t_n   = m.p_n   = trhpN;
+    if (n == 0) {
+      oled.setCO2Phys(0);
+    } else {
+      if (idx_co2 >= n) idx_co2 = 0;
+      const uint8_t phys = present_idxs[idx_co2];
+      oled.setCO2Phys(phys);
+    }
   }
 
   // --- TGS2611
@@ -757,6 +751,7 @@ void loop() {
     for (; ch < N_TGS2611; ++ch)
       if (win_tgs2611_v[ch].count > 0 && ord++ == idx_2611) break;
     size_t k = (ch < N_TGS2611) ? ch : 0;
+    oled.setV2611Phys(k);
 
     m.tgs2611_v       = win_tgs2611_v[k].mean();
     m.tgs2611_v_fresh = (win_tgs2611_v[k].count > 0);
@@ -770,11 +765,63 @@ void loop() {
     for (; ch < N_TGS2616; ++ch)
       if (win_tgs2616_v[ch].count > 0 && ord++ == idx_2616) break;
     size_t k = (ch < N_TGS2616) ? ch : 0;
+    oled.setV2616Phys(k);
 
     m.tgs2616_v       = win_tgs2616_v[k].mean();
     m.tgs2616_v_fresh = (win_tgs2616_v[k].count > 0);
     m.v2616_idx = idx_2616;
     m.v2616_n   = v2616N;
+  }
+
+  // --- Adaptive per-channel sparkline sampling (match UI cadence) ---
+  {
+    static unsigned long last_spark_ms = 0;
+    unsigned long now = millis();
+    const unsigned long PERIOD = oled.graphSamplePeriodMs();
+    if (now - last_spark_ms >= PERIOD) {
+      last_spark_ms = now;
+      // CO2 (SCD4x) per physical slot: use live node readings + freshness window
+      for (uint8_t ch = 0; ch < N_SCD4X; ++ch) {
+        const bool fresh = scd4x_nodes[ch].last_ok_ms &&
+                           (millis() - scd4x_nodes[ch].last_ok_ms <= SCD_FRESH_MS);
+        const float v = fresh ? (float)scd4x_nodes[ch].co2 : 0.0f;
+        oled.pushSampleCO2(ch, v, fresh);
+      }
+
+      // TRHP per physical slot
+      for (uint8_t ch=0; ch<N_TRHP; ++ch) {
+        // RH from SHT45
+        {
+          const bool fresh = (win_trhp_sht45_rh[ch].count > 0);
+          const float mean = fresh ? (float)win_trhp_sht45_rh[ch].mean() : 0.0f;
+          oled.pushSampleTRHP_RH(ch, mean, fresh);
+        }
+        // Temperature: choose your displayed source; here we push TMP117 (or use your chosen one)
+        {
+          const bool fresh = (win_trhp_tmp117_t[ch].count > 0);
+          const float mean = fresh ? (float)win_trhp_tmp117_t[ch].mean() : 0.0f;
+          oled.pushSampleTRHP_T(ch, mean, fresh);
+        }
+        // Pressure from LPS
+        {
+          const bool fresh = (win_trhp_lps_p[ch].count > 0);
+          const float mean = fresh ? (float)win_trhp_lps_p[ch].mean() : 0.0f;
+          oled.pushSampleTRHP_P(ch, mean, fresh);
+        }
+      }
+      // TGS2611 channels
+      for (uint8_t ch = 0; ch < N_TGS2611; ++ch) {
+        const bool fresh = (win_tgs2611_v[ch].count > 0);
+        const float mean = fresh ? (float)win_tgs2611_v[ch].mean() : 0.0f;
+        oled.pushSample2611(ch, mean, fresh);
+      }
+      // TGS2616 channels
+      for (uint8_t ch = 0; ch < N_TGS2616; ++ch) {
+        const bool fresh = (win_tgs2616_v[ch].count > 0);
+        const float mean = fresh ? (float)win_tgs2616_v[ch].mean() : 0.0f;
+        oled.pushSample2616(ch, mean, fresh);
+      }
+    }
   }
 
   oled.update(m, STEP_MS);

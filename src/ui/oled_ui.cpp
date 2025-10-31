@@ -12,6 +12,12 @@ bool OledUi::begin(TwoWire& wire, uint8_t i2c_addr, uint16_t width, uint16_t hei
   disp_ = new Adafruit_SSD1306(W_, H_, &wire, -1);
   GRAPH_SAMPLE_MS_ = (15UL * 60UL * 1000UL) / (unsigned long)W_;
   for (auto& s : sparks_) s.configure(W_);
+  for (auto& s : sparks_2611_) s.configure(W_);
+  for (auto& s : sparks_2616_) s.configure(W_);
+  for (auto& s : sparks_co2_)   s.configure(W_);
+  for (auto& s : sparks_rh_)    s.configure(W_);
+  for (auto& s : sparks_t_)     s.configure(W_);
+  for (auto& s : sparks_p_)     s.configure(W_);
 
   if (!disp_->begin(SSD1306_SWITCHCAPVCC, i2c_addr, true, false)) {
     present_ = false;
@@ -68,12 +74,6 @@ void OledUi::update(const ui::Model& m, unsigned long min_period_ms) {
   // Periodic spark sampling at ~W_ samples across 15 minutes
   if (now - last_sample_ms_ >= GRAPH_SAMPLE_MS_) {
     last_sample_ms_ = now;
-    pushSample_(m.co2_ppm,   m.co2_fresh,      static_cast<uint8_t>(Signal::CO2));
-    pushSample_(m.sht45_rh,  m.sht45_rh_fresh, static_cast<uint8_t>(Signal::RH));
-    pushSample_(m.tmp117_t,  m.tmp117_t_fresh, static_cast<uint8_t>(Signal::T));
-    pushSample_(m.lps22df_p, m.lps22df_p_fresh,static_cast<uint8_t>(Signal::P));
-    pushSample_(m.tgs2611_v, m.tgs2611_v_fresh,static_cast<uint8_t>(Signal::V2611));
-    pushSample_(m.tgs2616_v, m.tgs2616_v_fresh,static_cast<uint8_t>(Signal::V2616));
   }
 
   // Optional internal autorotate (OFF by default)
@@ -113,12 +113,12 @@ void OledUi::drawGraph_(float value, bool fresh, const char* label) {
   // Select spark by current page (more robust than string compare)
   const Spark* s_ptr = nullptr;
   switch (page_) {
-    case Page::CO2:   s_ptr = &sparks_[static_cast<uint8_t>(Signal::CO2)]; break;
-    case Page::RH:    s_ptr = &sparks_[static_cast<uint8_t>(Signal::RH)]; break;
-    case Page::T:     s_ptr = &sparks_[static_cast<uint8_t>(Signal::T)]; break;
-    case Page::P:     s_ptr = &sparks_[static_cast<uint8_t>(Signal::P)]; break;
-    case Page::V2611: s_ptr = &sparks_[static_cast<uint8_t>(Signal::V2611)]; break;
-    case Page::V2616: s_ptr = &sparks_[static_cast<uint8_t>(Signal::V2616)]; break;
+    case Page::CO2:   s_ptr = (co2_phys_  < CO2_SLOTS_)  ? &sparks_co2_[co2_phys_]   : nullptr; break;
+    case Page::RH:    s_ptr = (trhp_phys_ < TRHP_SLOTS_) ? &sparks_rh_[trhp_phys_]    : nullptr; break;
+    case Page::T:     s_ptr = (trhp_phys_ < TRHP_SLOTS_) ? &sparks_t_[trhp_phys_]     : nullptr; break;
+    case Page::P:     s_ptr = (trhp_phys_ < TRHP_SLOTS_) ? &sparks_p_[trhp_phys_]     : nullptr; break;
+    case Page::V2611: s_ptr = (v2611_phys_ < TGS2611_SLOTS_) ? &sparks_2611_[v2611_phys_] : nullptr; break;
+    case Page::V2616: s_ptr = (v2616_phys_ < TGS2616_SLOTS_) ? &sparks_2616_[v2616_phys_] : nullptr; break;
     default: break;
   }
   if (!s_ptr) return;
