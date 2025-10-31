@@ -712,21 +712,37 @@ void loop() {
   for (size_t i=0;i<N_TGS2616;++i) if (win_tgs2616_v[i].count > 0) v2616N++;
 
   // Build present list (same criterion you already use: window.count > 0)
-  uint8_t present[ N_TRHP ];
-  uint8_t n = 0;
-  for (uint8_t i=0;i<N_TRHP;++i) {
-    if (win_trhp_sht45_rh[i].count > 0 || win_trhp_tmp117_t[i].count > 0 || win_trhp_lps_p[i].count > 0) {
-      present[n++] = i;
+  {
+    uint8_t present[ N_TRHP ];
+    uint8_t n = 0;
+    for (uint8_t i=0;i<N_TRHP;++i) {
+      if (win_trhp_sht45_rh[i].count > 0 || win_trhp_tmp117_t[i].count > 0 || win_trhp_lps_p[i].count > 0) {
+        present[n++] = i;
+      }
     }
-  }
-  if (n == 0) {
-    oled.setTRHPPhys(0);
-  } else {
-    // assume you already maintain idx_trhp rotating in [0..n)
-    if (idx_trhp >= n) idx_trhp = 0;
-    const uint8_t phys = present[idx_trhp];
-    oled.setTRHPPhys(phys);
-    // your printed numbers already come from the same phys via win_*[phys].mean()
+    if (n == 0) {
+      oled.setTRHPPhys(0);
+      // Header: show NA
+      m.rh_idx = m.t_idx = m.p_idx = 0;
+      m.rh_n   = m.t_n   = m.p_n   = 0;
+      m.sht45_rh = NAN;  m.sht45_rh_fresh = false;
+      m.tmp117_t = NAN;  m.tmp117_t_fresh = false;
+      m.lps22df_p = NAN; m.lps22df_p_fresh = false;
+    } else {
+      if (idx_trhp >= n) idx_trhp = 0;
+      const uint8_t phys = present[idx_trhp];
+      oled.setTRHPPhys(phys);
+      // Header values (+fresh) pulled from the same physical slot we’re graphing
+      m.rh_idx = m.t_idx = m.p_idx = idx_trhp;   // display index (0-based)
+      m.rh_n   = m.t_n   = m.p_n   = n;          // total present
+      m.sht45_rh        = (win_trhp_sht45_rh[phys].count > 0) ? (float)win_trhp_sht45_rh[phys].mean() : NAN;
+      m.sht45_rh_fresh  = (win_trhp_sht45_rh[phys].count > 0);
+      // Choose which temperature you show in the “T” page — here TMP117:
+      m.tmp117_t        = (win_trhp_tmp117_t[phys].count > 0) ? (float)win_trhp_tmp117_t[phys].mean() : NAN;
+      m.tmp117_t_fresh  = (win_trhp_tmp117_t[phys].count > 0);
+      m.lps22df_p       = (win_trhp_lps_p[phys].count > 0) ? (float)win_trhp_lps_p[phys].mean() : NAN;
+      m.lps22df_p_fresh = (win_trhp_lps_p[phys].count > 0);
+    }
   }
 
   // --- Decide which physical SCD4x slot maps to CO2 page
@@ -738,10 +754,18 @@ void loop() {
     }
     if (n == 0) {
       oled.setCO2Phys(0);
+      m.co2_idx = 0; m.co2_n = 0;
+      m.co2_ppm = 0; m.co2_fresh = false;
     } else {
       if (idx_co2 >= n) idx_co2 = 0;
       const uint8_t phys = present_idxs[idx_co2];
       oled.setCO2Phys(phys);
+      // Fresh if the node reported recently
+      const bool fresh = scd4x_nodes[phys].last_ok_ms &&
+                         (millis() - scd4x_nodes[phys].last_ok_ms <= SCD_FRESH_MS);
+      m.co2_idx = idx_co2; m.co2_n = n;
+      m.co2_ppm = fresh ? (uint16_t)scd4x_nodes[phys].co2 : 0;
+      m.co2_fresh = fresh;
     }
   }
 
