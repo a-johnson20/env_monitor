@@ -1,4 +1,4 @@
-#include "isl22317.hpp"
+#include "common/drivers/isl22317.hpp"
 #include "hal/i2c_addresses.hpp"
 
 bool isl22317_set_wiper_on_selected(uint8_t wiper) {

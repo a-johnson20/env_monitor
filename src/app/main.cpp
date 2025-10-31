@@ -17,7 +17,7 @@
 #include "app/log_format.hpp"
 #include "app/calibration.hpp"
 #include "common/tgs_lookup_tables.hpp"
-#include "../common/calib/tgs_calibration.hpp"
+#include "common/calib/tgs_calibration.hpp"
 #include "ui/serial_menu.hpp"
 #include "net/wifi_manager.hpp"
 #include "ui/oled_ui.hpp"

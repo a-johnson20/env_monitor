@@ -1,7 +1,7 @@
-#include "tgs_calibration.hpp"
 #include "common/tgs_lookup_tables.hpp"
-#include "../sensors/tgs_eeprom.hpp"
-#include "../drivers/isl22317.hpp"
+#include "common/calib/tgs_calibration.hpp"
+#include "common/sensors/tgs_eeprom.hpp"
+#include "common/drivers/isl22317.hpp"
 
 static bool find_wiper_for( const CalEntry* tab, size_t n, uint16_t id, uint8_t &wiper_out) {
   for (size_t i=0;i<n;i++) if (tab[i].id == id) { wiper_out = tab[i].wiper; return true; }

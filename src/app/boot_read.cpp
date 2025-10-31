@@ -1,7 +1,7 @@
 #include "app/boot_read.hpp"
-#include "../common/sensors/tgs_eeprom.hpp"
-#include "../common/calib/tgs_calibration.hpp"
-#include "../common/drivers/isl22317.hpp"
+#include "common/sensors/tgs_eeprom.hpp"
+#include "common/calib/tgs_calibration.hpp"
+#include "common/drivers/isl22317.hpp"
 
 using hal::Mux::Ch;
 
