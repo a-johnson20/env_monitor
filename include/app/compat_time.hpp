@@ -1,24 +1,46 @@
 #pragma once
+#include <time.h>
+#include <stdlib.h>
+#include <string.h>
 
-// These shims silence IntelliSense on Windows while remaining no-ops on ESP32 builds.
-// They only activate when MSVC headers are in play (the usual case for VS Code on Windows).
-#if defined(_WIN32) && !defined(ARDUINO) && !defined(ESP_PLATFORM)
-  #include <time.h>
-  #include <stdlib.h>
+// Portable replacement for timegm (convert a UTC tm to epoch seconds).
+// On platforms that have timegm(), we could call it directly; otherwise
+// we temporarily set TZ=UTC and use mktime().
+inline time_t timegm_compat(struct tm* tm_utc) {
+  // Defensive: null guard
+  if (!tm_utc) return (time_t)-1;
 
-  // Map POSIX gmtime_r/localtime_r to the MSVC-secure variants for IntelliSense.
-  inline struct tm* gmtime_r(const time_t* timep, struct tm* result) {
-    return (gmtime_s(result, timep) == 0) ? result : nullptr;
+  // Try to detect a native timegm at compile time if your toolchain exposes it.
+  // (Many ESP/newlib builds don't, so we just use the fallback.)
+  // #if defined(_GNU_SOURCE) || defined(__USE_BSD)
+  //   return timegm(tm_utc);
+  // #else
+
+  // Save current TZ
+  const char* old_tz = getenv("TZ");
+  char saved[64];
+  bool had_old = false;
+  if (old_tz) {
+    // Keep a small, bounded copy
+    strncpy(saved, old_tz, sizeof(saved) - 1);
+    saved[sizeof(saved) - 1] = '\0';
+    had_old = true;
   }
-  inline struct tm* localtime_r(const time_t* timep, struct tm* result) {
-    return (localtime_s(result, timep) == 0) ? result : nullptr;
-  }
 
-  // Provide a setenv shim for IntelliSense (uses _putenv_s under the hood).
-  inline int setenv(const char* name, const char* value, int) {
-    return _putenv_s(name, value);
-  }
+  // Set TZ to UTC for the conversion
+  setenv("TZ", "UTC0", 1);
+  tzset();
 
-  // Map tzset to MSVC name so IntelliSense knows it.
-  #define tzset _tzset
-#endif
+  time_t t = mktime(tm_utc);  // interpreted as UTC because TZ=UTC0
+
+  // Restore previous TZ
+  if (had_old) {
+    setenv("TZ", saved, 1);
+  } else {
+    unsetenv("TZ");
+  }
+  tzset();
+
+  return t;
+  // #endif
+}

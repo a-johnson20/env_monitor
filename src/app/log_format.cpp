@@ -1,11 +1,20 @@
 #include "app/log_format.hpp"
+#include "app/time_utils.hpp"
 
 namespace {
 
+static inline uint8_t normalize_yy_from_rv3028(int y_raw) {
+  if (y_raw >= 0 && y_raw <= 99) return (uint8_t)y_raw;
+  int cand = y_raw - 48;                  // fix accidental +'0'
+  if (cand >= 0 && cand <= 99) return (uint8_t)cand;
+  return (uint8_t)(y_raw % 100);
+}
+
+
 static void format_date_into(char* out, size_t n, bool rtc_present, RV3028& rtc) {
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
-    snprintf(out, n, "%04d%02d%02d", y, rtc.getMonth(), rtc.getDate());
+  struct tm lt{};
+  if (now_local_tm(lt, rtc_present, &rtc)) {
+    snprintf(out, n, "%04d%02d%02d", lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday);
   } else {
     snprintf(out, n, "nodate");
   }

@@ -9,6 +9,7 @@
 #include <array>
 
 #include "app/boot_read.hpp"
+#include "app/time_utils.hpp"
 #include "hal/mux_map.hpp"
 #include "hal/tca9548a.hpp"
 #include "hal/board.hpp"
@@ -187,11 +188,13 @@ static inline void pump_off() { pump_set_percent(0); }
 static inline void pump_on()  { pump_set_percent(100); }
 
 // ---------- RTC helpers ----------
+
 static void format_timestamp(char* out, size_t n) {
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
+  struct tm lt{};
+  if (now_local_tm(lt, rtc_present, &rtc)) {
     snprintf(out, n, "%04d-%02d-%02d %02d:%02d:%02d",
-             y, rtc.getMonth(), rtc.getDate(), rtc.getHours(), rtc.getMinutes(), rtc.getSeconds());
+             lt.tm_year + 1900, lt.tm_mon + 1, lt.tm_mday,
+             lt.tm_hour, lt.tm_min, lt.tm_sec);
   } else {
     snprintf(out, n, "RTC NA (%lus)", millis()/1000);
   }
@@ -199,12 +202,12 @@ static void format_timestamp(char* out, size_t n) {
 static void print_timestamp() { char buf[24]; format_timestamp(buf, sizeof(buf)); Serial.print("["); Serial.print(buf); Serial.print("] "); }
 
 static void format_timestamp_no_sec(char* out, size_t n) {
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
+  struct tm lt{};
+  if (now_local_tm(lt, rtc_present, &rtc)) {
     // DD/MM/YYYY HH:MM
     snprintf(out, n, "%02d/%02d/%04d %02d:%02d",
-             rtc.getDate(), rtc.getMonth(), y,
-             rtc.getHours(), rtc.getMinutes());
+             lt.tm_mday, lt.tm_mon + 1, lt.tm_year + 1900,
+             lt.tm_hour, lt.tm_min);
   } else {
     snprintf(out, n, "RTC NA");
   }
@@ -400,6 +403,10 @@ void setup() {
   Wire.setClock(100000);
   delay(50);
 
+  // Set timezone to UK rules (GMT/BST)
+  setenv("TZ", "GMT0BST,M3.5.0/1,M10.5.0/2", 1);
+  tzset();
+
   // RTC + OLED I2C (direct, no mux) on GPIO 15/16
   WireRTC.begin(RTC_SDA, RTC_SCL);
 
@@ -420,6 +427,9 @@ void setup() {
   } else {
     Serial.println("WARNING: RV-3028 not found on RTC bus.");
   }
+
+  /* Seed system clock from RTC so time() works offline */
+  if (rtc_present) { seed_system_clock_from_rtc(rtc); }
 
   rtc_sync::begin(rtc, rtc_present); // sync RTC from WiFi NTP on boot
 
