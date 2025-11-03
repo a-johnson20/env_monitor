@@ -428,6 +428,8 @@ void setup() {
     Serial.println("WARNING: RV-3028 not found on RTC bus.");
   }
 
+  rtc.setBackupSwitchoverMode(1); // keep RTC powered when main power lost
+
   /* Seed system clock from RTC so time() works offline */
   if (rtc_present) { seed_system_clock_from_rtc(rtc); }
 
