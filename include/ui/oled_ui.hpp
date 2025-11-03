@@ -13,6 +13,10 @@ struct Model {
   // Clock
   const char* clock_text = nullptr;
 
+  // Status
+  bool sd_present = false;
+  bool wifi_connected = false;
+
   // Latest readings + freshness
   uint16_t co2_ppm = 0;
   bool     co2_fresh = false;

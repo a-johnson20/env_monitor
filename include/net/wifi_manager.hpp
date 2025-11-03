@@ -13,6 +13,7 @@ struct NetInfo {
   int32_t rssi = 0;
   Sec sec = Sec::UNKNOWN;
   uint8_t channel = 0;
+  uint8_t bssid[6] = {0,0,0,0,0,0}; // exact AP identity for lock
 };
 
 struct Saved {
@@ -34,6 +35,10 @@ std::vector<NetInfo> scan();
 // Connect helpers (returns true on success). Optionally save credentials.
 bool connect_psk(const String& ssid, const String& password, bool save = true, uint32_t timeout_ms = 15000);
 bool connect_eap_peap_mschapv2(const String& ssid, const String& identity, const String& password, bool save = true, uint32_t timeout_ms = 20000);
+
+// connect to an EXACT AP (BSSID+channel lock) using a previously scanned NetInfo
+bool connect_psk_exact(const NetInfo& ap, const String& password, bool save = true, uint32_t timeout_ms = 15000);
+bool connect_eap_exact(const NetInfo& ap, const String& identity, const String& password, bool save = true, uint32_t timeout_ms = 20000);
 
 // Saved networks
 std::vector<Saved> saved();

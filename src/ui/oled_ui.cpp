@@ -1,6 +1,12 @@
-#include "ui/oled_ui.hpp"
 #include <Adafruit_SSD1306.h>
 #include <math.h>
+
+#include "ui/oled_ui.hpp"
+
+// 11x8 WiFi symbol for status line
+static const uint8_t wifi_bitmap[] PROGMEM = {
+  0x3f, 0x80, 0x40, 0x40, 0x9f, 0x20, 0x20, 0x80, 0x0e, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00
+};
 
 namespace ui {
 
@@ -96,6 +102,29 @@ void OledUi::drawHeader_(const ui::Model& m) {
   disp_->setCursor(0,0);
   if (m.clock_text) disp_->println(m.clock_text);
   else              disp_->println(F("Env Monitor"));
+
+  // --- Status icons (top-right, same line as clock) ---
+  int x = int(W_) - 1;           // start at the right edge
+  const int y = 0;               // top row
+  const int pad = 2;             // spacing between icons
+
+  // “SD” text (6×8 per char at text size = 1 → 12 px wide)
+  if (m.sd_present) {
+    const int w = 12;
+    x -= w;
+    disp_->setCursor(x, y);
+    disp_->setTextSize(1);
+    disp_->print(F("SD"));
+    x -= pad;
+  }
+
+  // WiFi icon (11x8)
+  if (m.wifi_connected) {
+    const int w = 11, h = 8;
+    x -= w;
+    disp_->drawBitmap(x, y, wifi_bitmap, w, h, SSD1306_WHITE);
+    x -= pad;
+  }
 }
 
 void OledUi::drawGraph_(float value, bool fresh, const char* label) {

@@ -16,6 +16,7 @@
 #include "logging/sd_logger.hpp"
 #include "app/log_format.hpp"
 #include "app/calibration.hpp"
+#include "app/rtc_sync.hpp"
 #include "common/tgs_lookup_tables.hpp"
 #include "common/calib/tgs_calibration.hpp"
 #include "ui/serial_menu.hpp"
@@ -420,6 +421,8 @@ void setup() {
     Serial.println("WARNING: RV-3028 not found on RTC bus.");
   }
 
+  rtc_sync::begin(rtc, rtc_present); // sync RTC from WiFi NTP on boot
+
   // Mux present?
   Wire.beginTransmission(hal::I2CAddr::TCA9548A);
   if (Wire.endTransmission() != 0) {
@@ -478,7 +481,16 @@ void setup() {
 
 void loop() {
 
+  rtc_sync::poll();
   ui::poll();
+
+  // --- Poll SD hot-plug (~2 Hz) ---
+  static uint32_t last_sd_poll = 0;
+  uint32_t now = millis();
+  if (now - last_sd_poll >= 500) {
+    sd_logger::poll_hotplug(now);
+    last_sd_poll = now;
+  }
 
   // ---- Page + subpage rotation (match original behavior) ----
   static unsigned long last_step_ms = 0;
@@ -696,6 +708,10 @@ void loop() {
   static char clock_buf[24];
   format_timestamp_no_sec(clock_buf, sizeof(clock_buf));
   m.clock_text = clock_buf;
+
+  // Status
+  m.sd_present      = sd_logger::is_mounted();
+  m.wifi_connected  = wifi::is_connected();
 
   // Recompute presence-based counts for mapping
   uint8_t scdN=0, trhpN=0, v2611N=0, v2616N=0;

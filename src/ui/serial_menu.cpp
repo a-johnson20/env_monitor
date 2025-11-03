@@ -33,6 +33,9 @@ static void print_main_menu() {
   Serial.print(F("> "));
 }
 
+// Cache the scan so indices don't shuffle while the user is choosing
+static std::vector<wifi::NetInfo> g_scan_cache;
+
 static void print_wifi_menu() {
   Serial.println();
   Serial.println(F("=== WiFi Settings ==="));
@@ -117,15 +120,15 @@ static void handle_wifi_menu(const String &line) {
   if (line == "1") {
     // Scan
     Serial.println(F("\nScanning..."));
-    auto nets = wifi::scan();
-    if (nets.empty()) {
+    g_scan_cache = wifi::scan(); // freeze list until user exits this flow
+    if (g_scan_cache.empty()) {
       Serial.println(F("No networks found."));
       print_wifi_menu();
       return;
     }
     Serial.println(F("\n#  RSSI  SEC  SSID"));
-    for (size_t i=0;i<nets.size();++i) {
-      const auto &n = nets[i];
+    for (size_t i = 0; i < g_scan_cache.size(); ++i) {
+      const auto& n = g_scan_cache[i];
       Serial.print(i+1); Serial.print(F(") "));
       Serial.print(n.rssi); Serial.print(F("  "));
       Serial.print(wifi::sec_to_str(n.sec)); Serial.print(F("  "));
@@ -193,6 +196,7 @@ static void handle_wifi_menu(const String &line) {
 
 static void handle_wifi_scan_list(const String &line) {
   if (line == "b" || line == "B") {
+    g_scan_cache.clear();
     state = State::WifiMenu;
     print_wifi_menu();
     return;
@@ -203,18 +207,17 @@ static void handle_wifi_scan_list(const String &line) {
     Serial.print(F("> "));
     return;
   }
-  auto nets = wifi::scan(); // rescan to keep indices consistent
-  if (sel > (int)nets.size()) {
+  if (sel > (int)g_scan_cache.size()) {
     Serial.println(F("Out of range."));
     Serial.print(F("> "));
     return;
   }
-  auto n = nets[sel-1];
+  auto n = g_scan_cache[sel - 1];
   if (n.sec == wifi::Sec::WPA2_ENTERPRISE) {
     String user = read_line_blocking(F("Username/Identity: "));
     String pass = read_line_blocking(F("Password: "));
     Serial.println(F("Connecting..."));
-    if (wifi::connect_eap_peap_mschapv2(n.ssid, user, pass, /*save=*/true)) {
+    if (wifi::connect_eap_exact(n, user, pass, /*save=*/true)) {
       Serial.println(F("Connected. Returning to main menu."));
       state = State::MainMenu;
       print_main_menu();
@@ -231,7 +234,7 @@ static void handle_wifi_scan_list(const String &line) {
       pass = read_line_blocking(F("Password: "));
     }
     Serial.println(F("Connecting..."));
-    if (wifi::connect_psk(n.ssid, pass, /*save=*/true)) {
+    if (wifi::connect_psk_exact(n, pass, /*save=*/true)) {
       Serial.println(F("Connected. Returning to main menu."));
       state = State::MainMenu;
       print_main_menu();
@@ -245,6 +248,7 @@ static void handle_wifi_scan_list(const String &line) {
 
 static void handle_wifi_saved_list(const String &line) {
   if (line == "b" || line == "B") {
+    g_scan_cache.clear();
     state = State::WifiMenu;
     print_wifi_menu();
     return;
