@@ -3,8 +3,8 @@
 
 #include "hal/i2c_addresses.hpp"
 #include "common/tgs_lookup_tables.hpp"
-#include "../common/eeprom/at24_11.hpp"
-#include "../common/calib/tgs_calibration.hpp"
+#include "common/eeprom/at24_11.hpp"
+#include "common/calib/tgs_calibration.hpp"
 
 /* ================== Pins / Addresses (adjust if needed) ================== */
 #define I2C_SDA        5
