@@ -18,6 +18,7 @@ enum class State {
 static State state = State::Idle;
 static bool g_live_stream = false;
 static bool seen_connection = false;
+static bool g_req_download_mode = false;
 
 // simple input buffer
 static String inbuf;
@@ -30,6 +31,7 @@ static void print_main_menu() {
   Serial.println(F("=== Main Menu ==="));
   Serial.println(F("1) Live data"));
   Serial.println(F("2) WiFi settings"));
+  Serial.println(F("3) Download mode"));
   Serial.print(F("> "));
 }
 
@@ -61,6 +63,9 @@ bool serial_connected() {
 }
 
 bool live_stream_enabled() { return g_live_stream; }
+
+bool download_mode_requested() { return g_req_download_mode; }
+void clear_download_mode_request() { g_req_download_mode = false; }
 
 void begin() {
   inbuf.reserve(64);
@@ -110,6 +115,15 @@ static void handle_main_menu(const String &line) {
   } else if (line == "2") {
     state = State::WifiMenu;
     print_wifi_menu();
+  } else if (line == "3") {
+    // Request download mode; main.cpp should stop logging and reboot into MSC.
+    g_live_stream = false;
+    g_req_download_mode = true;
+    Serial.println();
+    Serial.println(F("Requesting SD download mode..."));
+    Serial.println(F("Stopping logging and rebooting."));
+    Serial.println(F("If the SD drive doesn't appear, unplug/replug USB after reboot."));
+    return;
   } else {
     Serial.println(F("Invalid choice."));
     print_main_menu();
@@ -305,6 +319,7 @@ void poll() {
   if (connected && !seen_connection) {
     seen_connection = true;
     g_live_stream = false;
+    g_req_download_mode = false;
     state = State::MainMenu;
     inbuf = "";
     Serial.println(F("\n(Serial connected)"));
@@ -314,11 +329,15 @@ void poll() {
       // lost connection
       seen_connection = false;
       g_live_stream = false;
+      g_req_download_mode = false;
       state = State::Idle;
       inbuf = "";
     }
     return;
   }
+
+  //If download was requested, do nothing else; main.cpp should see the flag and reboot.
+  if (g_req_download_mode) return;
 
   // While streaming live data, listen for 'b' to go back
   if (state == State::LiveData) {
