@@ -123,10 +123,10 @@ namespace wifi {
 
   void disconnect() {
     // Clear EAP if enabled
-    esp_wifi_sta_wpa2_ent_disable();
-    esp_wifi_sta_wpa2_ent_clear_identity();
-    esp_wifi_sta_wpa2_ent_clear_username();
-    esp_wifi_sta_wpa2_ent_clear_password();
+    esp_wifi_sta_enterprise_disable();
+    esp_eap_client_clear_identity();
+    esp_eap_client_clear_username();
+    esp_eap_client_clear_password();
     WiFi.disconnect(/*wifioff=*/false, /*eraseap=*/false);
   }
 
@@ -224,22 +224,22 @@ namespace wifi {
     WiFi.mode(WIFI_STA);
 
     // Configure WPA2-Enterprise (PEAP/MSCHAPv2)
-    esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)identity.c_str(), identity.length());
-    esp_wifi_sta_wpa2_ent_set_username((uint8_t*)identity.c_str(), identity.length());
-    esp_wifi_sta_wpa2_ent_set_password((uint8_t*)password.c_str(), password.length());
+    esp_eap_client_set_identity((uint8_t*)identity.c_str(), identity.length());
+    esp_eap_client_set_username((uint8_t*)identity.c_str(), identity.length());
+    esp_eap_client_set_password((uint8_t*)password.c_str(), password.length());
 
     // Newer cores: enable() takes a config pointer; older cores: no args
     #ifdef WPA2_CONFIG_INIT_DEFAULT
       esp_wpa2_config_t config = WPA2_CONFIG_INIT_DEFAULT();
       esp_wifi_sta_wpa2_ent_enable(&config);
     #else
-      esp_wifi_sta_wpa2_ent_enable();
+      esp_wifi_sta_enterprise_enable();
     #endif
 
     WiFi.begin(ssid.c_str());
     if (!wait_for_ip(timeout_ms)) {
       // cleanup on failure
-      esp_wifi_sta_wpa2_ent_disable();
+      esp_wifi_sta_enterprise_disable();
       return false;
     }
 
@@ -291,14 +291,14 @@ namespace wifi {
     WiFi.mode(WIFI_STA);
 
     // ---- WPA2-Enterprise (PEAP/MSCHAPv2) setup (same as your existing path) ----
-    esp_wifi_sta_wpa2_ent_set_identity((uint8_t*)identity.c_str(), identity.length());
-    esp_wifi_sta_wpa2_ent_set_username((uint8_t*)identity.c_str(), identity.length());
-    esp_wifi_sta_wpa2_ent_set_password((uint8_t*)password.c_str(),  password.length());
+    esp_eap_client_set_identity((uint8_t*)identity.c_str(), identity.length());
+    esp_eap_client_set_username((uint8_t*)identity.c_str(), identity.length());
+    esp_eap_client_set_password((uint8_t*)password.c_str(),  password.length());
   #ifdef WPA2_CONFIG_INIT_DEFAULT
     esp_wpa2_config_t wpa2_cfg = WPA2_CONFIG_INIT_DEFAULT();
-    esp_wifi_sta_wpa2_ent_enable(&wpa2_cfg);
+    esp_wifi_sta_enterprise_enable(&wpa2_cfg);
   #else
-    esp_wifi_sta_wpa2_ent_enable();
+    esp_wifi_sta_enterprise_enable();
   #endif
 
     // ---- Lock to exact BSSID + channel (your core lacks WiFi.begin(ssid, ch, bssid, ...)) ----
@@ -316,7 +316,7 @@ namespace wifi {
     ESP_ERROR_CHECK(esp_wifi_connect());
 
     if (!wait_for_ip(timeout_ms)) {
-      esp_wifi_sta_wpa2_ent_disable();
+      esp_wifi_sta_enterprise_disable();
       return false;
     }
 
