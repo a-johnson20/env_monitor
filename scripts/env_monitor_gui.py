@@ -568,12 +568,32 @@ class App(tk.Tk):
         self.status_var = tk.StringVar(value="Disconnected")
         self.preview_title_var = tk.StringVar(value="Preview")
         self.preview_info_var = tk.StringVar(value="")
+        self.connected_port: str | None = None
+        self.port_display_to_device: dict[str, str] = {}
 
         self._configure_theme()
         self._build_ui()
         self._schedule_poll()
         self.refresh_ports()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def _set_port_combo_state(self) -> None:
+        # Prevent selecting a different COM port while an active connection exists.
+        self.port_combo.configure(state=tk.DISABLED if self.connected else "readonly")
+
+    def _on_port_selected(self, _event=None) -> None:
+        # Remove selection highlight in the readonly field after choice.
+        try:
+            self.port_combo.selection_clear()
+        except Exception:
+            pass
+        self.focus_set()
+
+    def _on_port_focus_in(self, _event=None) -> None:
+        try:
+            self.port_combo.selection_clear()
+        except Exception:
+            pass
 
     def _configure_theme(self) -> None:
         if HAS_TTKBOOTSTRAP and tb is not None:
@@ -626,6 +646,12 @@ class App(tk.Tk):
 
         self.style.configure("TEntry", padding=5)
         self.style.configure("TCombobox", padding=4)
+        # Make dropdown selection less visually loud.
+        self.option_add("*TCombobox*Listbox.background", self.c_surface)
+        self.option_add("*TCombobox*Listbox.foreground", self.c_text)
+        self.option_add("*TCombobox*Listbox.selectBackground", self.c_surface)
+        self.option_add("*TCombobox*Listbox.selectForeground", self.c_text)
+        self.option_add("*TCombobox*Listbox.font", "{Segoe UI} 10")
 
         self.style.configure("TNotebook", background=self.c_bg, borderwidth=0, tabmargins=(2, 0, 2, 0))
         self.style.configure("TNotebook.Tab", padding=(14, 8), font=("Segoe UI Semibold", 10))
@@ -674,6 +700,8 @@ class App(tk.Tk):
         ttk.Label(top, text="Port:", style="Section.TLabel").pack(side=tk.LEFT)
         self.port_combo = ttk.Combobox(top, textvariable=self.port_var, width=20, state="readonly")
         self.port_combo.pack(side=tk.LEFT, padx=(6, 10))
+        self.port_combo.bind("<<ComboboxSelected>>", self._on_port_selected)
+        self.port_combo.bind("<FocusIn>", self._on_port_focus_in)
         ttk.Button(top, text="Refresh Ports", command=self.refresh_ports).pack(side=tk.LEFT)
 
         ttk.Label(top, text="Baud:", style="Section.TLabel").pack(side=tk.LEFT, padx=(14, 0))
@@ -816,23 +844,29 @@ class App(tk.Tk):
                     messagebox.showerror("Error", str(payload))
                 elif kind == "connected":
                     self.connected = True
+                    self.connected_port = str(payload)
                     self.status_var.set(f"Connected: {payload}")
                     self.connect_btn.configure(text="Disconnect")
+                    self._set_port_combo_state()
                     self.live_start_btn.configure(state=tk.NORMAL)
                     self.live_graphs_btn.configure(state=tk.NORMAL)
+                    self.refresh_ports()
                     self._update_files_controls()
                     # Auto-load SD file list right after serial connection opens.
                     self.refresh_files()
                 elif kind == "disconnected":
                     self.connected = False
+                    self.connected_port = None
                     self.live_running = False
                     self.files_refresh_inflight = False
                     self.preview_loading_index = None
                     self.status_var.set("Disconnected")
                     self.connect_btn.configure(text="Connect")
+                    self._set_port_combo_state()
                     self.live_start_btn.configure(state=tk.DISABLED)
                     self.live_stop_btn.configure(state=tk.DISABLED)
                     self.live_graphs_btn.configure(state=tk.DISABLED)
+                    self.refresh_ports()
                     self._update_files_controls()
                     self.file_entries = []
                     self.preview_cache.clear()
@@ -883,9 +917,29 @@ class App(tk.Tk):
 
     def refresh_ports(self) -> None:
         ports = [p.device for p in list_ports.comports()]
-        self.port_combo["values"] = ports
-        if ports and self.port_var.get() not in ports:
-            self.port_var.set(ports[0])
+        if self.connected_port and self.connected_port not in ports:
+            ports.append(self.connected_port)
+
+        displays: list[str] = []
+        mapping: dict[str, str] = {}
+        for dev in ports:
+            label = f"{dev} (connected)" if self.connected and self.connected_port == dev else dev
+            displays.append(label)
+            mapping[label] = dev
+
+        self.port_display_to_device = mapping
+        self.port_combo["values"] = displays
+
+        current = self.port_var.get()
+        if current in mapping:
+            return
+        if self.connected and self.connected_port:
+            connected_label = f"{self.connected_port} (connected)"
+            if connected_label in mapping:
+                self.port_var.set(connected_label)
+                return
+        if displays:
+            self.port_var.set(displays[0])
 
     def toggle_connection(self) -> None:
         if self.client.is_open:
@@ -893,7 +947,8 @@ class App(tk.Tk):
             self.events.put(("disconnected", None))
             return
 
-        port = self.port_var.get().strip()
+        selected = self.port_var.get().strip()
+        port = self.port_display_to_device.get(selected, selected)
         if not port:
             messagebox.showwarning("Port Required", "Choose a COM port first.")
             return
