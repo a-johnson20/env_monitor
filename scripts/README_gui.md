@@ -3,7 +3,7 @@
 ## Run from Python
 
 ```powershell
-python -m pip install pyserial
+python -m pip install pyserial ttkbootstrap
 python scripts/env_monitor_gui.py
 ```
 

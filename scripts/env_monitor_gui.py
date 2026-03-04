@@ -30,6 +30,12 @@ from tkinter import filedialog, messagebox, ttk
 
 import serial
 from serial.tools import list_ports
+try:
+    import ttkbootstrap as tb
+    HAS_TTKBOOTSTRAP = True
+except Exception:
+    tb = None
+    HAS_TTKBOOTSTRAP = False
 
 
 LIST_RE = re.compile(r"^\s*(\d+)\)\s+(.+)\s+\((\d+)\s+bytes\)\s*$")
@@ -354,14 +360,18 @@ class LiveGraphsWindow(tk.Toplevel):
         self.title("Live Graphs")
         self.geometry("980x760")
         self.minsize(760, 520)
+        self.c_bg = getattr(master, "c_bg", "#eef2f8")
+        self.c_surface = getattr(master, "c_surface", "#ffffff")
+        self.c_border = getattr(master, "c_border", "#d4dbe6")
+        self.configure(bg=self.c_bg)
 
         self.status_var = tk.StringVar(value="Waiting for live data...")
-        ttk.Label(self, textvariable=self.status_var).pack(anchor="w", padx=10, pady=(8, 4))
+        ttk.Label(self, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", padx=10, pady=(8, 4))
 
         outer = ttk.Frame(self)
         outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        self.scroll_canvas = tk.Canvas(outer, highlightthickness=0)
+        self.scroll_canvas = tk.Canvas(outer, highlightthickness=0, bg=self.c_bg)
         self.scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         vsb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=self.scroll_canvas.yview)
@@ -401,9 +411,9 @@ class LiveGraphsWindow(tk.Toplevel):
             canvas = tk.Canvas(
                 pane,
                 height=170,
-                bg="#ffffff",
+                bg=self.c_surface,
                 highlightthickness=1,
-                highlightbackground="#d0d0d0",
+                highlightbackground=self.c_border,
             )
             canvas.pack(fill=tk.X, expand=True, padx=6, pady=6)
             canvas.bind("<Configure>", lambda _e: self.redraw())
@@ -525,6 +535,17 @@ class App(tk.Tk):
         self.geometry("980x680")
         self.minsize(840, 560)
 
+        self.c_bg = "#eef2f8"
+        self.c_surface = "#ffffff"
+        self.c_text = "#1f2937"
+        self.c_muted = "#5b6678"
+        self.c_accent = "#0b66d6"
+        self.c_accent_hover = "#0a58bc"
+        self.c_accent_press = "#084b9e"
+        self.c_border = "#d4dbe6"
+        self.c_row_alt = "#f7f9fc"
+        self.c_tab_idle = "#e3e9f3"
+
         self.client = SerialMenuClient()
         self.events: Queue[tuple[str, object]] = Queue()
         self.file_entries: list[FileEntry] = []
@@ -548,27 +569,120 @@ class App(tk.Tk):
         self.preview_title_var = tk.StringVar(value="Preview")
         self.preview_info_var = tk.StringVar(value="")
 
+        self._configure_theme()
         self._build_ui()
         self._schedule_poll()
         self.refresh_ports()
         self.protocol("WM_DELETE_WINDOW", self.on_close)
 
+    def _configure_theme(self) -> None:
+        if HAS_TTKBOOTSTRAP and tb is not None:
+            self.style = tb.Style(theme="flatly")
+            colors = getattr(self.style, "colors", None)
+            if colors is not None:
+                self.c_bg = getattr(colors, "bg", self.c_bg)
+                self.c_surface = getattr(colors, "light", self.c_surface)
+                self.c_text = getattr(colors, "fg", self.c_text)
+                self.c_muted = getattr(colors, "secondary", self.c_muted)
+                self.c_accent = getattr(colors, "primary", self.c_accent)
+                self.c_accent_hover = self.c_accent
+                self.c_accent_press = self.c_accent
+                self.c_border = getattr(colors, "border", self.c_border)
+                self.c_row_alt = getattr(colors, "bg", self.c_row_alt)
+        else:
+            self.style = ttk.Style(self)
+            available = set(self.style.theme_names())
+            for candidate in ("clam", "vista", "xpnative", "default"):
+                if candidate in available:
+                    self.style.theme_use(candidate)
+                    break
+
+        self.configure(bg=self.c_bg)
+
+        self.style.configure(".", font=("Segoe UI", 10))
+        self.style.configure("TFrame", background=self.c_bg)
+        self.style.configure("TLabel", background=self.c_bg, foreground=self.c_text)
+        self.style.configure("Section.TLabel", background=self.c_bg, foreground=self.c_text, font=("Segoe UI Semibold", 10))
+        self.style.configure("Muted.TLabel", background=self.c_bg, foreground=self.c_muted)
+
+        self.style.configure("TButton", padding=(10, 6), font=("Segoe UI", 10))
+        self.style.configure(
+            "Accent.TButton",
+            padding=(10, 6),
+            font=("Segoe UI Semibold", 10),
+            foreground="#ffffff",
+            background=self.c_accent,
+            borderwidth=0,
+        )
+        self.style.map(
+            "Accent.TButton",
+            background=[
+                ("disabled", "#a8b5cc"),
+                ("pressed", self.c_accent_press),
+                ("active", self.c_accent_hover),
+            ],
+            foreground=[("disabled", "#ecf2ff")],
+        )
+
+        self.style.configure("TEntry", padding=5)
+        self.style.configure("TCombobox", padding=4)
+
+        self.style.configure("TNotebook", background=self.c_bg, borderwidth=0, tabmargins=(2, 0, 2, 0))
+        self.style.configure("TNotebook.Tab", padding=(14, 8), font=("Segoe UI Semibold", 10))
+        self.style.map(
+            "TNotebook.Tab",
+            background=[("selected", self.c_surface), ("!selected", self.c_tab_idle)],
+            foreground=[("selected", self.c_text), ("!selected", self.c_muted)],
+        )
+
+        self.style.configure("TPanedwindow", background=self.c_bg)
+        self.style.configure("TLabelframe", background=self.c_bg, bordercolor=self.c_border)
+        self.style.configure("TLabelframe.Label", background=self.c_bg, foreground=self.c_text, font=("Segoe UI Semibold", 10))
+
+        self.style.configure(
+            "Treeview",
+            background=self.c_surface,
+            fieldbackground=self.c_surface,
+            foreground=self.c_text,
+            rowheight=24,
+            bordercolor=self.c_border,
+            lightcolor=self.c_border,
+            darkcolor=self.c_border,
+        )
+        self.style.configure(
+            "Treeview.Heading",
+            background="#e6ecf5",
+            foreground=self.c_text,
+            relief="flat",
+            padding=(6, 6),
+            font=("Segoe UI Semibold", 10),
+        )
+        self.style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", "#111827")])
+        self.style.map("Treeview.Heading", background=[("active", "#dce5f2")])
+
+    def _apply_tree_stripes(self, tree: ttk.Treeview, rows: list[tuple]) -> None:
+        tree.tag_configure("even", background=self.c_surface)
+        tree.tag_configure("odd", background=self.c_row_alt)
+        for i, values in enumerate(rows):
+            tag = "even" if i % 2 == 0 else "odd"
+            tree.insert("", tk.END, values=values, tags=(tag,))
+
     def _build_ui(self) -> None:
         top = ttk.Frame(self, padding=10)
         top.pack(fill=tk.X)
 
-        ttk.Label(top, text="Port:").pack(side=tk.LEFT)
+        ttk.Label(top, text="Port:", style="Section.TLabel").pack(side=tk.LEFT)
         self.port_combo = ttk.Combobox(top, textvariable=self.port_var, width=20, state="readonly")
         self.port_combo.pack(side=tk.LEFT, padx=(6, 10))
         ttk.Button(top, text="Refresh Ports", command=self.refresh_ports).pack(side=tk.LEFT)
 
-        ttk.Label(top, text="Baud:").pack(side=tk.LEFT, padx=(14, 0))
+        ttk.Label(top, text="Baud:", style="Section.TLabel").pack(side=tk.LEFT, padx=(14, 0))
         ttk.Entry(top, textvariable=self.baud_var, width=10).pack(side=tk.LEFT, padx=(6, 10))
 
-        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection)
+        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection, style="Accent.TButton")
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        ttk.Label(top, textvariable=self.status_var).pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -584,7 +698,13 @@ class App(tk.Tk):
     def _build_live_tab(self) -> None:
         btns = ttk.Frame(self.live_tab)
         btns.pack(fill=tk.X)
-        self.live_start_btn = ttk.Button(btns, text="Start Live", command=self.start_live, state=tk.DISABLED)
+        self.live_start_btn = ttk.Button(
+            btns,
+            text="Start Live",
+            command=self.start_live,
+            state=tk.DISABLED,
+            style="Accent.TButton",
+        )
         self.live_start_btn.pack(side=tk.LEFT)
         self.live_stop_btn = ttk.Button(btns, text="Stop Live", command=self.stop_live, state=tk.DISABLED)
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
@@ -604,16 +724,26 @@ class App(tk.Tk):
         split.add(left, weight=2)
         split.add(right, weight=1)
 
-        ttk.Label(left, text="Incoming CSV Lines").pack(anchor="w")
+        ttk.Label(left, text="Incoming CSV Lines", style="Section.TLabel").pack(anchor="w")
         self.live_text = tk.Text(left, wrap="none", height=20)
         self.live_text.pack(fill=tk.BOTH, expand=True)
-        self.live_text.configure(state=tk.DISABLED)
+        self.live_text.configure(
+            state=tk.DISABLED,
+            bg=self.c_surface,
+            fg=self.c_text,
+            insertbackground=self.c_text,
+            relief="flat",
+            highlightthickness=1,
+            highlightbackground=self.c_border,
+            padx=8,
+            pady=6,
+        )
 
         scroll_y = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.live_text.yview)
         self.live_text.configure(yscrollcommand=scroll_y.set)
         scroll_y.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
 
-        ttk.Label(right, text="Latest Row").pack(anchor="w")
+        ttk.Label(right, text="Latest Row", style="Section.TLabel").pack(anchor="w")
         self.latest_tree = ttk.Treeview(right, columns=("field", "value"), show="headings", height=18)
         self.latest_tree.heading("field", text="Field")
         self.latest_tree.heading("value", text="Value")
@@ -629,7 +759,7 @@ class App(tk.Tk):
         )
         self.refresh_files_btn.pack(side=tk.LEFT)
         self.download_btn = ttk.Button(
-            btns, text="Download Selected CSV", command=self.download_selected, state=tk.DISABLED
+            btns, text="Download Selected CSV", command=self.download_selected, state=tk.DISABLED, style="Accent.TButton"
         )
         self.download_btn.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -651,7 +781,7 @@ class App(tk.Tk):
         self.files_tree.pack(fill=tk.BOTH, expand=True)
         self.files_tree.bind("<<TreeviewSelect>>", self.on_file_selected)
 
-        ttk.Label(bottom, textvariable=self.preview_title_var).pack(anchor="w")
+        ttk.Label(bottom, textvariable=self.preview_title_var, style="Section.TLabel").pack(anchor="w")
         preview_wrap = ttk.Frame(bottom)
         preview_wrap.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
@@ -666,7 +796,7 @@ class App(tk.Tk):
         pv_x.grid(row=1, column=0, sticky="ew")
         self.preview_tree.configure(yscrollcommand=pv_y.set, xscrollcommand=pv_x.set)
 
-        ttk.Label(bottom, textvariable=self.preview_info_var).pack(anchor="w", pady=(4, 0))
+        ttk.Label(bottom, textvariable=self.preview_info_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
 
     def _update_files_controls(self) -> None:
         refresh_ok = self.connected and (not self.live_running) and (not self.files_refresh_inflight)
@@ -829,8 +959,8 @@ class App(tk.Tk):
         self.preview_cache.clear()
         for row in self.files_tree.get_children():
             self.files_tree.delete(row)
-        for f in files:
-            self.files_tree.insert("", tk.END, values=(f.index, f.path, f.size))
+        striped_rows = [(f.index, f.path, f.size) for f in files]
+        self._apply_tree_stripes(self.files_tree, striped_rows)
         self._set_preview_message("", "Select a file to preview it.", 0)
         self._update_files_controls()
         if files:
@@ -940,8 +1070,8 @@ class App(tk.Tk):
             self.preview_tree.heading(cid, text=name)
             self.preview_tree.column(cid, width=uniform_width, anchor="w", stretch=False)
 
-        for row in rows:
-            self.preview_tree.insert("", tk.END, values=tuple(row))
+        striped_rows = [tuple(row) for row in rows]
+        self._apply_tree_stripes(self.preview_tree, striped_rows)
 
         self.preview_info_var.set(info)
 
@@ -1131,9 +1261,11 @@ class App(tk.Tk):
 
         for row in self.latest_tree.get_children():
             self.latest_tree.delete(row)
+        latest_rows: list[tuple[str, str]] = []
         for i, value in enumerate(fields):
             key = keys[i] if i < len(keys) else f"col_{i}"
-            self.latest_tree.insert("", tk.END, values=(key, value))
+            latest_rows.append((key, value))
+        self._apply_tree_stripes(self.latest_tree, latest_rows)
 
         self._update_live_history(fields)
         self._refresh_live_graphs()
