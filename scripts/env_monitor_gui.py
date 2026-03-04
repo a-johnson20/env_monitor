@@ -707,7 +707,7 @@ class App(tk.Tk):
         ttk.Label(top, text="Baud:", style="Section.TLabel").pack(side=tk.LEFT, padx=(14, 0))
         ttk.Entry(top, textvariable=self.baud_var, width=10).pack(side=tk.LEFT, padx=(6, 10))
 
-        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection, style="Accent.TButton")
+        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection)
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
