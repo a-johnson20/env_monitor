@@ -38,10 +38,12 @@ static bool writeRtcFromUtc(const struct tm& utc_tm) {
   ok &= static_cast<bool>(g_rtc->setSeconds(utc_tm.tm_sec));
   ok &= static_cast<bool>(g_rtc->setMinutes(utc_tm.tm_min));
   ok &= static_cast<bool>(g_rtc->setHours(utc_tm.tm_hour));
-  ok &= static_cast<bool>(g_rtc->setWeekday(utc_tm.tm_wday));           // 0=Sun..6=Sat
+  const uint8_t rtc_wday = (utc_tm.tm_wday == 0) ? 7 : static_cast<uint8_t>(utc_tm.tm_wday); // 1=Mon..7=Sun
+  ok &= static_cast<bool>(g_rtc->setWeekday(rtc_wday));
   ok &= static_cast<bool>(g_rtc->setDate(utc_tm.tm_mday));              // 1..31
   ok &= static_cast<bool>(g_rtc->setMonth(utc_tm.tm_mon + 1));          // 1..12
-  ok &= static_cast<bool>(g_rtc->setYear((utc_tm.tm_year + 1900) % 100)); // 00..99
+  // RV-3028 library expects full year, e.g. 2026.
+  ok &= static_cast<bool>(g_rtc->setYear(static_cast<uint16_t>(utc_tm.tm_year + 1900)));
 
   return ok;
 }
@@ -80,10 +82,9 @@ static bool syncFromNtp() {
     uint8_t r_wday = g_rtc->getWeekday();
     uint8_t r_mday = g_rtc->getDate();
     uint8_t r_mon  = g_rtc->getMonth();
-    uint8_t r_year = g_rtc->getYear(); // 0..99 expected
-    uint16_t rtc_full_year = 2000u + (r_year % 100u);
-    Serial.printf("[RTC verify] %04u-%02u-%02u %02u:%02u:%02u (raw yy=%u)\n",
-                  rtc_full_year, r_mon, r_mday, r_hour, r_min, r_sec, r_year);
+    uint16_t r_year = g_rtc->getYear(); // full year, e.g. 2026
+    Serial.printf("[RTC verify] %04u-%02u-%02u %02u:%02u:%02u (wday=%u)\n",
+                  r_year, r_mon, r_mday, r_hour, r_min, r_sec, r_wday);
     Serial.printf("[NTP used ] %04d-%02d-%02d %02d:%02d:%02d (UTC)\n",
                   utc_tm.tm_year + 1900, utc_tm.tm_mon + 1, utc_tm.tm_mday,
                   utc_tm.tm_hour, utc_tm.tm_min, utc_tm.tm_sec);

@@ -29,6 +29,9 @@ bool ensure_header(const String& path, const String& header);
 // Append one CSV line (no trailing newline required; this function adds it).
 bool append_line(const String& path, const String& csv_line);
 
+void set_paused(bool paused);
+bool paused();
+
 // Optional helper: card size in MB (0 if unknown / not mounted).
 uint64_t card_size_mb();
 

@@ -265,12 +265,20 @@ static void commit_and_reset_all_windows() {
   }
 
   // Print to Serial ONLY when "Live data" is selected in the menu
+  static bool live_header_sent = false;
   if (ui::live_stream_enabled()) {
+    if (!live_header_sent) {
+      Serial.print("LIVE_HEADER ");
+      Serial.println(logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
+      live_header_sent = true;
+    }
     Serial.println(line);
+  } else {
+    live_header_sent = false;
   }
 
   // Only SD work is gated
-  if (sd_logger::is_mounted()) {
+  if (sd_logger::is_mounted() && !sd_logger::paused()) {
     const String path = logfmt::current_log_path(rtc_present, rtc);
     sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
     sd_logger::append_line(path, line);
@@ -389,6 +397,9 @@ void setup() {
   Serial.begin(115200);
   Serial.println("Serial open");
 
+  // triggered re‑enumeration; doing it here once avoids the disconnect.
+
+
   wifi::begin();
   ui::begin();
 
@@ -480,7 +491,6 @@ void setup() {
 }
 
 void loop() {
-
   rtc_sync::poll();
   ui::poll();
 
@@ -488,9 +498,11 @@ void loop() {
   static uint32_t last_sd_poll = 0;
   uint32_t now = millis();
   if (now - last_sd_poll >= 500) {
-    sd_logger::poll_hotplug(now);
-    last_sd_poll = now;
-  }
+    if (!sd_logger::paused()) {
+      sd_logger::poll_hotplug(now);
+      last_sd_poll = now;
+    }
+   }
 
   // ---- Page + subpage rotation (match original behavior) ----
   static unsigned long last_step_ms = 0;

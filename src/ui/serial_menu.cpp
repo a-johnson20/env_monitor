@@ -1,6 +1,8 @@
 #include "ui/serial_menu.hpp"
 #include "net/wifi_manager.hpp"
+#include "logging/sd_logger.hpp"
 #include <vector>
+#include <SD_MMC.h>
 
 namespace ui {
 
@@ -12,6 +14,7 @@ enum class State {
   WifiScanList,
   WifiSavedList,
   WifiSavedAction, // after picking a saved network
+  LogExportList,
   Prompt          // generic input prompt
 };
 
@@ -24,12 +27,19 @@ static String inbuf;
 static uint32_t last_menu_print_ms = 0;
 static int selected_index = -1; // reused in submenus
 
+struct LogFileEntry {
+  String path;
+  uint64_t size = 0;
+};
+static std::vector<LogFileEntry> g_log_files;
+
 // helpers
 static void print_main_menu() {
   Serial.println();
   Serial.println(F("=== Main Menu ==="));
   Serial.println(F("1) Live data"));
   Serial.println(F("2) WiFi settings"));
+  Serial.println(F("3) Download log file (Serial)"));
   Serial.print(F("> "));
 }
 
@@ -50,14 +60,9 @@ static void print_wifi_menu() {
 }
 
 bool serial_connected() {
-  // Portable check:
-  // - On native USB CDC (ESP32-S3): (bool)Serial is true when a terminal is open.
-  // - On UART bridges: Serial is usually always "true", so also check write space.
-#if defined(ARDUINO_USB_CDC_ON_BOOT) || defined(USBCON)
-  return (bool)Serial;  // true when the USB CDC port is opened by a host
-#else
-  return (bool)Serial && (Serial.availableForWrite() > 0);
-#endif
+  // Do not gate menu visibility on USB "connected/open" semantics.
+  // Host CDC signaling (DTR/RTS) is inconsistent across tools/OSes.
+  return true;
 }
 
 bool live_stream_enabled() { return g_live_stream; }
@@ -101,6 +106,123 @@ static void to_upper_inplace(String &s) {
   for (size_t i=0;i<s.length();++i) s[i] = toupper(s[i]);
 }
 
+static bool refresh_log_file_list() {
+  g_log_files.clear();
+
+  File dir = SD_MMC.open("/logs");
+  if (!dir || !dir.isDirectory()) {
+    if (dir) dir.close();
+    return false;
+  }
+
+  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+    if (!f.isDirectory()) {
+      LogFileEntry e;
+      String path = f.path();
+      if (path.length() == 0) {
+        path = String("/logs/") + f.name();
+      }
+      e.path = path;
+      e.size = (uint64_t)f.size();
+      g_log_files.push_back(e);
+    }
+    f.close();
+  }
+  dir.close();
+  return true;
+}
+
+static void print_log_export_menu() {
+  Serial.println();
+  Serial.println(F("=== Log Export (Serial) ==="));
+
+  if (!refresh_log_file_list()) {
+    Serial.println(F("Could not read /logs on SD."));
+  } else if (g_log_files.empty()) {
+    Serial.println(F("No files found in /logs."));
+  } else {
+    for (size_t i = 0; i < g_log_files.size(); ++i) {
+      Serial.print(i + 1);
+      Serial.print(F(") "));
+      Serial.print(g_log_files[i].path);
+      Serial.print(F(" ("));
+      Serial.print((unsigned long)g_log_files[i].size);
+      Serial.println(F(" bytes)"));
+    }
+  }
+
+  Serial.println(F("\nChoose file number to stream."));
+  Serial.println(F("r) Refresh"));
+  Serial.println(F("b) Back"));
+  Serial.print(F("> "));
+}
+
+static bool stream_log_file(const LogFileEntry& file) {
+  File f = SD_MMC.open(file.path, FILE_READ);
+  if (!f || f.isDirectory()) {
+    if (f) f.close();
+    return false;
+  }
+
+  Serial.println();
+  Serial.print(F("BEGIN_LOG "));
+  Serial.print(file.path);
+  Serial.print(F(" "));
+  Serial.println((unsigned long)file.size);
+
+  uint8_t buf[128];
+  size_t sent = 0;
+  while (true) {
+    size_t n = f.read(buf, sizeof(buf));
+    if (n == 0) break;
+    Serial.write(buf, n);
+    sent += n;
+    delay(0);
+  }
+  f.close();
+
+  Serial.println();
+  Serial.print(F("END_LOG "));
+  Serial.print(file.path);
+  Serial.print(F(" "));
+  Serial.println((unsigned long)sent);
+  return true;
+}
+
+static void handle_log_export_list(const String &line) {
+  if (line == "b" || line == "B") {
+    sd_logger::set_paused(false);
+    state = State::MainMenu;
+    print_main_menu();
+    return;
+  }
+  if (line == "r" || line == "R") {
+    print_log_export_menu();
+    return;
+  }
+
+  int sel = line.toInt();
+  if (sel <= 0) {
+    Serial.println(F("Invalid selection."));
+    Serial.print(F("> "));
+    return;
+  }
+  if (sel > (int)g_log_files.size()) {
+    Serial.println(F("Out of range."));
+    Serial.print(F("> "));
+    return;
+  }
+
+  const auto& file = g_log_files[(size_t)(sel - 1)];
+  Serial.println(F("\nStreaming file over serial..."));
+  if (!stream_log_file(file)) {
+    Serial.println(F("Stream failed."));
+  } else {
+    Serial.println(F("\nDone. Use scripts/download_csv.py for automatic CSV save."));
+  }
+  Serial.print(F("> "));
+}
+
 // ---- State handlers ----
 static void handle_main_menu(const String &line) {
   if (line == "1") {
@@ -110,6 +232,15 @@ static void handle_main_menu(const String &line) {
   } else if (line == "2") {
     state = State::WifiMenu;
     print_wifi_menu();
+  } else if (line == "3") {
+  if (!sd_logger::is_mounted()) {
+    Serial.println(F("SD not mounted."));
+    print_main_menu();
+    return;
+  }
+  sd_logger::set_paused(true);
+  state = State::LogExportList;
+  print_log_export_menu();
   } else {
     Serial.println(F("Invalid choice."));
     print_main_menu();
@@ -343,15 +474,22 @@ void poll() {
       case State::WifiScanList:      handle_wifi_scan_list(line); break;
       case State::WifiSavedList:     handle_wifi_saved_list(line); break;
       case State::WifiSavedAction:   handle_wifi_saved_action(line); break;
+      case State::LogExportList:     handle_log_export_list(line); break;
       default: break;
     }
   } else {
     // Periodic reprint in case user attached mid-stream and missed prompt
-    if (millis() - last_menu_print_ms > 15000 && (state == State::MainMenu || state == State::WifiMenu)) {
+    if (millis() - last_menu_print_ms > 5000 &&
+        (state == State::MainMenu || state == State::WifiMenu || state == State::LogExportList)) {
       last_menu_print_ms = millis();
-      Serial.print(F("> "));
+      if (state == State::MainMenu) {
+        print_main_menu();
+      } else {
+        Serial.print(F("> "));
+      }
     }
   }
+
 }
 
 } // namespace ui
