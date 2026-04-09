@@ -44,6 +44,7 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define RTC_SCL 16
 
 #define LDO_Sensors_EN  41
+#define TCA_RESET       3
 
 // ---------- Pump PWM (GPIO21) ----------
 #define PUMP_PWM_PIN     21
@@ -395,6 +396,7 @@ namespace {
 
 void setup() {
   Serial.begin(115200);
+  delay(5000); // let the serial port settle
   Serial.println("Serial open");
 
   // triggered re‑enumeration; doing it here once avoids the disconnect.
@@ -405,6 +407,9 @@ void setup() {
 
   pinMode(LDO_Sensors_EN, OUTPUT);
   digitalWrite(LDO_Sensors_EN, HIGH); // power sensors
+
+  // Initialize TCA9548A mux
+  hal::Mux::init(TCA_RESET);
 
   // Sensors I2C (through TCA9548A)
   Wire.begin(SDA, SCL);
@@ -435,8 +440,7 @@ void setup() {
   rtc_sync::begin(rtc, rtc_present); // sync RTC from WiFi NTP on boot
 
   // Mux present?
-  Wire.beginTransmission(hal::I2CAddr::TCA9548A);
-  if (Wire.endTransmission() != 0) {
+  if (!hal::Mux::probe(Wire)) {
     Serial.println("ERROR: TCA9548A not found at 0x70!");
     while (1) delay(1000);
   }

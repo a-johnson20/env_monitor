@@ -40,4 +40,19 @@ namespace hal::Mux {
     return select_channel(wire, hal::I2CAddr::TCA9548A, ch, state);
   }
 
+  // Initialize TCA9548A with reset pulse
+  inline void init(uint8_t reset_pin) {
+    pinMode(reset_pin, OUTPUT);
+    digitalWrite(reset_pin, LOW);       // hold in reset
+    delay(10);
+    digitalWrite(reset_pin, HIGH);      // release reset
+    delay(50);                          // stabilization
+  }
+
+  // Verify TCA9548A is present on I2C bus
+  inline bool probe(TwoWire& wire, uint8_t tca_addr = hal::I2CAddr::TCA9548A) {
+    wire.beginTransmission(tca_addr);
+    return wire.endTransmission() == 0;
+  }
+
 }

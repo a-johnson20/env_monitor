@@ -8,8 +8,8 @@ namespace hal::Mux { // nested namespace
 
   // <Ch, 2> means "channel Ch, two devices expected"
   // Define channels { Ch::C5, Ch::C3 } means "channel C5 and C3, one device each"
-  inline constexpr std::array<Ch, 1> TRHP    { Ch::C0 }; // SHT45 + TMP117 + LPS22DF
-  inline constexpr std::array<Ch, 1> SCD4x   { Ch::C1 }; // SCD41 / SCD40
-  inline constexpr std::array<Ch, 4> TGS2611 { Ch::C2, Ch::C3, Ch::C4, Ch::C5 }; // TGS2611 with ADS1113 + (future) digipot/EEPROM
+  inline constexpr std::array<Ch, 1> TRHP    { Ch::C1 }; // SHT45 + TMP117 + LPS22DF
+  inline constexpr std::array<Ch, 1> SCD4x   { Ch::C2 }; // SCD41 / SCD40
+  inline constexpr std::array<Ch, 1> TGS2611 { Ch::C4 }; // TGS2611 with ADS1113 + (future) digipot/EEPROM
   inline constexpr std::array<Ch, 0> TGS2616 {  }; // TGS2616 with ADS1113 + (future) digipot/EEPROM
 }
