@@ -480,7 +480,7 @@ void setup() {
   }
 
   pump_begin();
-  pump_set_percent(50.0f);  // start at 50% (pick what you want)
+  pump_set_percent(1);  // start at 50% (pick what you want)
 
   delay(10000); // Give time to open serial monitor
 
