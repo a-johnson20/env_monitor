@@ -353,6 +353,199 @@ class SerialMenuClient:
         self.live_thread.join(timeout=2.0)
         self.live_thread = None
 
+    def wifi_scan(self, timeout_s: float = 15.0) -> list[dict]:
+        """Scan for available WiFi networks and return list of networks."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu option
+            time.sleep(0.5)
+            self._send_line("1")  # Scan networks option
+            time.sleep(1.0)  # Give device time to scan
+
+            # Read until scan is complete
+            deadline = time.time() + timeout_s
+            networks: list[dict] = []
+            buf = bytearray()
+            saw_header = False
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+
+                buf.extend(b)
+
+                # Look for complete lines
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    # Skip empty lines
+                    if not line:
+                        continue
+
+                    # Look for the header line
+                    if "#  RSSI  SEC  SSID" in line or "#  RSSI" in line:
+                        saw_header = True
+                        continue
+
+                    # Stop if we've seen the header and now hit the prompt/menu
+                    if saw_header and (line.startswith("> ") or line == ">" or "Select a network" in line):
+                        break
+
+                    # Parse network entries after we've seen the header
+                    # Format: "1) -45  WPA2-PSK  MyNetwork"
+                    if saw_header and ") " in line[:3]:
+                        try:
+                            # Split on first ")" to separate index from rest
+                            parts = line.split(")", 1)
+                            if len(parts) == 2:
+                                remainder = parts[1].strip()
+                                # Split on whitespace to get RSSI, SEC, and SSID
+                                tokens = remainder.split(None, 2)  # Split on whitespace, max 3 parts
+                                if len(tokens) >= 3:
+                                    rssi_str = tokens[0]
+                                    sec_str = tokens[1]
+                                    ssid_str = tokens[2]
+
+                                    # Validate RSSI looks like a number (negative dBm)
+                                    try:
+                                        rssi_val = int(rssi_str)
+                                        networks.append({
+                                            "ssid": ssid_str,
+                                            "rssi": rssi_str,
+                                            "security": sec_str
+                                        })
+                                    except ValueError:
+                                        pass
+                        except (IndexError, ValueError):
+                            pass
+
+            return networks
+
+    def wifi_connect(self, ssid: str, password: str, auth_type: str = "PSK", timeout_s: float = 20.0) -> dict:
+        """Connect to a WiFi network."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu
+            time.sleep(0.3)
+
+            # Choose connect method based on auth type
+            if auth_type == "WPA2-EAP":
+                self._send_line("3")  # WPA2-EAP option
+            else:
+                self._send_line("2")  # PSK option
+
+            time.sleep(0.3)
+
+            # Send SSID
+            self._send_line(ssid)
+            time.sleep(0.3)
+
+            # Send password
+            self._send_line(password)
+            time.sleep(0.5)
+
+            # Read response
+            deadline = time.time() + timeout_s
+            response_lines: list[str] = []
+            buf = bytearray()
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    response_lines.append(line)
+                    buf = bytearray()
+
+                    if "success" in line.lower() or "connected" in line.lower():
+                        return {"success": True, "ssid": ssid, "message": line}
+                    elif "fail" in line.lower() or "error" in line.lower():
+                        return {"success": False, "ssid": ssid, "message": line}
+
+            return {"success": False, "ssid": ssid, "message": "Timeout waiting for response"}
+
+    def wifi_disconnect(self, timeout_s: float = 10.0) -> dict:
+        """Disconnect WiFi."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu
+            time.sleep(0.3)
+            self._send_line("5")  # Disconnect option
+            time.sleep(0.5)
+
+            # Read response
+            deadline = time.time() + timeout_s
+            buf = bytearray()
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    if "disconnect" in line.lower() or "success" in line.lower():
+                        return {"success": True, "message": line}
+
+            return {"success": True, "message": "Disconnect command sent"}
+
+    def wifi_reset(self, timeout_s: float = 10.0) -> dict:
+        """Reset/forget all WiFi networks."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu
+            time.sleep(0.3)
+            self._send_line("6")  # Reset option
+            time.sleep(0.5)
+
+            # Read response
+            deadline = time.time() + timeout_s
+            buf = bytearray()
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    if "reset" in line.lower() or "forget" in line.lower() or "success" in line.lower():
+                        return {"success": True, "message": line}
+
+            return {"success": True, "message": "Reset command sent"}
+
+
 
 class LiveGraphsWindow(tk.Toplevel):
     def __init__(self, master: tk.Misc) -> None:
@@ -532,8 +725,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("GEM GUI")
-        self.geometry("980x680")
-        self.minsize(840, 560)
+        self.geometry("1000x800")
+        self.minsize(900, 700)
 
         self.c_bg = "#eef2f8"
         self.c_surface = "#ffffff"
@@ -562,6 +755,11 @@ class App(tk.Tk):
         self.live_time_labels: deque[str] = deque(maxlen=self.live_history_limit)
         self.live_series: list[deque[float | None]] = []
         self.live_graphs_window: LiveGraphsWindow | None = None
+
+        # WiFi settings
+        self.wifi_scan_cache: list[dict] = []
+        self.wifi_saved_networks: list[str] = []
+        self.wifi_scan_inflight = False
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.StringVar(value="115200")
@@ -717,11 +915,14 @@ class App(tk.Tk):
 
         self.live_tab = ttk.Frame(notebook, padding=10)
         self.files_tab = ttk.Frame(notebook, padding=10)
+        self.wifi_tab = ttk.Frame(notebook, padding=10)
         notebook.add(self.live_tab, text="Live Data")
         notebook.add(self.files_tab, text="Files")
+        notebook.add(self.wifi_tab, text="Settings")
 
         self._build_live_tab()
         self._build_files_tab()
+        self._build_wifi_tab()
 
     def _build_live_tab(self) -> None:
         btns = ttk.Frame(self.live_tab)
@@ -826,6 +1027,100 @@ class App(tk.Tk):
 
         ttk.Label(bottom, textvariable=self.preview_info_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
 
+    def _build_wifi_tab(self) -> None:
+        btns = ttk.Frame(self.wifi_tab)
+        btns.pack(fill=tk.X, pady=(0, 10))
+
+        self.wifi_scan_btn = ttk.Button(
+            btns,
+            text="Scan Networks",
+            command=self.wifi_scan,
+            state=tk.DISABLED,
+            style="Accent.TButton",
+        )
+        self.wifi_scan_btn.pack(side=tk.LEFT)
+
+        self.wifi_disconnect_btn = ttk.Button(
+            btns,
+            text="Disconnect",
+            command=self.wifi_disconnect,
+            state=tk.DISABLED,
+        )
+        self.wifi_disconnect_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.wifi_reset_btn = ttk.Button(
+            btns,
+            text="Forget All",
+            command=self.wifi_reset,
+            state=tk.DISABLED,
+        )
+        self.wifi_reset_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        split = ttk.Panedwindow(self.wifi_tab, orient=tk.HORIZONTAL)
+        split.pack(fill=tk.BOTH, expand=True)
+
+        left = ttk.Frame(split)
+        right = ttk.Frame(split)
+        split.add(left, weight=1)
+        split.add(right, weight=1)
+
+        # Left side: Scanned Networks
+        ttk.Label(left, text="Available Networks", style="Section.TLabel").pack(anchor="w")
+        self.wifi_scan_tree = ttk.Treeview(left, columns=("SSID", "RSSI", "Security"), show="headings", height=8)
+        self.wifi_scan_tree.heading("SSID", text="SSID")
+        self.wifi_scan_tree.heading("RSSI", text="Signal (dBm)")
+        self.wifi_scan_tree.heading("Security", text="Security")
+        self.wifi_scan_tree.column("SSID", width=200, anchor="w")
+        self.wifi_scan_tree.column("RSSI", width=100, anchor="center")
+        self.wifi_scan_tree.column("Security", width=150, anchor="w")
+        self.wifi_scan_tree.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        scan_y = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.wifi_scan_tree.yview)
+        self.wifi_scan_tree.configure(yscrollcommand=scan_y.set)
+        scan_y.pack(side=tk.RIGHT, fill=tk.Y)
+
+        connect_frame = ttk.LabelFrame(left, text="Connect to Network", padding=10)
+        connect_frame.pack(fill=tk.X, pady=(10, 0))
+
+        ttk.Label(connect_frame, text="SSID or other network:").grid(row=0, column=0, sticky="w")
+        self.wifi_ssid_var = tk.StringVar()
+        ttk.Entry(connect_frame, textvariable=self.wifi_ssid_var, width=30).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+
+        ttk.Label(connect_frame, text="Password:").grid(row=1, column=0, sticky="w", pady=(8, 0))
+        self.wifi_pswd_var = tk.StringVar()
+        ttk.Entry(connect_frame, textvariable=self.wifi_pswd_var, width=30, show="*").grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+
+        ttk.Label(connect_frame, text="Auth Type:").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.wifi_auth_var = tk.StringVar(value="PSK")
+        auth_combo = ttk.Combobox(connect_frame, textvariable=self.wifi_auth_var, values=["PSK", "WPA2-EAP"], state="readonly", width=27)
+        auth_combo.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+
+        self.wifi_connect_btn = ttk.Button(
+            connect_frame,
+            text="Connect",
+            command=self.wifi_connect,
+            state=tk.DISABLED,
+            style="Accent.TButton",
+        )
+        self.wifi_connect_btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
+        connect_frame.columnconfigure(1, weight=1)
+
+        # Right side: Saved Networks & Status
+        ttk.Label(right, text="Saved Networks", style="Section.TLabel").pack(anchor="w")
+        self.wifi_saved_tree = ttk.Treeview(right, columns=("Network",), show="headings", height=6)
+        self.wifi_saved_tree.heading("Network", text="Network Name")
+        self.wifi_saved_tree.column("Network", width=350, anchor="w")
+        self.wifi_saved_tree.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        saved_y = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.wifi_saved_tree.yview)
+        self.wifi_saved_tree.configure(yscrollcommand=saved_y.set)
+        saved_y.pack(side=tk.RIGHT, fill=tk.Y)
+
+        status_frame = ttk.LabelFrame(right, text="WiFi Status", padding=10)
+        status_frame.pack(fill=tk.X, pady=(10, 0))
+
+        self.wifi_status_var = tk.StringVar(value="Not connected")
+        status_label = ttk.Label(status_frame, textvariable=self.wifi_status_var, style="Section.TLabel", wraplength=300, justify="left")
+        status_label.pack(anchor="nw")
+
     def _update_files_controls(self) -> None:
         refresh_ok = self.connected and (not self.live_running) and (not self.files_refresh_inflight)
         self.refresh_files_btn.configure(state=tk.NORMAL if refresh_ok else tk.DISABLED)
@@ -850,6 +1145,7 @@ class App(tk.Tk):
                     self._set_port_combo_state()
                     self.live_start_btn.configure(state=tk.NORMAL)
                     self.live_graphs_btn.configure(state=tk.NORMAL)
+                    self._update_wifi_controls()
                     self.refresh_ports()
                     self._update_files_controls()
                     # Auto-load SD file list right after serial connection opens.
@@ -866,6 +1162,7 @@ class App(tk.Tk):
                     self.live_start_btn.configure(state=tk.DISABLED)
                     self.live_stop_btn.configure(state=tk.DISABLED)
                     self.live_graphs_btn.configure(state=tk.DISABLED)
+                    self._update_wifi_controls()
                     self.refresh_ports()
                     self._update_files_controls()
                     self.file_entries = []
@@ -873,6 +1170,11 @@ class App(tk.Tk):
                     for row in self.files_tree.get_children():
                         self.files_tree.delete(row)
                     self._set_preview_message("", "Connect and refresh files to preview.", 0)
+                    for row in self.wifi_scan_tree.get_children():
+                        self.wifi_scan_tree.delete(row)
+                    for row in self.wifi_saved_tree.get_children():
+                        self.wifi_saved_tree.delete(row)
+                    self.wifi_status_var.set("Not connected")
                 elif kind == "live_line":
                     self._append_live_line(str(payload))
                 elif kind == "files":
@@ -909,6 +1211,28 @@ class App(tk.Tk):
                 elif kind == "refresh_done":
                     self.files_refresh_inflight = False
                     self._update_files_controls()
+                elif kind == "wifi_scan_ok":
+                    self.wifi_scan_cache = payload
+                    self._show_wifi_networks(payload)
+                    self.status_var.set(f"WiFi scan complete: {len(payload)} network(s) found")
+                elif kind == "wifi_scan_done":
+                    self.wifi_scan_inflight = False
+                    self._update_wifi_controls()
+                elif kind == "wifi_connect_ok":
+                    result = payload
+                    if result["success"]:
+                        self.wifi_status_var.set(f"Connected to: {result['ssid']}")
+                        self.status_var.set(f"WiFi: Connected to {result['ssid']}")
+                    else:
+                        self.status_var.set("WiFi: Connection failed")
+                elif kind == "wifi_disconnect_ok":
+                    self.wifi_status_var.set("Disconnected")
+                    self.status_var.set("WiFi: Disconnected")
+                elif kind == "wifi_reset_ok":
+                    self.wifi_saved_networks = []
+                    for row in self.wifi_saved_tree.get_children():
+                        self.wifi_saved_tree.delete(row)
+                    self.status_var.set("WiFi: All networks forgotten")
                 elif kind == "busy":
                     self.status_var.set(str(payload))
         except Empty:
@@ -1324,6 +1648,122 @@ class App(tk.Tk):
 
         self._update_live_history(fields)
         self._refresh_live_graphs()
+
+    def wifi_scan(self) -> None:
+        """Scan for available WiFi networks."""
+        if self.wifi_scan_inflight:
+            return
+        self.wifi_scan_inflight = True
+        self.wifi_scan_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", "Scanning WiFi networks..."))
+                networks = self.client.wifi_scan(timeout_s=15.0)
+                self.events.put(("wifi_scan_ok", networks))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("wifi_scan_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def wifi_connect(self) -> None:
+        """Connect to a WiFi network."""
+        ssid = self.wifi_ssid_var.get().strip()
+        pswd = self.wifi_pswd_var.get()
+        auth = self.wifi_auth_var.get()
+
+        if not ssid:
+            messagebox.showwarning("SSID Required", "Enter a network name (SSID)")
+            return
+
+        if not pswd:
+            messagebox.showwarning("Password Required", "Enter a password")
+            return
+
+        self.wifi_connect_btn.configure(state=tk.DISABLED)
+        self.wifi_scan_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", f"Connecting to {ssid}..."))
+                result = self.client.wifi_connect(ssid, pswd, auth, timeout_s=20.0)
+                self.events.put(("wifi_connect_ok", result))
+                # Clear password after successful/failed attempt
+                self.wifi_pswd_var.set("")
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.wifi_connect_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
+                self.wifi_scan_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def wifi_disconnect(self) -> None:
+        """Disconnect from WiFi."""
+        self.wifi_disconnect_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", "Disconnecting WiFi..."))
+                result = self.client.wifi_disconnect(timeout_s=10.0)
+                self.events.put(("wifi_disconnect_ok", result))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.wifi_disconnect_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def wifi_reset(self) -> None:
+        """Forget all saved WiFi networks."""
+        if messagebox.askyesno("Reset WiFi", "Forget all saved WiFi networks?"):
+            self.wifi_reset_btn.configure(state=tk.DISABLED)
+
+            def worker() -> None:
+                try:
+                    self.events.put(("busy", "Resetting WiFi settings..."))
+                    result = self.client.wifi_reset(timeout_s=10.0)
+                    self.events.put(("wifi_reset_ok", result))
+                except Exception as exc:
+                    self.events.put(("error", exc))
+                finally:
+                    self.wifi_reset_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+    def _update_wifi_controls(self) -> None:
+        """Enable/disable WiFi buttons based on connection state."""
+        wifi_ok = self.connected
+        self.wifi_scan_btn.configure(state=tk.NORMAL if wifi_ok and not self.wifi_scan_inflight else tk.DISABLED)
+        self.wifi_connect_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
+        self.wifi_disconnect_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
+        self.wifi_reset_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
+
+    def _show_wifi_networks(self, networks: list[dict]) -> None:
+        """Display scanned WiFi networks in the tree view."""
+        for row in self.wifi_scan_tree.get_children():
+            self.wifi_scan_tree.delete(row)
+
+        striped_rows = []
+        for i, net in enumerate(networks):
+            ssid = net.get("ssid", "")
+            rssi = net.get("rssi", "")
+            security = net.get("security", "")
+            striped_rows.append((ssid, rssi, security))
+
+        self._apply_tree_stripes(self.wifi_scan_tree, striped_rows)
+
+        # Auto-populate SSID field when user clicks on a network
+        def on_select(_event=None):
+            sel = self.wifi_scan_tree.selection()
+            if sel:
+                row = self.wifi_scan_tree.item(sel[0], "values")
+                if row:
+                    self.wifi_ssid_var.set(row[0])
+
+        self.wifi_scan_tree.bind("<<TreeviewSelect>>", on_select)
 
     def on_close(self) -> None:
         try:
