@@ -1,6 +1,7 @@
 #include "ui/serial_menu.hpp"
 #include "net/wifi_manager.hpp"
 #include "logging/sd_logger.hpp"
+#include <WiFi.h>
 #include <vector>
 #include <SD_MMC.h>
 
@@ -49,6 +50,15 @@ static std::vector<wifi::NetInfo> g_scan_cache;
 static void print_wifi_menu() {
   Serial.println();
   Serial.println(F("=== WiFi Settings ==="));
+  // Print current connection info if connected
+  if (wifi::is_connected()) {
+    Serial.printf("[WiFi] SSID=%s  IP=%s  GW=%s  DNS0=%s  RSSI=%d\n",
+      WiFi.SSID().c_str(),
+      WiFi.localIP().toString().c_str(),
+      WiFi.gatewayIP().toString().c_str(),
+      WiFi.dnsIP().toString().c_str(),
+      WiFi.RSSI());
+  }
   Serial.println(F("1) Scan networks"));
   Serial.println(F("2) Connect PSK (manual)"));
   Serial.println(F("3) Connect WPA2-EAP (manual)"));

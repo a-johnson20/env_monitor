@@ -10,6 +10,7 @@ python -m PyInstaller `
   --onefile `
   --windowed `
   --collect-data ttkbootstrap `
+  --add-data "fonts/DejaVuSansMono-wifi-ramp.ttf:fonts" `
   --name "GEM GUI" `
   scripts/env_monitor_gui.py
 

@@ -18,6 +18,7 @@ import csv
 import io
 import os
 import re
+import sys
 import threading
 import time
 import tkinter as tk
@@ -36,6 +37,46 @@ try:
 except Exception:
     tb = None
     HAS_TTKBOOTSTRAP = False
+
+# Try to disable DPI scaling awareness on Windows to fix blurriness
+try:
+    import ctypes
+    # Try per-monitor DPI awareness (most aggressive)
+    try:
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
+    except Exception:
+        # Fall back to system DPI awareness
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+except Exception:
+    pass  # Non-Windows or older Windows version
+
+# Load WiFi icon font if available
+def get_font_path() -> Path | None:
+    """Find the WiFi ramp font, checking bundled and development locations."""
+    # When running as PyInstaller executable
+    if getattr(sys, 'frozen', False):
+        font_path = Path(sys._MEIPASS) / "fonts" / "DejaVuSansMono-wifi-ramp.ttf"
+        if font_path.exists():
+            return font_path
+    
+    # Development/repo location
+    repo_font = Path(__file__).parent.parent / "fonts" / "DejaVuSansMono-wifi-ramp.ttf"
+    if repo_font.exists():
+        return repo_font
+    
+    return None
+
+WIFI_FONT_PATH = get_font_path()
+WIFI_FONT_NAME = "DejaVu Sans Mono wifi ramp"
+
+# Try to register the WiFi font on Windows
+if WIFI_FONT_PATH and hasattr(ctypes, 'windll'):
+    try:
+        import ctypes
+        # Add font to registry for current session
+        ctypes.windll.gdi32.AddFontResourceExW(str(WIFI_FONT_PATH), 0x10, 0)
+    except Exception:
+        pass  # Font loading failed, will fall back to default
 
 
 LIST_RE = re.compile(r"^\s*(\d+)\)\s+(.+)\s+\((\d+)\s+bytes\)\s*$")
@@ -545,6 +586,58 @@ class SerialMenuClient:
 
             return {"success": True, "message": "Reset command sent"}
 
+    def wifi_get_status(self, timeout_s: float = 5.0) -> dict:
+        """Get current WiFi status (SSID and RSSI)."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu
+
+            # Read until we get the WiFi menu output which shows connection status
+            deadline = time.time() + timeout_s
+            buf = bytearray()
+            ssid = ""
+            rssi = ""
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    # Look for WiFi connection info in output
+                    # Handle ESP32 format: "[WiFi] SSID=X  IP=...  GW=...  DNS0=...  RSSI=-45"
+                    if "[WiFi]" in line and "SSID=" in line:
+                        try:
+                                    # Extract SSID - capture everything after SSID= until multiple spaces or IP=
+                            ssid_match = re.search(r'SSID=(.+?)\s{2,}', line)
+                            if ssid_match:
+                                ssid = ssid_match.group(1).strip()
+                            
+                            # Extract RSSI - look for "RSSI=" followed by a number
+                            rssi_match = re.search(r'RSSI=(-?\d+)', line)
+                            if rssi_match:
+                                rssi = rssi_match.group(1)
+                        except (IndexError, ValueError):
+                            pass
+
+                    # Stop when we see the prompt/menu
+                    if ")==>" in line or line.endswith("> "):
+                        break
+
+            # Go back to main menu
+            self._send_line("b")
+
+            return {"ssid": ssid, "rssi": rssi}
+
 
 
 class LiveGraphsWindow(tk.Toplevel):
@@ -725,8 +818,9 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("GEM GUI")
-        self.geometry("1000x800")
-        self.minsize(900, 700)
+        # Reduce initial size to account for DPI scaling and prevent blurriness
+        self.geometry("900x680")
+        self.minsize(850, 620)
 
         self.c_bg = "#eef2f8"
         self.c_surface = "#ffffff"
@@ -760,6 +854,10 @@ class App(tk.Tk):
         self.wifi_scan_cache: list[dict] = []
         self.wifi_saved_networks: list[str] = []
         self.wifi_scan_inflight = False
+        self.wifi_poll_inflight = False
+        self.wifi_poll_timer: int | None = None
+        self.wifi_current_ssid = ""
+        self.wifi_current_rssi = ""
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.StringVar(value="115200")
@@ -909,6 +1007,26 @@ class App(tk.Tk):
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+
+        # WiFi status on right side of top bar
+        # Use custom WiFi font for icon, standard font for network name
+        wifi_icon_font = (WIFI_FONT_NAME, 10) if WIFI_FONT_PATH else ("Segoe UI", 10)
+        standard_font = ("Segoe UI", 9)
+        
+        # Create a frame to hold icon and SSID with mixed fonts
+        wifi_frame = tk.Frame(top, bg=self.c_bg)
+        wifi_frame.pack(side=tk.RIGHT, padx=(8, 0))
+        
+        # Name label on left uses standard font
+        self.wifi_name_label = tk.Label(wifi_frame, text="", font=standard_font, bg=self.c_bg, fg=self.c_muted)
+        self.wifi_name_label.pack(side=tk.LEFT)
+        
+        # Icon label on right uses WiFi font
+        self.wifi_icon_label = tk.Label(wifi_frame, text="", font=wifi_icon_font, bg=self.c_bg, fg=self.c_muted)
+        self.wifi_icon_label.pack(side=tk.LEFT, padx=(4, 0))
+        
+        # Keep reference for backward compatibility
+        self.wifi_top_label = None
 
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
@@ -1114,13 +1232,6 @@ class App(tk.Tk):
         self.wifi_saved_tree.configure(yscrollcommand=saved_y.set)
         saved_y.pack(side=tk.RIGHT, fill=tk.Y)
 
-        status_frame = ttk.LabelFrame(right, text="WiFi Status", padding=10)
-        status_frame.pack(fill=tk.X, pady=(10, 0))
-
-        self.wifi_status_var = tk.StringVar(value="Not connected")
-        status_label = ttk.Label(status_frame, textvariable=self.wifi_status_var, style="Section.TLabel", wraplength=300, justify="left")
-        status_label.pack(anchor="nw")
-
     def _update_files_controls(self) -> None:
         refresh_ok = self.connected and (not self.live_running) and (not self.files_refresh_inflight)
         self.refresh_files_btn.configure(state=tk.NORMAL if refresh_ok else tk.DISABLED)
@@ -1174,7 +1285,10 @@ class App(tk.Tk):
                         self.wifi_scan_tree.delete(row)
                     for row in self.wifi_saved_tree.get_children():
                         self.wifi_saved_tree.delete(row)
-                    self.wifi_status_var.set("Not connected")
+                    self.wifi_current_ssid = ""
+                    self.wifi_current_rssi = ""
+                    self._cancel_wifi_poll()
+                    self._update_wifi_top_bar()
                 elif kind == "live_line":
                     self._append_live_line(str(payload))
                 elif kind == "files":
@@ -1221,18 +1335,33 @@ class App(tk.Tk):
                 elif kind == "wifi_connect_ok":
                     result = payload
                     if result["success"]:
-                        self.wifi_status_var.set(f"Connected to: {result['ssid']}")
+                        self.wifi_current_ssid = result['ssid']
+                        self._update_wifi_top_bar()
                         self.status_var.set(f"WiFi: Connected to {result['ssid']}")
+                        self._schedule_wifi_poll()
                     else:
                         self.status_var.set("WiFi: Connection failed")
                 elif kind == "wifi_disconnect_ok":
-                    self.wifi_status_var.set("Disconnected")
+                    self.wifi_current_ssid = ""
+                    self.wifi_current_rssi = ""
+                    self._update_wifi_top_bar()
+                    self._cancel_wifi_poll()
                     self.status_var.set("WiFi: Disconnected")
                 elif kind == "wifi_reset_ok":
                     self.wifi_saved_networks = []
                     for row in self.wifi_saved_tree.get_children():
                         self.wifi_saved_tree.delete(row)
                     self.status_var.set("WiFi: All networks forgotten")
+                elif kind == "wifi_status_ok":
+                    status = payload
+                    # Update SSID and RSSI separately so one can update without the other
+                    if status.get("ssid"):
+                        self.wifi_current_ssid = status["ssid"]
+                    if status.get("rssi") != "":
+                        self.wifi_current_rssi = status["rssi"]
+                    # Update display if either changed
+                    if status.get("ssid") or status.get("rssi"):
+                        self._update_wifi_top_bar()
                 elif kind == "busy":
                     self.status_var.set(str(payload))
         except Empty:
@@ -1741,6 +1870,49 @@ class App(tk.Tk):
         self.wifi_disconnect_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
         self.wifi_reset_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
 
+    def _update_wifi_top_bar(self) -> None:
+        """Update WiFi status display in top bar with WiFi strength icons."""
+        if hasattr(self, 'wifi_icon_label') and self.wifi_icon_label:
+            if self.wifi_current_ssid:
+                # WiFi strength indicators (Unicode from polybar-wifi-ramp-icons)
+                # Characters from private use area that display as WiFi signal strength icons
+                wifi_icons = [
+                    "\ue0da",  # WiFi disabled/off (crossed out)
+                    "\ue0d5",  # No signal
+                    "\ue0d6",  # Weak
+                    "\ue0d7",  # Fair
+                    "\ue0d8",  # Good
+                    "\ue0d9",  # Strong/Excellent
+                ]
+                
+                # Check if we have RSSI value
+                if self.wifi_current_rssi == "":
+                    # No RSSI value, use the WiFi disabled icon
+                    icon = wifi_icons[0]
+                else:
+                    try:
+                        rssi_int = int(self.wifi_current_rssi) if self.wifi_current_rssi else -100
+                    except (ValueError, TypeError):
+                        rssi_int = -100
+                    
+                    if rssi_int >= -50:
+                        icon = wifi_icons[5]  # Excellent
+                    elif rssi_int >= -60:
+                        icon = wifi_icons[4]  # Good
+                    elif rssi_int >= -70:
+                        icon = wifi_icons[3]  # Fair
+                    elif rssi_int >= -80:
+                        icon = wifi_icons[2]  # Weak
+                    else:
+                        icon = wifi_icons[1]  # No signal
+                
+                # Update name and icon separately
+                self.wifi_name_label.configure(text=self.wifi_current_ssid)
+                self.wifi_icon_label.configure(text=icon)
+            else:
+                self.wifi_name_label.configure(text="Not connected")
+                self.wifi_icon_label.configure(text="")
+
     def _show_wifi_networks(self, networks: list[dict]) -> None:
         """Display scanned WiFi networks in the tree view."""
         for row in self.wifi_scan_tree.get_children():
@@ -1765,8 +1937,48 @@ class App(tk.Tk):
 
         self.wifi_scan_tree.bind("<<TreeviewSelect>>", on_select)
 
+    def _schedule_wifi_poll(self) -> None:
+        """Schedule periodic WiFi status polling every 5 seconds."""
+        self._cancel_wifi_poll()  # Cancel any existing timer
+        self.wifi_poll_timer = self.after(5000, self._wifi_poll_tick)
+
+    def _cancel_wifi_poll(self) -> None:
+        """Cancel the WiFi polling timer."""
+        if self.wifi_poll_timer is not None:
+            self.after_cancel(self.wifi_poll_timer)
+            self.wifi_poll_timer = None
+
+    def _wifi_poll_tick(self) -> None:
+        """Called periodically to poll WiFi status."""
+        if not self.connected or self.wifi_poll_inflight:
+            # Reschedule for next check
+            self.wifi_poll_timer = self.after(5000, self._wifi_poll_tick)
+            return
+
+        # Only poll if we're still connected
+        if not self.wifi_current_ssid:
+            self.wifi_poll_timer = self.after(5000, self._wifi_poll_tick)
+            return
+
+        self.wifi_poll_inflight = True
+
+        def worker() -> None:
+            try:
+                status = self.client.wifi_get_status(timeout_s=5.0)
+                self.events.put(("wifi_status_ok", status))
+            except Exception:
+                # Silently fail - don't disrupt the user
+                pass
+            finally:
+                self.wifi_poll_inflight = False
+                # Reschedule for next check regardless of success/failure
+                self.wifi_poll_timer = self.after(5000, self._wifi_poll_tick)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def on_close(self) -> None:
         try:
+            self._cancel_wifi_poll()
             if self._graphs_window_alive():
                 self.live_graphs_window.destroy()
             self.client.close()

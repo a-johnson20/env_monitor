@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = []
+datas = [('fonts/DejaVuSansMono-wifi-ramp.ttf', 'fonts')]
 datas += collect_data_files('ttkbootstrap')
 
 
