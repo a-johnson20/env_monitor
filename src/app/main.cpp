@@ -211,6 +211,19 @@ static void format_timestamp_no_sec(char* out, size_t n) {
   }
 }
 
+// Public function to print RTC time (called from serial menu)
+void print_rtc_time() {
+  char ts[32];
+  if (rtc_present && rtc.updateTime()) {
+    int y = rtc.getYear(); if (y < 100) y += 2000;
+    snprintf(ts, sizeof(ts), "RTC: %04d-%02d-%02d %02d:%02d",
+             y, rtc.getMonth(), rtc.getDate(), rtc.getHours(), rtc.getMinutes());
+  } else {
+    snprintf(ts, sizeof(ts), "RTC: Not available");
+  }
+  Serial.println(ts);
+}
+
 static void reset_windows_and_flags() {
   for (auto &w : win_trhp_sht45_t) w.reset();
   for (auto &w : win_trhp_sht45_rh) w.reset();

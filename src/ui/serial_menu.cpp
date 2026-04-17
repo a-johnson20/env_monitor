@@ -5,6 +5,9 @@
 #include <vector>
 #include <SD_MMC.h>
 
+// External function from main.cpp to print RTC time
+extern void print_rtc_time();
+
 namespace ui {
 
 enum class State {
@@ -41,6 +44,7 @@ static void print_main_menu() {
   Serial.println(F("1) Live data"));
   Serial.println(F("2) WiFi settings"));
   Serial.println(F("3) Download log file (Serial)"));
+  Serial.println(F("4) Show RTC time"));
   Serial.print(F("> "));
 }
 
@@ -251,6 +255,10 @@ static void handle_main_menu(const String &line) {
   sd_logger::set_paused(true);
   state = State::LogExportList;
   print_log_export_menu();
+  } else if (line == "4") {
+    Serial.println();
+    print_rtc_time();
+    print_main_menu();
   } else {
     Serial.println(F("Invalid choice."));
     print_main_menu();

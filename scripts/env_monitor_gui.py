@@ -457,10 +457,12 @@ class SerialMenuClient:
                                     # Validate RSSI looks like a number (negative dBm)
                                     try:
                                         rssi_val = int(rssi_str)
+                                        # Normalize OPEN to None for consistency
+                                        sec_display = "None" if sec_str == "OPEN" else sec_str
                                         networks.append({
                                             "ssid": ssid_str,
                                             "rssi": rssi_str,
-                                            "security": sec_str
+                                            "security": sec_display
                                         })
                                     except ValueError:
                                         pass
@@ -469,7 +471,7 @@ class SerialMenuClient:
 
             return networks
 
-    def wifi_connect(self, ssid: str, password: str, auth_type: str = "PSK", timeout_s: float = 20.0) -> dict:
+    def wifi_connect(self, ssid: str, password: str, auth_type: str = "PSK", username: str = "", timeout_s: float = 20.0) -> dict:
         """Connect to a WiFi network."""
         if not self.is_open:
             raise RuntimeError("Serial port is not open")
@@ -493,6 +495,12 @@ class SerialMenuClient:
             self._send_line(ssid)
             time.sleep(0.3)
 
+            # Send credentials based on auth type
+            if auth_type == "WPA2-EAP" and username:
+                # For EAP, send username first
+                self._send_line(username)
+                time.sleep(0.3)
+            
             # Send password
             self._send_line(password)
             time.sleep(0.5)
@@ -638,6 +646,250 @@ class SerialMenuClient:
 
             return {"ssid": ssid, "rssi": rssi}
 
+    def wifi_get_saved_networks(self, timeout_s: float = 5.0) -> list[str]:
+        """Get list of saved WiFi networks."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu
+            time.sleep(0.3)
+            self._send_line("4")  # Saved networks option
+
+            # Read until we get the saved networks list
+            deadline = time.time() + timeout_s
+            buf = bytearray()
+            networks: list[str] = []
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    # Parse saved networks: "1) SSID [WPA2-PSK]"
+                    if re.match(r'^\d+\)\s+.+\s+\[.+\]$', line):
+                        # Extract just the SSID part (between ") " and " [")
+                        match = re.match(r'^\d+\)\s+(.+?)\s+\[.+\]', line)
+                        if match:
+                            ssid = match.group(1)
+                            networks.append(ssid)
+
+                    # Stop when we see the prompt
+                    if ")==>" in line or ("Select" in line and "back" in line):
+                        break
+
+            # Go back to main menu
+            self._send_line("b")
+
+            return networks
+
+    def wifi_connect_saved(self, ssid: str, timeout_s: float = 20.0) -> dict:
+        """Connect to a saved WiFi network by SSID."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu
+            time.sleep(0.3)
+            self._send_line("4")  # Saved networks option
+            time.sleep(0.3)
+
+            # Find the network index
+            deadline = time.time() + 5.0
+            buf = bytearray()
+            network_index = -1
+            network_count = 0
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    # Parse saved networks: "1) SSID [WPA2-PSK]"
+                    match = re.match(r'^(\d+)\)\s+(.+?)\s+\[.+\]', line)
+                    if match:
+                        network_count += 1
+                        idx = int(match.group(1))
+                        found_ssid = match.group(2)
+                        if found_ssid == ssid:
+                            network_index = idx
+                            break
+
+                    # Stop if we see the prompt before finding the network
+                    if ")==>" in line or ("Select" in line and "back" in line):
+                        break
+
+            if network_index < 0:
+                return {"success": False, "ssid": ssid, "message": "Network not found in saved list"}
+
+            # Select the network
+            self._send_line(str(network_index))
+            time.sleep(0.3)
+
+            # Connect to it (option 1)
+            self._send_line("1")
+            time.sleep(0.5)
+
+            # Read response
+            deadline = time.time() + timeout_s
+            response_lines: list[str] = []
+            buf = bytearray()
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    response_lines.append(line)
+                    buf = bytearray()
+
+                    if "connected" in line.lower() or "success" in line.lower():
+                        return {"success": True, "ssid": ssid, "message": line}
+                    elif "fail" in line.lower() or "error" in line.lower():
+                        return {"success": False, "ssid": ssid, "message": line}
+
+            return {"success": False, "ssid": ssid, "message": "Timeout waiting for response"}
+
+    def wifi_forget_by_ssid(self, ssid: str, timeout_s: float = 10.0) -> dict:
+        """Forget (delete) a saved WiFi network by SSID."""
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._goto_main_menu()
+            self._send_line("2")  # WiFi menu
+            time.sleep(0.3)
+            self._send_line("4")  # Saved networks option
+            time.sleep(0.3)
+
+            # Find the network index
+            deadline = time.time() + 5.0
+            buf = bytearray()
+            network_index = -1
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    # Parse saved networks: "1) SSID [WPA2-PSK]"
+                    match = re.match(r'^(\d+)\)\s+(.+?)\s+\[.+\]', line)
+                    if match:
+                        idx = int(match.group(1))
+                        found_ssid = match.group(2)
+                        if found_ssid == ssid:
+                            network_index = idx
+                            break
+
+                    # Stop if we see the prompt before finding the network
+                    if ")==>" in line or ("Select" in line and "back" in line):
+                        break
+
+            if network_index < 0:
+                return {"success": False, "ssid": ssid, "message": "Network not found in saved list"}
+
+            # Select the network
+            self._send_line(str(network_index))
+            time.sleep(0.3)
+
+            # Forget it (option 2)
+            self._send_line("2")
+            time.sleep(0.3)
+
+            # Read response
+            deadline = time.time() + timeout_s
+            buf = bytearray()
+
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                buf.extend(b)
+
+                if buf.endswith(b"\n"):
+                    line = buf.decode("utf-8", errors="replace").strip()
+                    buf = bytearray()
+
+                    if "deleted" in line.lower() or "success" in line.lower():
+                        return {"success": True, "ssid": ssid, "message": line}
+                    elif "fail" in line.lower() or "error" in line.lower():
+                        return {"success": False, "ssid": ssid, "message": line}
+
+            return {"success": False, "ssid": ssid, "message": "Timeout waiting for response"}
+
+    def get_rtc_time(self, timeout_s: float = 3.0) -> dict:
+        """Get the current RTC time from the device via menu option 4.
+        
+        Returns a dict with 'time' key containing time string in HH:MM (no seconds),
+        and 'success' key indicating if the query was successful.
+        """
+        if not self.is_open:
+            raise RuntimeError("Serial port is not open")
+
+        try:
+            with self.lock:
+                ser = self.ser
+                if not ser or not ser.is_open:
+                    return {"success": False, "time": "---- -- --:--"}
+
+                # Send menu option 4 to show RTC
+                ser.write(b"4\n")
+                ser.flush()
+
+                # Read response, looking for "RTC: YYYY-MM-DD HH:MM" or "RTC: Not available"
+                import re
+                buf = bytearray()
+                start_time = time.time()
+                
+                while time.time() - start_time < timeout_s:
+                    b = ser.read(1)
+                    if not b:
+                        continue
+                    buf.extend(b)
+
+                    if buf.endswith(b"\n"):
+                        line = buf.decode("utf-8", errors="replace").strip()
+                        buf = bytearray()
+
+                        if line.startswith("RTC:"):
+                            # Parse "RTC: YYYY-MM-DD HH:MM" format
+                            match = re.search(r"(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})", line)
+                            if match:
+                                year, month, day, hour, minute = match.groups()
+                                time_str = f"{year}-{month}-{day} {hour}:{minute}"
+                                return {"success": True, "time": time_str}
+                            elif "Not available" in line:
+                                return {"success": False, "time": "---- -- --:--"}
+
+                return {"success": False, "time": "---- -- --:--"}
+        except Exception as e:
+            return {"success": False, "time": "---- -- --:--"}
 
 
 class LiveGraphsWindow(tk.Toplevel):
@@ -856,8 +1108,21 @@ class App(tk.Tk):
         self.wifi_scan_inflight = False
         self.wifi_poll_inflight = False
         self.wifi_poll_timer: int | None = None
+        self.wifi_viewing_saved = False  # Track if viewing saved networks list
         self.wifi_current_ssid = ""
         self.wifi_current_rssi = ""
+        self.wifi_current_form_type: str | None = None
+        self.wifi_current_form_ssid: str = ""
+        self.wifi_form_password: ttk.Entry | None = None
+        self.wifi_form_username: ttk.Entry | None = None
+        self.wifi_form_ssid: ttk.Entry | None = None
+        self.wifi_form_security: ttk.Combobox | None = None
+        self.wifi_form_fields_frame: ttk.Frame | None = None
+        
+        # RTC settings
+        self.rtc_poll_timer: int | None = None
+        self.rtc_poll_inflight = False
+        self.rtc_current_datetime = "---- -- --:--"
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.StringVar(value="115200")
@@ -998,24 +1263,31 @@ class App(tk.Tk):
         self.port_combo.pack(side=tk.LEFT, padx=(6, 10))
         self.port_combo.bind("<<ComboboxSelected>>", self._on_port_selected)
         self.port_combo.bind("<FocusIn>", self._on_port_focus_in)
-        ttk.Button(top, text="Refresh Ports", command=self.refresh_ports).pack(side=tk.LEFT)
+        ttk.Button(top, text="Refresh Ports", command=self.refresh_ports, style="Accent.TButton").pack(side=tk.LEFT)
 
         ttk.Label(top, text="Baud:", style="Section.TLabel").pack(side=tk.LEFT, padx=(14, 0))
         ttk.Entry(top, textvariable=self.baud_var, width=10).pack(side=tk.LEFT, padx=(6, 10))
 
-        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection)
+        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection, style="Accent.TButton")
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
 
-        # WiFi status on right side of top bar
-        # Use custom WiFi font for icon, standard font for network name
-        wifi_icon_font = (WIFI_FONT_NAME, 10) if WIFI_FONT_PATH else ("Segoe UI", 10)
-        standard_font = ("Segoe UI", 9)
+        # Right side: RTC time and WiFi status
+        right_frame = ttk.Frame(top)
+        right_frame.pack(side=tk.RIGHT, padx=(8, 0))
         
-        # Create a frame to hold icon and SSID with mixed fonts
-        wifi_frame = tk.Frame(top, bg=self.c_bg)
-        wifi_frame.pack(side=tk.RIGHT, padx=(8, 0))
+        # WiFi status frame (on the left of right_frame)
+        wifi_icon_font = (WIFI_FONT_NAME, 10) if WIFI_FONT_PATH else ("Segoe UI", 10)
+        
+        # Create a frame to hold WiFi icon and SSID
+        wifi_frame = tk.Frame(right_frame, bg=self.c_bg)
+        wifi_frame.pack(side=tk.LEFT)
+        
+        # RTC date/time label on far right (after WiFi)
+        standard_font = ("Segoe UI", 9)
+        self.rtc_time_label = tk.Label(right_frame, text="---- -- --:--", font=standard_font, bg=self.c_bg, fg=self.c_muted)
+        self.rtc_time_label.pack(side=tk.LEFT, padx=(12, 0))
         
         # Name label on left uses standard font
         self.wifi_name_label = tk.Label(wifi_frame, text="", font=standard_font, bg=self.c_bg, fg=self.c_muted)
@@ -1041,6 +1313,9 @@ class App(tk.Tk):
         self._build_live_tab()
         self._build_files_tab()
         self._build_wifi_tab()
+        
+        # Initialize WiFi status display
+        self._update_wifi_top_bar()
 
     def _build_live_tab(self) -> None:
         btns = ttk.Frame(self.live_tab)
@@ -1053,13 +1328,14 @@ class App(tk.Tk):
             style="Accent.TButton",
         )
         self.live_start_btn.pack(side=tk.LEFT)
-        self.live_stop_btn = ttk.Button(btns, text="Stop Live", command=self.stop_live, state=tk.DISABLED)
+        self.live_stop_btn = ttk.Button(btns, text="Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.live_graphs_btn = ttk.Button(
             btns,
             text="Open Graphs",
             command=self.open_live_graphs,
             state=tk.DISABLED,
+            style="Accent.TButton",
         )
         self.live_graphs_btn.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1102,7 +1378,7 @@ class App(tk.Tk):
         btns = ttk.Frame(self.files_tab)
         btns.pack(fill=tk.X)
         self.refresh_files_btn = ttk.Button(
-            btns, text="Refresh File List", command=self.refresh_files, state=tk.DISABLED
+            btns, text="Refresh File List", command=self.refresh_files, state=tk.DISABLED, style="Accent.TButton"
         )
         self.refresh_files_btn.pack(side=tk.LEFT)
         self.download_btn = ttk.Button(
@@ -1158,19 +1434,21 @@ class App(tk.Tk):
         )
         self.wifi_scan_btn.pack(side=tk.LEFT)
 
-        self.wifi_disconnect_btn = ttk.Button(
+        self.wifi_saved_btn = ttk.Button(
             btns,
-            text="Disconnect",
-            command=self.wifi_disconnect,
+            text="Saved Networks",
+            command=self._toggle_saved_networks_view,
             state=tk.DISABLED,
+            style="Accent.TButton",
         )
-        self.wifi_disconnect_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self.wifi_saved_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.wifi_reset_btn = ttk.Button(
             btns,
             text="Forget All",
             command=self.wifi_reset,
             state=tk.DISABLED,
+            style="Accent.TButton",
         )
         self.wifi_reset_btn.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1182,55 +1460,188 @@ class App(tk.Tk):
         split.add(left, weight=1)
         split.add(right, weight=1)
 
-        # Left side: Scanned Networks
-        ttk.Label(left, text="Available Networks", style="Section.TLabel").pack(anchor="w")
-        self.wifi_scan_tree = ttk.Treeview(left, columns=("SSID", "RSSI", "Security"), show="headings", height=8)
-        self.wifi_scan_tree.heading("SSID", text="SSID")
-        self.wifi_scan_tree.heading("RSSI", text="Signal (dBm)")
-        self.wifi_scan_tree.heading("Security", text="Security")
-        self.wifi_scan_tree.column("SSID", width=200, anchor="w")
-        self.wifi_scan_tree.column("RSSI", width=100, anchor="center")
-        self.wifi_scan_tree.column("Security", width=150, anchor="w")
-        self.wifi_scan_tree.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        scan_y = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.wifi_scan_tree.yview)
-        self.wifi_scan_tree.configure(yscrollcommand=scan_y.set)
-        scan_y.pack(side=tk.RIGHT, fill=tk.Y)
+        # Left side: Available Networks (combined list of saved + scanned + "Other")
+        ttk.Label(left, text="Networks", style="Section.TLabel").pack(anchor="w")
+        net_wrap = ttk.Frame(left)
+        net_wrap.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        
+        self.wifi_network_tree = ttk.Treeview(net_wrap, columns=("SSID", "RSSI", "Security"), show="headings", height=12)
+        self.wifi_network_tree.heading("SSID", text="SSID")
+        self.wifi_network_tree.heading("RSSI", text="Signal (dBm)")
+        self.wifi_network_tree.heading("Security", text="Security")
+        self.wifi_network_tree.column("SSID", width=180, anchor="w")
+        self.wifi_network_tree.column("RSSI", width=100, anchor="center")
+        self.wifi_network_tree.column("Security", width=120, anchor="w")
+        self.wifi_network_tree.rowheight = 36
+        self.wifi_network_tree.grid(row=0, column=0, sticky="nsew")
+        self.wifi_network_tree.bind("<<TreeviewSelect>>", self._on_network_select)
+        
+        net_y = ttk.Scrollbar(net_wrap, orient=tk.VERTICAL, command=self.wifi_network_tree.yview)
+        net_y.grid(row=0, column=1, sticky="ns")
+        self.wifi_network_tree.configure(yscrollcommand=net_y.set)
+        
+        net_wrap.rowconfigure(0, weight=1)
+        net_wrap.columnconfigure(0, weight=1)
 
-        connect_frame = ttk.LabelFrame(left, text="Connect to Network", padding=10)
-        connect_frame.pack(fill=tk.X, pady=(10, 0))
+        # Right side: Dynamic form area
+        ttk.Label(right, text="Connect", style="Section.TLabel").pack(anchor="w", padx=(12, 0))
+        self.wifi_form_frame = ttk.Frame(right)
+        self.wifi_form_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0), padx=(12, 0))
 
-        ttk.Label(connect_frame, text="SSID or other network:").grid(row=0, column=0, sticky="w")
-        self.wifi_ssid_var = tk.StringVar()
-        ttk.Entry(connect_frame, textvariable=self.wifi_ssid_var, width=30).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+    def _clear_wifi_form(self) -> None:
+        """Clear all widgets from the form area."""
+        for widget in self.wifi_form_frame.winfo_children():
+            widget.destroy()
+        self.wifi_current_form_type = None
 
-        ttk.Label(connect_frame, text="Password:").grid(row=1, column=0, sticky="w", pady=(8, 0))
-        self.wifi_pswd_var = tk.StringVar()
-        ttk.Entry(connect_frame, textvariable=self.wifi_pswd_var, width=30, show="*").grid(row=1, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+    def _show_saved_network_form(self, ssid: str) -> None:
+        """Show form for a saved network (Connect/Disconnect and Forget buttons)."""
+        self._clear_wifi_form()
+        self.wifi_current_form_type = "saved"
+        self.wifi_current_form_ssid = ssid
+        
+        is_connected = self.wifi_current_ssid == ssid
 
-        ttk.Label(connect_frame, text="Auth Type:").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.wifi_auth_var = tk.StringVar(value="PSK")
-        auth_combo = ttk.Combobox(connect_frame, textvariable=self.wifi_auth_var, values=["PSK", "WPA2-EAP"], state="readonly", width=27)
-        auth_combo.grid(row=2, column=1, sticky="ew", padx=(10, 0), pady=(8, 0))
+        ttk.Label(self.wifi_form_frame, text=f"Saved Network: {ssid}", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        
+        btn_frame = ttk.Frame(self.wifi_form_frame)
+        btn_frame.pack(fill=tk.X)
+        btn_frame.columnconfigure(0, weight=1)
+        btn_frame.columnconfigure(1, weight=1)
+        
+        if is_connected:
+            ttk.Button(btn_frame, text="Disconnect", command=self._do_disconnect_from_form, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        else:
+            ttk.Button(btn_frame, text="Connect", command=self._do_connect_saved, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        ttk.Button(btn_frame, text="Forget", command=self._do_forget_saved, style="Accent.TButton").grid(row=0, column=1, sticky="ew")
 
-        self.wifi_connect_btn = ttk.Button(
-            connect_frame,
-            text="Connect",
-            command=self.wifi_connect,
-            state=tk.DISABLED,
-            style="Accent.TButton",
+    def _show_psk_network_form(self, ssid: str, security: str) -> None:
+        """Show form for a PSK network (password field and Connect/Disconnect button)."""
+        self._clear_wifi_form()
+        self.wifi_current_form_type = "psk"
+        self.wifi_current_form_ssid = ssid
+        
+        is_connected = self.wifi_current_ssid == ssid
+
+        ttk.Label(self.wifi_form_frame, text=f"Network: {ssid}", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Label(self.wifi_form_frame, text=f"Security: {security}", style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+
+        if not is_connected:
+            ttk.Label(self.wifi_form_frame, text="Password:").pack(anchor="w")
+            self.wifi_form_password = ttk.Entry(self.wifi_form_frame, show="*")
+            self.wifi_form_password.pack(fill=tk.X, pady=(4, 12))
+            ttk.Button(self.wifi_form_frame, text="Connect", command=self._do_connect_psk, style="Accent.TButton").pack(fill=tk.X)
+        else:
+            ttk.Button(self.wifi_form_frame, text="Disconnect", command=self._do_disconnect_from_form, style="Accent.TButton").pack(fill=tk.X)
+
+    def _show_ent_network_form(self, ssid: str, security: str) -> None:
+        """Show form for an ENT network (username, password, and Connect/Disconnect button)."""
+        self._clear_wifi_form()
+        self.wifi_current_form_type = "ent"
+        self.wifi_current_form_ssid = ssid
+        
+        is_connected = self.wifi_current_ssid == ssid
+
+        ttk.Label(self.wifi_form_frame, text=f"Network: {ssid}", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        ttk.Label(self.wifi_form_frame, text=f"Security: {security}", style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+
+        if not is_connected:
+            ttk.Label(self.wifi_form_frame, text="Username:").pack(anchor="w")
+            self.wifi_form_username = ttk.Entry(self.wifi_form_frame)
+            self.wifi_form_username.pack(fill=tk.X, pady=(4, 8))
+
+            ttk.Label(self.wifi_form_frame, text="Password:").pack(anchor="w")
+            self.wifi_form_password = ttk.Entry(self.wifi_form_frame, show="*")
+            self.wifi_form_password.pack(fill=tk.X, pady=(4, 12))
+            ttk.Button(self.wifi_form_frame, text="Connect", command=self._do_connect_ent, style="Accent.TButton").pack(fill=tk.X)
+        else:
+            ttk.Button(self.wifi_form_frame, text="Disconnect", command=self._do_disconnect_from_form, style="Accent.TButton").pack(fill=tk.X)
+
+    def _show_other_network_form(self) -> None:
+        """Show form for 'Other' network (SSID, security type, and password/username fields)."""
+        self._clear_wifi_form()
+        self.wifi_current_form_type = "other"
+
+        ttk.Label(self.wifi_form_frame, text="Manual Network Entry", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+
+        ttk.Label(self.wifi_form_frame, text="Network Name (SSID):").pack(anchor="w")
+        self.wifi_form_ssid = ttk.Entry(self.wifi_form_frame)
+        self.wifi_form_ssid.pack(fill=tk.X, pady=(4, 8))
+
+        ttk.Label(self.wifi_form_frame, text="Security Type:").pack(anchor="w")
+        self.wifi_form_security = ttk.Combobox(
+            self.wifi_form_frame,
+            values=["None", "WPA2-PSK", "WPA2-ENT"],
+            state="readonly"
         )
-        self.wifi_connect_btn.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(12, 0))
-        connect_frame.columnconfigure(1, weight=1)
+        self.wifi_form_security.pack(fill=tk.X, pady=(4, 8))
+        self.wifi_form_security.bind("<<ComboboxSelected>>", self._on_other_security_changed)
 
-        # Right side: Saved Networks & Status
-        ttk.Label(right, text="Saved Networks", style="Section.TLabel").pack(anchor="w")
-        self.wifi_saved_tree = ttk.Treeview(right, columns=("Network",), show="headings", height=6)
-        self.wifi_saved_tree.heading("Network", text="Network Name")
-        self.wifi_saved_tree.column("Network", width=350, anchor="w")
-        self.wifi_saved_tree.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        saved_y = ttk.Scrollbar(right, orient=tk.VERTICAL, command=self.wifi_saved_tree.yview)
-        self.wifi_saved_tree.configure(yscrollcommand=saved_y.set)
-        saved_y.pack(side=tk.RIGHT, fill=tk.Y)
+        # Container for dynamic fields
+        self.wifi_form_fields_frame = ttk.Frame(self.wifi_form_frame)
+        self.wifi_form_fields_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
+
+        # Add Connect button at the bottom
+        ttk.Button(self.wifi_form_frame, text="Connect", command=self._do_connect_other, style="Accent.TButton").pack(fill=tk.X)
+
+    def _on_other_security_changed(self, _event=None) -> None:
+        """Update form fields when security type changes in 'Other' form."""
+        # Clear previous fields
+        for widget in self.wifi_form_fields_frame.winfo_children():
+            widget.destroy()
+
+        security = self.wifi_form_security.get()
+
+        if security == "None":
+            # No fields needed
+            pass
+        elif security == "WPA2-PSK":
+            ttk.Label(self.wifi_form_fields_frame, text="Password:").pack(anchor="w")
+            self.wifi_form_password = ttk.Entry(self.wifi_form_fields_frame, show="*")
+            self.wifi_form_password.pack(fill=tk.X, pady=(4, 0))
+        elif security == "WPA2-ENT":
+            ttk.Label(self.wifi_form_fields_frame, text="Username:").pack(anchor="w")
+            self.wifi_form_username = ttk.Entry(self.wifi_form_fields_frame)
+            self.wifi_form_username.pack(fill=tk.X, pady=(4, 8))
+            ttk.Label(self.wifi_form_fields_frame, text="Password:").pack(anchor="w")
+            self.wifi_form_password = ttk.Entry(self.wifi_form_fields_frame, show="*")
+            self.wifi_form_password.pack(fill=tk.X, pady=(4, 0))
+
+    def _on_network_select(self, _event=None) -> None:
+        """Handle network selection and show appropriate form."""
+        sel = self.wifi_network_tree.selection()
+        if not sel:
+            self._clear_wifi_form()
+            return
+
+        item = self.wifi_network_tree.item(sel[0])
+        values = item["values"]
+        
+        if not values:
+            return
+
+        ssid = values[0]
+        rssi = values[1] if len(values) > 1 else ""
+        security = values[2] if len(values) > 2 else ""
+
+        # Check if this is "Other"
+        if ssid == "Other":
+            self._show_other_network_form()
+            return
+
+        # Check if this is a saved network (has RSSI/Security but user meant it's saved)
+        if ssid in self.wifi_saved_networks:
+            self._show_saved_network_form(ssid)
+            return
+
+        # New network - determine form type by security
+        if security == "OPEN" or security == "None":
+            # For OPEN networks, still show a password field option
+            self._show_psk_network_form(ssid, security)
+        elif "ENT" in security.upper():
+            self._show_ent_network_form(ssid, security)
+        else:
+            self._show_psk_network_form(ssid, security)
 
     def _update_files_controls(self) -> None:
         refresh_ok = self.connected and (not self.live_running) and (not self.files_refresh_inflight)
@@ -1261,6 +1672,12 @@ class App(tk.Tk):
                     self._update_files_controls()
                     # Auto-load SD file list right after serial connection opens.
                     self.refresh_files()
+                    # Auto-load saved WiFi networks
+                    self.wifi_load_saved()
+                    # Auto-scan WiFi networks on initial connection
+                    self.wifi_scan()
+                    # Start RTC polling
+                    self._schedule_rtc_poll()
                 elif kind == "disconnected":
                     self.connected = False
                     self.connected_port = None
@@ -1281,13 +1698,12 @@ class App(tk.Tk):
                     for row in self.files_tree.get_children():
                         self.files_tree.delete(row)
                     self._set_preview_message("", "Connect and refresh files to preview.", 0)
-                    for row in self.wifi_scan_tree.get_children():
-                        self.wifi_scan_tree.delete(row)
-                    for row in self.wifi_saved_tree.get_children():
-                        self.wifi_saved_tree.delete(row)
+                    for row in self.wifi_network_tree.get_children():
+                        self.wifi_network_tree.delete(row)
                     self.wifi_current_ssid = ""
                     self.wifi_current_rssi = ""
                     self._cancel_wifi_poll()
+                    self._cancel_rtc_poll()
                     self._update_wifi_top_bar()
                 elif kind == "live_line":
                     self._append_live_line(str(payload))
@@ -1315,12 +1731,14 @@ class App(tk.Tk):
                     self.status_var.set("Live stream running")
                     self.live_start_btn.configure(state=tk.DISABLED)
                     self.live_stop_btn.configure(state=tk.NORMAL)
+                    self._update_wifi_controls()
                     self._update_files_controls()
                 elif kind == "live_stopped":
                     self.live_running = False
                     self.status_var.set("Connected")
                     self.live_start_btn.configure(state=tk.NORMAL)
                     self.live_stop_btn.configure(state=tk.DISABLED)
+                    self._update_wifi_controls()
                     self._update_files_controls()
                 elif kind == "refresh_done":
                     self.files_refresh_inflight = False
@@ -1328,40 +1746,92 @@ class App(tk.Tk):
                 elif kind == "wifi_scan_ok":
                     self.wifi_scan_cache = payload
                     self._show_wifi_networks(payload)
-                    self.status_var.set(f"WiFi scan complete: {len(payload)} network(s) found")
                 elif kind == "wifi_scan_done":
                     self.wifi_scan_inflight = False
                     self._update_wifi_controls()
+                elif kind == "wifi_connect_done":
+                    self.wifi_scan_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
                 elif kind == "wifi_connect_ok":
                     result = payload
                     if result["success"]:
                         self.wifi_current_ssid = result['ssid']
-                        self._update_wifi_top_bar()
-                        self.status_var.set(f"WiFi: Connected to {result['ssid']}")
+                        # Fetch WiFi status immediately to get RSSI before starting poll
+                        def fetch_status() -> None:
+                            try:
+                                status = self.client.wifi_get_status(timeout_s=5.0)
+                                self.events.put(("wifi_status_ok", status))
+                            except Exception:
+                                pass
+                        threading.Thread(target=fetch_status, daemon=True).start()
                         self._schedule_wifi_poll()
+                        # Refresh saved networks after successful connection
+                        self.wifi_load_saved()
+                        # Refresh network list to update connection status
+                        if not self.live_running:
+                            self.wifi_scan()
+                        # Refresh the form to show Disconnect button
+                        if self.wifi_network_tree.selection():
+                            self._on_network_select()
                     else:
-                        self.status_var.set("WiFi: Connection failed")
+                        pass
                 elif kind == "wifi_disconnect_ok":
                     self.wifi_current_ssid = ""
                     self.wifi_current_rssi = ""
                     self._update_wifi_top_bar()
                     self._cancel_wifi_poll()
-                    self.status_var.set("WiFi: Disconnected")
+                    # Refresh network list to update connection status
+                    if not self.live_running:
+                        self.wifi_scan()
+                    # Refresh the form to show Connect button
+                    if self.wifi_network_tree.selection():
+                        self._on_network_select()
+                elif kind == "wifi_forget_ok":
+                    result = payload
+                    success = result.get("success", False)
+                    ssid = result.get("ssid", "")
+                    message = result.get("message", "")
+                    
+                    if success:
+                        # Remove from saved networks list and refresh display
+                        if ssid in self.wifi_saved_networks:
+                            self.wifi_saved_networks.remove(ssid)
+                        # Refresh the unified tree
+                        if self.wifi_scan_cache:
+                            self._show_wifi_networks(self.wifi_scan_cache)
+                        self._clear_wifi_form()
+                        messagebox.showinfo("Network Forgotten", f"Successfully forgot network '{ssid}'.")
+                    else:
+                        messagebox.showerror("Forget Failed", f"Failed to forget network '{ssid}': {message}")
                 elif kind == "wifi_reset_ok":
                     self.wifi_saved_networks = []
-                    for row in self.wifi_saved_tree.get_children():
-                        self.wifi_saved_tree.delete(row)
-                    self.status_var.set("WiFi: All networks forgotten")
+                    # Refresh the unified tree
+                    if self.wifi_scan_cache:
+                        self._show_wifi_networks(self.wifi_scan_cache)
+                elif kind == "wifi_saved_ok":
+                    networks = payload
+                    self.wifi_saved_networks = networks
+                    # Refresh the unified tree with the updated saved networks list
+                    if self.wifi_scan_cache:
+                        self._show_wifi_networks(self.wifi_scan_cache)
                 elif kind == "wifi_status_ok":
                     status = payload
-                    # Update SSID and RSSI separately so one can update without the other
-                    if status.get("ssid"):
-                        self.wifi_current_ssid = status["ssid"]
-                    if status.get("rssi") != "":
-                        self.wifi_current_rssi = status["rssi"]
-                    # Update display if either changed
-                    if status.get("ssid") or status.get("rssi"):
+                    # Always update SSID and RSSI from latest status, even if empty (means disconnected)
+                    new_ssid = status.get("ssid", "")
+                    new_rssi = status.get("rssi", "")
+                    
+                    # Update if values changed
+                    ssid_changed = (self.wifi_current_ssid != new_ssid)
+                    rssi_changed = (self.wifi_current_rssi != new_rssi)
+                    
+                    if ssid_changed or rssi_changed:
+                        self.wifi_current_ssid = new_ssid
+                        self.wifi_current_rssi = new_rssi
                         self._update_wifi_top_bar()
+                elif kind == "rtc_time_ok":
+                    result = payload
+                    if result.get("success", False):
+                        self.rtc_current_datetime = result.get("time", "---- -- --:--")
+                        self.rtc_time_label.configure(text=self.rtc_current_datetime)
                 elif kind == "busy":
                     self.status_var.set(str(payload))
         except Empty:
@@ -1763,6 +2233,9 @@ class App(tk.Tk):
 
         fields = line.split(",")
         self.latest_fields = fields
+        # Try to extract and update RTC time from first field (timestamp)
+        if fields and len(fields) > 0:
+            self._update_rtc_from_timestamp(fields[0])
         keys = self.live_headers
         if len(keys) != len(fields):
             keys = ["timestamp"] + [f"col_{i}" for i in range(1, len(fields))]
@@ -1787,7 +2260,6 @@ class App(tk.Tk):
 
         def worker() -> None:
             try:
-                self.events.put(("busy", "Scanning WiFi networks..."))
                 networks = self.client.wifi_scan(timeout_s=15.0)
                 self.events.put(("wifi_scan_ok", networks))
             except Exception as exc:
@@ -1831,8 +2303,6 @@ class App(tk.Tk):
 
     def wifi_disconnect(self) -> None:
         """Disconnect from WiFi."""
-        self.wifi_disconnect_btn.configure(state=tk.DISABLED)
-
         def worker() -> None:
             try:
                 self.events.put(("busy", "Disconnecting WiFi..."))
@@ -1840,8 +2310,6 @@ class App(tk.Tk):
                 self.events.put(("wifi_disconnect_ok", result))
             except Exception as exc:
                 self.events.put(("error", exc))
-            finally:
-                self.wifi_disconnect_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1862,12 +2330,43 @@ class App(tk.Tk):
 
             threading.Thread(target=worker, daemon=True).start()
 
+    def wifi_load_saved(self) -> None:
+        """Load saved WiFi networks from device."""
+        if not self.connected:
+            return
+
+        def worker() -> None:
+            try:
+                networks = self.client.wifi_get_saved_networks(timeout_s=10.0)
+                self.events.put(("wifi_saved_ok", networks))
+            except Exception as exc:
+                self.events.put(("error", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_saved_network_select(self, event) -> None:
+        """Handle click on saved network - populate SSID field in connect section."""
+        sel = self.wifi_saved_tree.selection()
+        if not sel:
+            return
+        
+        row = self.wifi_saved_tree.item(sel[0], "values")
+        ssid = row[0] if row else ""
+        
+        if not ssid:
+            return
+        
+        # Populate SSID field in the connect section
+        self.wifi_ssid_var.set(ssid)
+        # Clear password field so user must enter it
+        self.wifi_pswd_var.set("")
+
     def _update_wifi_controls(self) -> None:
-        """Enable/disable WiFi buttons based on connection state."""
-        wifi_ok = self.connected
+        """Enable/disable WiFi buttons based on connection state and live streaming."""
+        # Disable WiFi controls during live streaming to avoid interference
+        wifi_ok = self.connected and not self.live_running
         self.wifi_scan_btn.configure(state=tk.NORMAL if wifi_ok and not self.wifi_scan_inflight else tk.DISABLED)
-        self.wifi_connect_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
-        self.wifi_disconnect_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
+        self.wifi_saved_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
         self.wifi_reset_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
 
     def _update_wifi_top_bar(self) -> None:
@@ -1911,31 +2410,191 @@ class App(tk.Tk):
                 self.wifi_icon_label.configure(text=icon)
             else:
                 self.wifi_name_label.configure(text="Not connected")
-                self.wifi_icon_label.configure(text="")
+                # Show WiFi disabled icon when not connected
+                self.wifi_icon_label.configure(text="\ue0da")
 
     def _show_wifi_networks(self, networks: list[dict]) -> None:
-        """Display scanned WiFi networks in the tree view."""
-        for row in self.wifi_scan_tree.get_children():
-            self.wifi_scan_tree.delete(row)
+        """Display scanned WiFi networks in the list."""
+        # Reset to scanned view when networks are updated
+        self.wifi_viewing_saved = False
+        self.wifi_saved_btn.configure(text="Saved Networks")
+        
+        for row in self.wifi_network_tree.get_children():
+            self.wifi_network_tree.delete(row)
 
-        striped_rows = []
-        for i, net in enumerate(networks):
+        # Add only scanned networks (not saved networks)
+        for net in networks:
             ssid = net.get("ssid", "")
             rssi = net.get("rssi", "")
             security = net.get("security", "")
-            striped_rows.append((ssid, rssi, security))
+            self.wifi_network_tree.insert("", tk.END, values=(ssid, rssi, security))
 
-        self._apply_tree_stripes(self.wifi_scan_tree, striped_rows)
+        # Add "Other" option at the bottom
+        # Create a tag for bold text if it doesn't exist
+        try:
+            self.wifi_network_tree.tag_configure('bold', font=('TkDefaultFont', 10, 'bold'))
+        except:
+            pass
+        self.wifi_network_tree.insert("", tk.END, values=("Other", "", ""))
 
-        # Auto-populate SSID field when user clicks on a network
-        def on_select(_event=None):
-            sel = self.wifi_scan_tree.selection()
-            if sel:
-                row = self.wifi_scan_tree.item(sel[0], "values")
-                if row:
-                    self.wifi_ssid_var.set(row[0])
+    def _toggle_saved_networks_view(self) -> None:
+        """Toggle between viewing scanned networks and saved networks."""
+        if self.wifi_viewing_saved:
+            # Switch back to scanned networks
+            self.wifi_viewing_saved = False
+            self.wifi_saved_btn.configure(text="Saved Networks")
+            if self.wifi_scan_cache:
+                self._show_wifi_networks(self.wifi_scan_cache)
+        else:
+            # Switch to saved networks
+            self.wifi_viewing_saved = True
+            self.wifi_saved_btn.configure(text="All Networks")
+            self._show_saved_networks_only()
 
-        self.wifi_scan_tree.bind("<<TreeviewSelect>>", on_select)
+    def _show_saved_networks_only(self) -> None:
+        """Display only saved networks in the list."""
+        for row in self.wifi_network_tree.get_children():
+            self.wifi_network_tree.delete(row)
+
+        # Add all saved networks
+        for ssid in self.wifi_saved_networks:
+            # Try to find RSSI from scan cache if available
+            net_info = next((n for n in self.wifi_scan_cache if n.get("ssid") == ssid), {})
+            rssi = net_info.get("rssi", "")
+            security = net_info.get("security", "")
+            self.wifi_network_tree.insert("", tk.END, values=(ssid, rssi, security))
+
+    def _do_connect_saved(self) -> None:
+        """Connect to a saved network."""
+        ssid = self.wifi_current_form_ssid
+        if not ssid:
+            return
+
+        self.wifi_scan_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", f"Connecting to saved network {ssid}..."))
+                result = self.client.wifi_connect_saved(ssid, timeout_s=20.0)
+                self.events.put(("wifi_connect_ok", result))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("wifi_connect_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_forget_saved(self) -> None:
+        """Forget a saved network."""
+        ssid = self.wifi_current_form_ssid
+        if not ssid:
+            return
+
+        if not messagebox.askyesno("Forget Network", f"Forget saved network '{ssid}'?"):
+            return
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", f"Forgetting network {ssid}..."))
+                result = self.client.wifi_forget_by_ssid(ssid, timeout_s=10.0)
+                self.events.put(("wifi_forget_ok", result))
+            except Exception as exc:
+                self.events.put(("error", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_disconnect_from_form(self) -> None:
+        """Disconnect from WiFi network."""
+        self.wifi_disconnect()
+
+    def _do_connect_psk(self) -> None:
+        """Connect to PSK network with password."""
+        ssid = self.wifi_current_form_ssid
+        password = self.wifi_form_password.get() if self.wifi_form_password else ""
+
+        if not password:
+            messagebox.showwarning("Password Required", "Enter a password to connect.")
+            return
+
+        self.wifi_scan_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", f"Connecting to {ssid}..."))
+                result = self.client.wifi_connect(ssid, password, "PSK", timeout_s=20.0)
+                self.events.put(("wifi_connect_ok", result))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("wifi_connect_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_connect_ent(self) -> None:
+        """Connect to ENT network with username and password."""
+        ssid = self.wifi_current_form_ssid
+        username = self.wifi_form_username.get() if self.wifi_form_username else ""
+        password = self.wifi_form_password.get() if self.wifi_form_password else ""
+
+        if not username or not password:
+            messagebox.showwarning("Credentials Required", "Enter both username and password to connect.")
+            return
+
+        self.wifi_scan_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", f"Connecting to {ssid}..."))
+                result = self.client.wifi_connect(ssid, password, "WPA2-EAP", username=username, timeout_s=20.0)
+                self.events.put(("wifi_connect_ok", result))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("wifi_connect_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _do_connect_other(self) -> None:
+        """Connect to manually entered network."""
+        ssid = self.wifi_form_ssid.get() if self.wifi_form_ssid else ""
+        security = self.wifi_form_security.get() if self.wifi_form_security else "None"
+
+        if not ssid:
+            messagebox.showwarning("SSID Required", "Enter a network name (SSID).")
+            return
+
+        if security == "None":
+            messagebox.showinfo("Open Network", "Connecting to open network. This feature may need device menu.")
+            return
+
+        password = self.wifi_form_password.get() if self.wifi_form_password else ""
+        username = self.wifi_form_username.get() if self.wifi_form_username else ""
+
+        if security == "WPA2-PSK" and not password:
+            messagebox.showwarning("Password Required", "Enter a password.")
+            return
+
+        if security == "WPA2-ENT" and (not username or not password):
+            messagebox.showwarning("Credentials Required", "Enter both username and password.")
+            return
+
+        self.wifi_scan_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                self.events.put(("busy", f"Connecting to {ssid}..."))
+                auth_type = "PSK" if security == "WPA2-PSK" else "WPA2-EAP"
+                if security == "WPA2-PSK":
+                    result = self.client.wifi_connect(ssid, password, auth_type, timeout_s=20.0)
+                else:  # WPA2-ENT
+                    result = self.client.wifi_connect(ssid, password, auth_type, username=username, timeout_s=20.0)
+                self.events.put(("wifi_connect_ok", result))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("wifi_connect_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _schedule_wifi_poll(self) -> None:
         """Schedule periodic WiFi status polling every 5 seconds."""
@@ -1975,6 +2634,58 @@ class App(tk.Tk):
                 self.wifi_poll_timer = self.after(5000, self._wifi_poll_tick)
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _schedule_rtc_poll(self) -> None:
+        """Schedule periodic RTC time polling every 10 seconds."""
+        self._cancel_rtc_poll()  # Cancel any existing timer
+        self.rtc_poll_timer = self.after(10000, self._rtc_poll_tick)
+
+    def _cancel_rtc_poll(self) -> None:
+        """Cancel the RTC polling timer."""
+        if self.rtc_poll_timer is not None:
+            self.after_cancel(self.rtc_poll_timer)
+            self.rtc_poll_timer = None
+
+    def _rtc_poll_tick(self) -> None:
+        """Called periodically to poll RTC time."""
+        if not self.connected or self.rtc_poll_inflight:
+            # Reschedule for next check
+            self.rtc_poll_timer = self.after(10000, self._rtc_poll_tick)
+            return
+
+        self.rtc_poll_inflight = True
+
+        def worker() -> None:
+            try:
+                result = self.client.get_rtc_time(timeout_s=3.0)
+                self.events.put(("rtc_time_ok", result))
+            except Exception:
+                # Silently fail - don't disrupt the user
+                pass
+            finally:
+                self.rtc_poll_inflight = False
+                # Reschedule for next check regardless of success/failure
+                self.rtc_poll_timer = self.after(10000, self._rtc_poll_tick)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_rtc_from_timestamp(self, timestamp_str: str) -> None:
+        """Extract date and time from timestamp string (format: "2026-04-17 10:04:16") and update RTC label."""
+        try:
+            # Timestamp format is expected to be "YYYY-MM-DD HH:MM:SS"
+            parts = timestamp_str.strip().split()
+            if len(parts) >= 2:
+                date_str = parts[0]  # Get "YYYY-MM-DD"
+                time_parts = parts[1].split(":")  # Split "HH:MM:SS"
+                if len(time_parts) >= 2:
+                    time_str = f"{time_parts[0]}:{time_parts[1]}"  # Get "HH:MM" without seconds
+                    datetime_display = f"{date_str} {time_str}"
+                    if datetime_display != self.rtc_current_datetime:
+                        self.rtc_current_datetime = datetime_display
+                        self.rtc_time_label.configure(text=datetime_display)
+        except Exception:
+            # Silently fail if timestamp parsing fails
+            pass
 
     def on_close(self) -> None:
         try:
