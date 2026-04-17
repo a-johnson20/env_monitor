@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Simple desktop GUI for env_monitor serial menu.
 
@@ -84,6 +84,53 @@ BEGIN_RE = re.compile(r"^BEGIN_LOG\s+(.+)\s+(\d+)\s*$")
 END_RE = re.compile(r"^END_LOG\s+(.+)\s+(\d+)\s*$")
 LIVE_HEADER_PREFIX = "LIVE_HEADER "
 
+# Binary Protocol Commands
+class ProtoCmd:
+    MAIN_MENU = 0x10
+    LIVE_START = 0x11
+    LIVE_STOP = 0x12
+    WIFI_MENU = 0x13
+    WIFI_SCAN = 0x14
+    WIFI_CONNECT = 0x15
+    WIFI_CONNECT_EAP = 0x16
+    WIFI_SAVED_LIST = 0x17
+    WIFI_DISCONNECT = 0x18
+    WIFI_FORGET = 0x19
+    WIFI_STATUS = 0x1A
+    LOG_MENU = 0x1B
+    LOG_LIST = 0x1C
+    LOG_GET = 0x1D
+    RTC_TIME = 0x1E
+    BACK = 0x1F
+
+# Binary Protocol Response Types
+class ProtoResp:
+    OK = 0x00
+    ERROR = 0x01
+    STATUS = 0x02
+    WIFI_LIST = 0x10
+    WIFI_INFO = 0x11
+    WIFI_SAVED = 0x12
+    LOG_LIST = 0x13
+    LOG_BEGIN = 0x14
+    LOG_DATA = 0x15
+    LOG_END = 0x16
+    LIVE_DATA = 0x20
+    RTC_RESPONSE = 0x21
+    PROMPT_STRING = 0x30
+    PROMPT_CONFIRM = 0x31
+
+# Error codes
+class ProtoError:
+    INVALID_CMD = 0x01
+    SD_ERROR = 0x02
+    WIFI_ERROR = 0x03
+    TIMEOUT = 0x04
+    INVALID_INDEX = 0x05
+    NO_NETWORKS = 0x06
+    NOT_CONNECTED = 0x07
+    FILE_NOT_FOUND = 0x08
+
 
 @dataclass
 class FileEntry:
@@ -93,6 +140,8 @@ class FileEntry:
 
 
 class SerialMenuClient:
+    """Binary protocol serial client"""
+
     def __init__(self) -> None:
         self.ser: serial.Serial | None = None
         self.lock = threading.Lock()
@@ -104,6 +153,7 @@ class SerialMenuClient:
         return self.ser is not None and self.ser.is_open
 
     def open(self, port: str, baud: int) -> None:
+        """Open serial port"""
         if self.is_open:
             self.close()
         self.ser = serial.Serial(port, baud, timeout=0.1, write_timeout=2)
@@ -111,6 +161,7 @@ class SerialMenuClient:
         self.ser.reset_input_buffer()
 
     def close(self) -> None:
+        """Close serial port"""
         self.stop_live()
         with self.lock:
             if self.ser is not None:
@@ -120,243 +171,178 @@ class SerialMenuClient:
                     self.ser = None
 
     def _require_open(self) -> serial.Serial:
-        if not self.is_open or self.ser is None:
-            raise RuntimeError("Serial port is not open")
+        """Check that port is open"""
+        if self.ser is None or not self.ser.is_open:
+            raise RuntimeError("Serial port not open")
         return self.ser
 
-    @staticmethod
-    def _read_line_with_deadline(ser: serial.Serial, deadline: float) -> str | None:
-        buf = bytearray()
-        while time.time() < deadline:
-            b = ser.read(1)
-            if not b:
-                continue
-            if b == b"\n":
-                return buf.decode("utf-8", errors="replace").strip("\r")
-            buf.extend(b)
-        return None
+    # ============ BINARY PROTOCOL HELPERS ============
 
-    @staticmethod
-    def _read_menu_lines_until_ready(
-        ser: serial.Serial,
-        timeout_s: float,
-        idle_s: float = 0.35,
-    ) -> list[str]:
-        """
-        Read menu text until we detect prompt bytes ("> " / ">") or quiet idle.
-        The firmware prints prompt without newline, so line-based reads alone
-        can otherwise wait until timeout.
-        """
-        deadline = time.time() + timeout_s
-        last_rx = time.time()
-        saw_any = False
-        lines: list[str] = []
-        buf = bytearray()
-
-        while time.time() < deadline:
-            b = ser.read(1)
-            if b:
-                saw_any = True
-                last_rx = time.time()
-                buf.extend(b)
-
-                # Drain complete lines.
-                while True:
-                    nl = buf.find(b"\n")
-                    if nl < 0:
-                        break
-                    raw = bytes(buf[:nl])
-                    del buf[: nl + 1]
-                    lines.append(raw.decode("utf-8", errors="replace").rstrip("\r"))
-
-                # Prompt is printed with Serial.print("> "), so detect raw tail.
-                if buf.endswith(b"> ") or buf.endswith(b">"):
-                    return lines
-            else:
-                if saw_any and (time.time() - last_rx) >= idle_s:
-                    return lines
-
-        return lines
-
-    @staticmethod
-    def _read_log_export_lines_until_ready(
-        ser: serial.Serial,
-        timeout_s: float,
-        idle_s: float = 0.35,
-    ) -> list[str]:
-        """
-        Read serial output until the Log Export menu prompt is reached.
-        Ignore earlier prompts from other menus.
-        """
-        deadline = time.time() + timeout_s
-        last_rx = time.time()
-        buf = bytearray()
-        saw_section = False
-        section_lines: list[str] = []
-
-        while time.time() < deadline:
-            b = ser.read(1)
-            if b:
-                last_rx = time.time()
-                buf.extend(b)
-
-                while True:
-                    nl = buf.find(b"\n")
-                    if nl < 0:
-                        break
-                    raw = bytes(buf[:nl])
-                    del buf[: nl + 1]
-                    line = raw.decode("utf-8", errors="replace").rstrip("\r")
-
-                    if (
-                        "=== Log Export (Serial) ===" in line
-                        or LIST_RE.match(line) is not None
-                        or "Choose file number to stream." in line
-                    ):
-                        saw_section = True
-
-                    if saw_section:
-                        section_lines.append(line)
-
-                # Prompt may be printed without newline.
-                if saw_section and (buf.endswith(b"> ") or buf.endswith(b">")):
-                    return section_lines
-            else:
-                # If we already saw section content and serial is quiet, return.
-                if saw_section and (time.time() - last_rx) >= idle_s:
-                    return section_lines
-
-        if saw_section:
-            return section_lines
-        raise RuntimeError("Timed out waiting for Log Export menu")
-
-    def _send_line(self, line: str) -> None:
+    def _send_cmd(self, cmd: int) -> None:
+        """Send single byte command"""
         ser = self._require_open()
-        ser.write((line + "\n").encode("utf-8"))
+        ser.write(bytes([cmd]))
         ser.flush()
 
-    def _goto_main_menu(self) -> None:
-        # Best-effort return to root menu.
-        self._send_line("b")
-        time.sleep(0.15)
-        self._send_line("b")
-        time.sleep(0.15)
+    def _send_cmd_with_string(self, cmd: int, value: str) -> None:
+        """Send command + length-prefixed string"""
+        ser = self._require_open()
+        ser.write(bytes([cmd]))
+        encoded = value.encode('utf-8')
+        if len(encoded) > 255:
+            encoded = encoded[:255]
+        ser.write(bytes([len(encoded)]))
+        ser.write(encoded)
+        ser.flush()
+
+    def _send_cmd_with_byte(self, cmd: int, value: int) -> None:
+        """Send command + single byte"""
+        ser = self._require_open()
+        ser.write(bytes([cmd, value & 0xFF]))
+        ser.flush()
+
+    def _read_exact(self, n: int, timeout_s: float = 2.0) -> bytes:
+        """Read exactly n bytes"""
+        ser = self._require_open()
+        deadline = time.time() + timeout_s
+        buf = bytearray()
+        while len(buf) < n and time.time() < deadline:
+            chunk = ser.read(n - len(buf))
+            if chunk:
+                buf.extend(chunk)
+            else:
+                time.sleep(0.001)
+        if len(buf) != n:
+            raise RuntimeError(f"Timeout reading {n} bytes, got {len(buf)}")
+        return bytes(buf)
+
+    def _read_byte(self, timeout_s: float = 2.0) -> int:
+        """Read single byte"""
+        return self._read_exact(1, timeout_s)[0]
+
+    def _read_string(self, timeout_s: float = 2.0) -> str:
+        """Read length-prefixed string"""
+        length = self._read_byte(timeout_s)
+        if length == 0:
+            return ""
+        data = self._read_exact(length, timeout_s)
+        return data.decode('utf-8', errors='replace')
+
+    # ============ COMMAND METHODS ============
 
     def list_logs(self, timeout_s: float = 20.0) -> list[FileEntry]:
+        """List log files"""
         if self.live_thread is not None and self.live_thread.is_alive():
             raise RuntimeError("Stop live stream before listing files")
+        
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("3")
-            try:
-                lines = self._read_log_export_lines_until_ready(ser, timeout_s=timeout_s, idle_s=0.35)
-                files: list[FileEntry] = []
-                for line in lines:
-                    m = LIST_RE.match(line)
-                    if m:
-                        files.append(
-                            FileEntry(
-                                index=int(m.group(1)),
-                                path=m.group(2),
-                                size=int(m.group(3)),
-                            )
-                        )
-                return files
-            finally:
-                # Leave export menu so firmware can resume SD logging.
-                self._send_line("b")
-
-    @staticmethod
-    def _read_exact(ser: serial.Serial, n: int, timeout_s: float) -> bytes:
-        deadline = time.time() + timeout_s
-        out = bytearray()
-        while len(out) < n and time.time() < deadline:
-            chunk = ser.read(n - len(out))
-            if not chunk:
-                continue
-            out.extend(chunk)
-        if len(out) != n:
-            raise RuntimeError(f"Timed out reading payload: expected {n}, got {len(out)}")
-        return bytes(out)
+            
+            self._send_cmd(ProtoCmd.LOG_LIST)
+            
+            # Read response
+            resp_type = self._read_byte(timeout_s)
+            
+            if resp_type == ProtoResp.ERROR:
+                error_code = self._read_byte(timeout_s)
+                raise RuntimeError(f"Device error {error_code}")
+            
+            if resp_type != ProtoResp.LOG_LIST:
+                raise RuntimeError(f"Unexpected response: {resp_type}")
+            
+            # Read file list
+            num_files = self._read_byte(timeout_s)
+            files = []
+            
+            for i in range(num_files):
+                # Read: size (4 bytes LE) + path_len (1 byte) + path
+                size_bytes = self._read_exact(4, timeout_s)
+                size = int.from_bytes(size_bytes, 'little')
+                
+                path_len = self._read_byte(timeout_s)
+                path = self._read_exact(path_len, timeout_s).decode('utf-8', errors='replace')
+                
+                files.append(FileEntry(index=i, path=path, size=size))
+            
+            return files
 
     def download_log_bytes(self, index: int, timeout_s: float = 20.0) -> tuple[str, bytes]:
+        """Download log file"""
         if self.live_thread is not None and self.live_thread.is_alive():
-            raise RuntimeError("Stop live stream before downloading files")
-
+            raise RuntimeError("Stop live stream before downloading")
+        
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("3")
-            try:
-                # Wait for export menu to be ready (prompt is not newline-terminated).
-                _ = self._read_log_export_lines_until_ready(ser, timeout_s=timeout_s, idle_s=0.35)
-
-                self._send_line(str(index))
-
-                # Find BEGIN_LOG
-                begin_path = ""
-                begin_size = -1
-                deadline = time.time() + timeout_s
-                while time.time() < deadline:
-                    line = self._read_line_with_deadline(ser, deadline)
-                    if line is None:
-                        break
-                    m = BEGIN_RE.match(line)
-                    if m:
-                        begin_path = m.group(1)
-                        begin_size = int(m.group(2))
-                        break
-                if begin_size < 0:
-                    raise RuntimeError("BEGIN_LOG header not found")
-
-                payload = self._read_exact(ser, begin_size, max(timeout_s, begin_size / 2048.0))
-
-                # After payload, firmware sends newline and END_LOG
-                _ = self._read_line_with_deadline(ser, time.time() + timeout_s)
-                end_path = ""
-                end_size = -1
-                deadline = time.time() + timeout_s
-                while time.time() < deadline:
-                    line = self._read_line_with_deadline(ser, deadline)
-                    if line is None:
-                        break
-                    m = END_RE.match(line)
-                    if m:
-                        end_path = m.group(1)
-                        end_size = int(m.group(2))
-                        break
-                if end_size < 0:
-                    raise RuntimeError("END_LOG footer not found")
-
-                if begin_path != end_path or begin_size != end_size:
-                    raise RuntimeError(
-                        f"Transfer metadata mismatch: BEGIN({begin_path},{begin_size}) END({end_path},{end_size})"
-                    )
-                if len(payload) != end_size:
-                    raise RuntimeError(f"Payload mismatch: {len(payload)} bytes vs {end_size}")
-
-                return begin_path, payload
-            finally:
-                # Leave export menu so firmware can resume SD logging.
-                self._send_line("b")
+            
+            self._send_cmd_with_byte(ProtoCmd.LOG_GET, index)
+            
+            # Read response
+            resp_type = self._read_byte(timeout_s)
+            
+            if resp_type == ProtoResp.ERROR:
+                error_code = self._read_byte(timeout_s)
+                raise RuntimeError(f"Device error {error_code}")
+            
+            if resp_type != ProtoResp.LOG_BEGIN:
+                raise RuntimeError(f"Expected LOG_BEGIN, got {resp_type}")
+            
+            # Read file entry header
+            size_bytes = self._read_exact(4, timeout_s)
+            file_size = int.from_bytes(size_bytes, 'little')
+            
+            path_len = self._read_byte(timeout_s)
+            path = self._read_exact(path_len, timeout_s).decode('utf-8', errors='replace')
+            
+            # Read file data
+            payload = bytearray()
+            remaining = file_size
+            
+            while remaining > 0:
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type == ProtoResp.LOG_DATA:
+                    chunk_len = self._read_byte(timeout_s)
+                    chunk = self._read_exact(chunk_len, timeout_s)
+                    payload.extend(chunk)
+                    remaining -= chunk_len
+                elif resp_type == ProtoResp.LOG_END:
+                    # Read end marker
+                    self._read_exact(4, timeout_s)  # size
+                    path_len = self._read_byte(timeout_s)
+                    self._read_exact(path_len, timeout_s)  # path
+                    break
+                else:
+                    raise RuntimeError(f"Unexpected response during transfer: {resp_type}")
+            
+            if len(payload) != file_size:
+                raise RuntimeError(f"Size mismatch: {len(payload)} vs {file_size}")
+            
+            return path, bytes(payload)
 
     def download_log(self, index: int, output_path: Path, timeout_s: float = 20.0) -> int:
-        _, payload = self.download_log_bytes(index=index, timeout_s=timeout_s)
+        """Download log file and save"""
+        _, payload = self.download_log_bytes(index, timeout_s)
         output_path.write_bytes(payload)
         return len(payload)
 
     def start_live(self, on_line) -> None:
+        """Start live streaming"""
         if self.live_thread is not None and self.live_thread.is_alive():
             return
+        
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("1")
-
+            self._send_cmd(ProtoCmd.LIVE_START)
+            try:
+                resp = self._read_byte(1.0)
+                if resp != ProtoResp.OK:
+                    raise RuntimeError(f"Failed to start live: {resp}")
+            except:
+                pass  # Proceed anyway
+        
         self.live_stop.clear()
         self.live_thread = threading.Thread(
             target=self._live_loop,
@@ -366,6 +352,7 @@ class SerialMenuClient:
         self.live_thread.start()
 
     def _live_loop(self, on_line) -> None:
+        """Live stream loop"""
         ser = self._require_open()
         buf = bytearray()
         while not self.live_stop.is_set():
@@ -379,15 +366,15 @@ class SerialMenuClient:
                     on_line(line)
                 continue
             buf.extend(b)
-
-        # Firmware exits live mode when it receives raw 'b'
+        
+        # Stop live mode
         try:
-            ser.write(b"b")
-            ser.flush()
-        except Exception:
+            self._send_cmd(ProtoCmd.LIVE_STOP)
+        except:
             pass
 
     def stop_live(self) -> None:
+        """Stop live streaming"""
         if self.live_thread is None:
             return
         self.live_stop.set()
@@ -395,501 +382,180 @@ class SerialMenuClient:
         self.live_thread = None
 
     def wifi_scan(self, timeout_s: float = 15.0) -> list[dict]:
-        """Scan for available WiFi networks and return list of networks."""
+        """Scan WiFi networks"""
         if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
+            raise RuntimeError("Serial port not open")
+        
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu option
-            time.sleep(0.5)
-            self._send_line("1")  # Scan networks option
-            time.sleep(1.0)  # Give device time to scan
-
-            # Read until scan is complete
-            deadline = time.time() + timeout_s
-            networks: list[dict] = []
-            buf = bytearray()
-            saw_header = False
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-
-                buf.extend(b)
-
-                # Look for complete lines
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    # Skip empty lines
-                    if not line:
-                        continue
-
-                    # Look for the header line
-                    if "#  RSSI  SEC  SSID" in line or "#  RSSI" in line:
-                        saw_header = True
-                        continue
-
-                    # Stop if we've seen the header and now hit the prompt/menu
-                    if saw_header and (line.startswith("> ") or line == ">" or "Select a network" in line):
-                        break
-
-                    # Parse network entries after we've seen the header
-                    # Format: "1) -45  WPA2-PSK  MyNetwork"
-                    if saw_header and ") " in line[:3]:
-                        try:
-                            # Split on first ")" to separate index from rest
-                            parts = line.split(")", 1)
-                            if len(parts) == 2:
-                                remainder = parts[1].strip()
-                                # Split on whitespace to get RSSI, SEC, and SSID
-                                tokens = remainder.split(None, 2)  # Split on whitespace, max 3 parts
-                                if len(tokens) >= 3:
-                                    rssi_str = tokens[0]
-                                    sec_str = tokens[1]
-                                    ssid_str = tokens[2]
-
-                                    # Validate RSSI looks like a number (negative dBm)
-                                    try:
-                                        rssi_val = int(rssi_str)
-                                        # Normalize OPEN to None for consistency
-                                        sec_display = "None" if sec_str == "OPEN" else sec_str
-                                        networks.append({
-                                            "ssid": ssid_str,
-                                            "rssi": rssi_str,
-                                            "security": sec_display
-                                        })
-                                    except ValueError:
-                                        pass
-                        except (IndexError, ValueError):
-                            pass
-
+            
+            self._send_cmd(ProtoCmd.WIFI_SCAN)
+            
+            # Read response
+            resp_type = self._read_byte(timeout_s)
+            
+            if resp_type == ProtoResp.ERROR:
+                return []
+            
+            if resp_type != ProtoResp.WIFI_LIST:
+                return []
+            
+            # Read network list
+            num_networks = self._read_byte(timeout_s)
+            networks = []
+            
+            for _ in range(num_networks):
+                rssi_byte = self._read_byte(timeout_s)
+                rssi = rssi_byte if rssi_byte < 128 else rssi_byte - 256
+                
+                security = self._read_byte(timeout_s)
+                ssid_len = self._read_byte(timeout_s)
+                ssid = self._read_exact(ssid_len, timeout_s).decode('utf-8', errors='replace')
+                
+                sec_map = {0: "Open", 1: "WPA2-PSK", 2: "WPA2-Enterprise"}
+                networks.append({
+                    "ssid": ssid,
+                    "rssi": str(rssi),
+                    "security": sec_map.get(security, "Unknown")
+                })
+            
             return networks
 
     def wifi_connect(self, ssid: str, password: str, auth_type: str = "PSK", username: str = "", timeout_s: float = 20.0) -> dict:
-        """Connect to a WiFi network."""
+        """Connect to WiFi"""
         if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
+            raise RuntimeError("Serial port not open")
+        
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu
-            time.sleep(0.3)
-
-            # Choose connect method based on auth type
-            if auth_type == "WPA2-EAP":
-                self._send_line("3")  # WPA2-EAP option
-            else:
-                self._send_line("2")  # PSK option
-
-            time.sleep(0.3)
-
-            # Send SSID
-            self._send_line(ssid)
-            time.sleep(0.3)
-
-            # Send credentials based on auth type
-            if auth_type == "WPA2-EAP" and username:
-                # For EAP, send username first
-                self._send_line(username)
-                time.sleep(0.3)
             
-            # Send password
-            self._send_line(password)
-            time.sleep(0.5)
-
-            # Read response
-            deadline = time.time() + timeout_s
-            response_lines: list[str] = []
-            buf = bytearray()
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    response_lines.append(line)
-                    buf = bytearray()
-
-                    if "success" in line.lower() or "connected" in line.lower():
-                        return {"success": True, "ssid": ssid, "message": line}
-                    elif "fail" in line.lower() or "error" in line.lower():
-                        return {"success": False, "ssid": ssid, "message": line}
-
-            return {"success": False, "ssid": ssid, "message": "Timeout waiting for response"}
+            try:
+                if auth_type == "WPA2-EAP":
+                    self._send_cmd(ProtoCmd.WIFI_CONNECT_EAP)
+                    # Send SSID, username, password
+                    for s in [ssid, username, password]:
+                        encoded = s.encode('utf-8')
+                        if len(encoded) > 255:
+                            encoded = encoded[:255]
+                        ser.write(bytes([len(encoded)]))
+                        ser.write(encoded)
+                else:
+                    self._send_cmd(ProtoCmd.WIFI_CONNECT)
+                    # Send SSID, password
+                    for s in [ssid, password]:
+                        encoded = s.encode('utf-8')
+                        if len(encoded) > 255:
+                            encoded = encoded[:255]
+                        ser.write(bytes([len(encoded)]))
+                        ser.write(encoded)
+                
+                ser.flush()
+                
+                # Read response
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type == ProtoResp.OK:
+                    return {"success": True, "ssid": ssid, "message": "Connected"}
+                elif resp_type == ProtoResp.ERROR:
+                    self._read_byte(timeout_s)
+                    return {"success": False, "ssid": ssid, "message": "Connection failed"}
+                else:
+                    return {"success": False, "ssid": ssid, "message": f"Unexpected response: {resp_type}"}
+            except Exception as e:
+                return {"success": False, "ssid": ssid, "message": str(e)}
 
     def wifi_disconnect(self, timeout_s: float = 10.0) -> dict:
-        """Disconnect WiFi."""
+        """Disconnect WiFi"""
         if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
+            raise RuntimeError("Serial port not open")
+        
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu
-            time.sleep(0.3)
-            self._send_line("5")  # Disconnect option
-            time.sleep(0.5)
-
-            # Read response
-            deadline = time.time() + timeout_s
-            buf = bytearray()
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    if "disconnect" in line.lower() or "success" in line.lower():
-                        return {"success": True, "message": line}
-
-            return {"success": True, "message": "Disconnect command sent"}
-
-    def wifi_reset(self, timeout_s: float = 10.0) -> dict:
-        """Reset/forget all WiFi networks."""
-        if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
-        with self.lock:
-            ser = self._require_open()
-            ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu
-            time.sleep(0.3)
-            self._send_line("6")  # Reset option
-            time.sleep(0.5)
-
-            # Read response
-            deadline = time.time() + timeout_s
-            buf = bytearray()
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    if "reset" in line.lower() or "forget" in line.lower() or "success" in line.lower():
-                        return {"success": True, "message": line}
-
-            return {"success": True, "message": "Reset command sent"}
+            
+            try:
+                self._send_cmd(ProtoCmd.WIFI_DISCONNECT)
+                
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type == ProtoResp.OK:
+                    return {"success": True, "message": "Disconnected"}
+                else:
+                    return {"success": False, "message": "Disconnect failed"}
+            except Exception as e:
+                return {"success": False, "message": str(e)}
 
     def wifi_get_status(self, timeout_s: float = 5.0) -> dict:
-        """Get current WiFi status (SSID and RSSI)."""
+        """Get WiFi status"""
         if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
+            raise RuntimeError("Serial port not open")
+        
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu
-
-            # Read until we get the WiFi menu output which shows connection status
-            deadline = time.time() + timeout_s
-            buf = bytearray()
-            ssid = ""
-            rssi = ""
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    # Look for WiFi connection info in output
-                    # Handle ESP32 format: "[WiFi] SSID=X  IP=...  GW=...  DNS0=...  RSSI=-45"
-                    if "[WiFi]" in line and "SSID=" in line:
-                        try:
-                                    # Extract SSID - capture everything after SSID= until multiple spaces or IP=
-                            ssid_match = re.search(r'SSID=(.+?)\s{2,}', line)
-                            if ssid_match:
-                                ssid = ssid_match.group(1).strip()
-                            
-                            # Extract RSSI - look for "RSSI=" followed by a number
-                            rssi_match = re.search(r'RSSI=(-?\d+)', line)
-                            if rssi_match:
-                                rssi = rssi_match.group(1)
-                        except (IndexError, ValueError):
-                            pass
-
-                    # Stop when we see the prompt/menu
-                    if ")==>" in line or line.endswith("> "):
-                        break
-
-            # Go back to main menu
-            self._send_line("b")
-
-            return {"ssid": ssid, "rssi": rssi}
+            
+            try:
+                self._send_cmd(ProtoCmd.WIFI_STATUS)
+                
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type != ProtoResp.WIFI_INFO:
+                    return {"ssid": "", "rssi": ""}
+                
+                connected = self._read_byte(timeout_s)
+                
+                if not connected:
+                    return {"ssid": "", "rssi": ""}
+                
+                rssi_byte = self._read_byte(timeout_s)
+                rssi = rssi_byte if rssi_byte < 128 else rssi_byte - 256
+                
+                ssid = self._read_string(timeout_s)
+                self._read_string(timeout_s)  # IP
+                self._read_string(timeout_s)  # Gateway
+                self._read_string(timeout_s)  # DNS
+                
+                return {"ssid": ssid, "rssi": str(rssi)}
+            except Exception:
+                return {"ssid": "", "rssi": ""}
 
     def wifi_get_saved_networks(self, timeout_s: float = 5.0) -> list[str]:
-        """Get list of saved WiFi networks."""
+        """Get saved WiFi networks"""
         if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
-        with self.lock:
-            ser = self._require_open()
-            ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu
-            time.sleep(0.3)
-            self._send_line("4")  # Saved networks option
-
-            # Read until we get the saved networks list
-            deadline = time.time() + timeout_s
-            buf = bytearray()
-            networks: list[str] = []
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    # Parse saved networks: "1) SSID [WPA2-PSK]"
-                    if re.match(r'^\d+\)\s+.+\s+\[.+\]$', line):
-                        # Extract just the SSID part (between ") " and " [")
-                        match = re.match(r'^\d+\)\s+(.+?)\s+\[.+\]', line)
-                        if match:
-                            ssid = match.group(1)
-                            networks.append(ssid)
-
-                    # Stop when we see the prompt
-                    if ")==>" in line or ("Select" in line and "back" in line):
-                        break
-
-            # Go back to main menu
-            self._send_line("b")
-
-            return networks
-
-    def wifi_connect_saved(self, ssid: str, timeout_s: float = 20.0) -> dict:
-        """Connect to a saved WiFi network by SSID."""
-        if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
-        with self.lock:
-            ser = self._require_open()
-            ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu
-            time.sleep(0.3)
-            self._send_line("4")  # Saved networks option
-            time.sleep(0.3)
-
-            # Find the network index
-            deadline = time.time() + 5.0
-            buf = bytearray()
-            network_index = -1
-            network_count = 0
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    # Parse saved networks: "1) SSID [WPA2-PSK]"
-                    match = re.match(r'^(\d+)\)\s+(.+?)\s+\[.+\]', line)
-                    if match:
-                        network_count += 1
-                        idx = int(match.group(1))
-                        found_ssid = match.group(2)
-                        if found_ssid == ssid:
-                            network_index = idx
-                            break
-
-                    # Stop if we see the prompt before finding the network
-                    if ")==>" in line or ("Select" in line and "back" in line):
-                        break
-
-            if network_index < 0:
-                return {"success": False, "ssid": ssid, "message": "Network not found in saved list"}
-
-            # Select the network
-            self._send_line(str(network_index))
-            time.sleep(0.3)
-
-            # Connect to it (option 1)
-            self._send_line("1")
-            time.sleep(0.5)
-
-            # Read response
-            deadline = time.time() + timeout_s
-            response_lines: list[str] = []
-            buf = bytearray()
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    response_lines.append(line)
-                    buf = bytearray()
-
-                    if "connected" in line.lower() or "success" in line.lower():
-                        return {"success": True, "ssid": ssid, "message": line}
-                    elif "fail" in line.lower() or "error" in line.lower():
-                        return {"success": False, "ssid": ssid, "message": line}
-
-            return {"success": False, "ssid": ssid, "message": "Timeout waiting for response"}
-
-    def wifi_forget_by_ssid(self, ssid: str, timeout_s: float = 10.0) -> dict:
-        """Forget (delete) a saved WiFi network by SSID."""
-        if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
-        with self.lock:
-            ser = self._require_open()
-            ser.reset_input_buffer()
-            self._goto_main_menu()
-            self._send_line("2")  # WiFi menu
-            time.sleep(0.3)
-            self._send_line("4")  # Saved networks option
-            time.sleep(0.3)
-
-            # Find the network index
-            deadline = time.time() + 5.0
-            buf = bytearray()
-            network_index = -1
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    # Parse saved networks: "1) SSID [WPA2-PSK]"
-                    match = re.match(r'^(\d+)\)\s+(.+?)\s+\[.+\]', line)
-                    if match:
-                        idx = int(match.group(1))
-                        found_ssid = match.group(2)
-                        if found_ssid == ssid:
-                            network_index = idx
-                            break
-
-                    # Stop if we see the prompt before finding the network
-                    if ")==>" in line or ("Select" in line and "back" in line):
-                        break
-
-            if network_index < 0:
-                return {"success": False, "ssid": ssid, "message": "Network not found in saved list"}
-
-            # Select the network
-            self._send_line(str(network_index))
-            time.sleep(0.3)
-
-            # Forget it (option 2)
-            self._send_line("2")
-            time.sleep(0.3)
-
-            # Read response
-            deadline = time.time() + timeout_s
-            buf = bytearray()
-
-            while time.time() < deadline:
-                b = ser.read(1)
-                if not b:
-                    continue
-                buf.extend(b)
-
-                if buf.endswith(b"\n"):
-                    line = buf.decode("utf-8", errors="replace").strip()
-                    buf = bytearray()
-
-                    if "deleted" in line.lower() or "success" in line.lower():
-                        return {"success": True, "ssid": ssid, "message": line}
-                    elif "fail" in line.lower() or "error" in line.lower():
-                        return {"success": False, "ssid": ssid, "message": line}
-
-            return {"success": False, "ssid": ssid, "message": "Timeout waiting for response"}
-
-    def get_rtc_time(self, timeout_s: float = 3.0) -> dict:
-        """Get the current RTC time from the device via menu option 4.
+            raise RuntimeError("Serial port not open")
         
-        Returns a dict with 'time' key containing time string in HH:MM (no seconds),
-        and 'success' key indicating if the query was successful.
-        """
-        if not self.is_open:
-            raise RuntimeError("Serial port is not open")
-
-        try:
-            with self.lock:
-                ser = self.ser
-                if not ser or not ser.is_open:
-                    return {"success": False, "time": "---- -- --:--"}
-
-                # Send menu option 4 to show RTC
-                ser.write(b"4\n")
-                ser.flush()
-
-                # Read response, looking for "RTC: YYYY-MM-DD HH:MM" or "RTC: Not available"
-                import re
-                buf = bytearray()
-                start_time = time.time()
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            
+            try:
+                self._send_cmd(ProtoCmd.WIFI_SAVED_LIST)
                 
-                while time.time() - start_time < timeout_s:
-                    b = ser.read(1)
-                    if not b:
-                        continue
-                    buf.extend(b)
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type != ProtoResp.WIFI_SAVED:
+                    return []
+                
+                num_networks = self._read_byte(timeout_s)
+                networks = []
+                
+                for _ in range(num_networks):
+                    self._read_byte(timeout_s)  # rssi (unused for saved)
+                    self._read_byte(timeout_s)  # security
+                    ssid_len = self._read_byte(timeout_s)
+                    ssid = self._read_exact(ssid_len, timeout_s).decode('utf-8', errors='replace')
+                    networks.append(ssid)
+                
+                return networks
+            except Exception:
+                return []
 
-                    if buf.endswith(b"\n"):
-                        line = buf.decode("utf-8", errors="replace").strip()
-                        buf = bytearray()
 
-                        if line.startswith("RTC:"):
-                            # Parse "RTC: YYYY-MM-DD HH:MM" format
-                            match = re.search(r"(\d{4})-(\d{2})-(\d{2})\s+(\d{2}):(\d{2})", line)
-                            if match:
-                                year, month, day, hour, minute = match.groups()
-                                time_str = f"{year}-{month}-{day} {hour}:{minute}"
-                                return {"success": True, "time": time_str}
-                            elif "Not available" in line:
-                                return {"success": False, "time": "---- -- --:--"}
+# ============ GUI APPLICATION ============
 
-                return {"success": False, "time": "---- -- --:--"}
-        except Exception as e:
-            return {"success": False, "time": "---- -- --:--"}
+
 
 
 class LiveGraphsWindow(tk.Toplevel):
@@ -2223,11 +1889,19 @@ class App(tk.Tk):
         self.live_text.see(tk.END)
         self.live_text.configure(state=tk.DISABLED)
 
-        if line.startswith(LIVE_HEADER_PREFIX):
-            header_csv = line[len(LIVE_HEADER_PREFIX):].strip()
-            hdr = [h.strip() for h in header_csv.split(",") if h.strip()]
-            if hdr:
-                self.live_headers = hdr
+        # Check for header line (handle various whitespace formats)
+        if "LIVE_HEADER" in line[:20]:
+            # Extract everything after "LIVE_HEADER" and optional whitespace
+            match = re.match(r'LIVE_HEADER\s+(.*)', line)
+            if match:
+                header_csv = match.group(1)
+                if header_csv:
+                    # Split on commas and strip each field
+                    hdr = [field.strip() for field in header_csv.split(",")]
+                    # Remove any empty fields
+                    hdr = [field for field in hdr if field]
+                    if hdr:
+                        self.live_headers = hdr
             self._refresh_live_graphs()
             return
 
@@ -2704,3 +2378,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,128 +1,81 @@
 #include "ui/serial_menu.hpp"
+#include "ui/serial_protocol.hpp"
 #include "net/wifi_manager.hpp"
 #include "logging/sd_logger.hpp"
 #include <WiFi.h>
 #include <vector>
 #include <SD_MMC.h>
 
-// External function from main.cpp to print RTC time
-extern void print_rtc_time();
+// External function from main.cpp to get RTC time as string
+extern void get_rtc_time_string(char* out, size_t n);
 
 namespace ui {
 
-enum class State {
-  Idle,          // Serial not connected
-  MainMenu,
-  LiveData,
-  WifiMenu,
-  WifiScanList,
-  WifiSavedList,
-  WifiSavedAction, // after picking a saved network
-  LogExportList,
-  Prompt          // generic input prompt
-};
-
-static State state = State::Idle;
 static bool g_live_stream = false;
 static bool seen_connection = false;
-
-// simple input buffer
-static String inbuf;
-static uint32_t last_menu_print_ms = 0;
-static int selected_index = -1; // reused in submenus
 
 struct LogFileEntry {
   String path;
   uint64_t size = 0;
 };
 static std::vector<LogFileEntry> g_log_files;
-
-// helpers
-static void print_main_menu() {
-  Serial.println();
-  Serial.println(F("=== Main Menu ==="));
-  Serial.println(F("1) Live data"));
-  Serial.println(F("2) WiFi settings"));
-  Serial.println(F("3) Download log file (Serial)"));
-  Serial.println(F("4) Show RTC time"));
-  Serial.print(F("> "));
-}
-
-// Cache the scan so indices don't shuffle while the user is choosing
 static std::vector<wifi::NetInfo> g_scan_cache;
+static int g_selected_wifi_index = -1;
 
-static void print_wifi_menu() {
-  Serial.println();
-  Serial.println(F("=== WiFi Settings ==="));
-  // Print current connection info if connected
-  if (wifi::is_connected()) {
-    Serial.printf("[WiFi] SSID=%s  IP=%s  GW=%s  DNS0=%s  RSSI=%d\n",
-      WiFi.SSID().c_str(),
-      WiFi.localIP().toString().c_str(),
-      WiFi.gatewayIP().toString().c_str(),
-      WiFi.dnsIP().toString().c_str(),
-      WiFi.RSSI());
+// Helper to read a byte with timeout
+static bool read_byte_timeout(uint8_t& out, uint32_t timeout_ms = 2000) {
+  uint32_t start = millis();
+  while (millis() - start < timeout_ms) {
+    if (Serial.available()) {
+      out = Serial.read();
+      return true;
+    }
+    delay(1);
   }
-  Serial.println(F("1) Scan networks"));
-  Serial.println(F("2) Connect PSK (manual)"));
-  Serial.println(F("3) Connect WPA2-EAP (manual)"));
-  Serial.println(F("4) Saved networks"));
-  Serial.println(F("5) Disconnect"));
-  Serial.println(F("6) Reset (forget all)"));
-  Serial.println(F("b) Back"));
-  Serial.print(F("> "));
+  return false;
 }
+
+// Helper to read N bytes with timeout
+static bool read_bytes_timeout(uint8_t* buf, size_t len, uint32_t timeout_ms = 2000) {
+  uint32_t start = millis();
+  size_t pos = 0;
+  while (pos < len && (millis() - start) < timeout_ms) {
+    if (Serial.available()) {
+      buf[pos++] = Serial.read();
+    } else {
+      delay(1);
+    }
+  }
+  return pos == len;
+}
+
+// Helper to read a string (length byte + data)
+static bool read_string(String& out, uint32_t timeout_ms = 2000) {
+  uint8_t len;
+  if (!read_byte_timeout(len, timeout_ms)) return false;
+  if (len == 0) { out = ""; return true; }
+  uint8_t buf[256];
+  if (!read_bytes_timeout(buf, len, timeout_ms)) return false;
+  out = String((char*)buf);
+  out = out.substring(0, len);  // Ensure exact length
+  return true;
+}
+
 
 bool serial_connected() {
-  // Do not gate menu visibility on USB "connected/open" semantics.
-  // Host CDC signaling (DTR/RTS) is inconsistent across tools/OSes.
-  return true;
+  return true;  // Always accept connections
 }
 
 bool live_stream_enabled() { return g_live_stream; }
 
 void begin() {
-  inbuf.reserve(64);
-  // Don't print here; wait until poll() detects a connection.
+  // Binary protocol doesn't need initialization
 }
 
-static bool read_line_nonblocking(String &out) {
-  while (Serial.available() > 0) {
-    char c = (char)Serial.read();
-    if (c == '\r') continue;
-    if (c == '\n') {
-      out = inbuf;
-      inbuf = "";
-      return true;
-    }
-    // rudimentary backspace handling
-    if (c == 0x08 || c == 0x7f) {
-      if (inbuf.length()) inbuf.remove(inbuf.length()-1);
-      continue;
-    }
-    inbuf += c;
-  }
-  return false;
-}
-
-static String read_line_blocking(const __FlashStringHelper* prompt) {
-  Serial.print(prompt);
-  String line;
-  while (true) {
-    String tmp;
-    if (read_line_nonblocking(tmp)) { line = tmp; break; }
-    delay(10);
-  }
-  return line;
-}
-
-static void to_upper_inplace(String &s) {
-  for (size_t i=0;i<s.length();++i) s[i] = toupper(s[i]);
-}
-
-static bool refresh_log_file_list() {
+// Refresh log files from SD card
+static bool refresh_log_files() {
   g_log_files.clear();
-
+  
   File dir = SD_MMC.open("/logs");
   if (!dir || !dir.isDirectory()) {
     if (dir) dir.close();
@@ -146,368 +99,366 @@ static bool refresh_log_file_list() {
   return true;
 }
 
-static void print_log_export_menu() {
-  Serial.println();
-  Serial.println(F("=== Log Export (Serial) ==="));
-
-  if (!refresh_log_file_list()) {
-    Serial.println(F("Could not read /logs on SD."));
-  } else if (g_log_files.empty()) {
-    Serial.println(F("No files found in /logs."));
-  } else {
-    for (size_t i = 0; i < g_log_files.size(); ++i) {
-      Serial.print(i + 1);
-      Serial.print(F(") "));
-      Serial.print(g_log_files[i].path);
-      Serial.print(F(" ("));
-      Serial.print((unsigned long)g_log_files[i].size);
-      Serial.println(F(" bytes)"));
-    }
+// Send a list of log files
+static void send_log_list() {
+  if (!refresh_log_files()) {
+    proto::write_error(proto::ErrorCode::SD_ERROR);
+    return;
   }
-
-  Serial.println(F("\nChoose file number to stream."));
-  Serial.println(F("r) Refresh"));
-  Serial.println(F("b) Back"));
-  Serial.print(F("> "));
+  
+  proto::write_response(proto::RespType::LOG_LIST);
+  Serial.write((uint8_t)g_log_files.size());
+  
+  for (size_t i = 0; i < g_log_files.size(); ++i) {
+    proto::write_log_entry(g_log_files[i].size, g_log_files[i].path);
+  }
 }
 
-static bool stream_log_file(const LogFileEntry& file) {
-  File f = SD_MMC.open(file.path, FILE_READ);
+// Send a log file
+static void send_log_file(uint8_t index) {
+  if (index >= g_log_files.size()) {
+    proto::write_error(proto::ErrorCode::INVALID_INDEX);
+    return;
+  }
+  
+  const auto& entry = g_log_files[index];
+  File f = SD_MMC.open(entry.path, FILE_READ);
   if (!f || f.isDirectory()) {
     if (f) f.close();
-    return false;
+    proto::write_error(proto::ErrorCode::FILE_NOT_FOUND);
+    return;
   }
 
-  Serial.println();
-  Serial.print(F("BEGIN_LOG "));
-  Serial.print(file.path);
-  Serial.print(F(" "));
-  Serial.println((unsigned long)file.size);
-
-  uint8_t buf[128];
-  size_t sent = 0;
-  while (true) {
-    size_t n = f.read(buf, sizeof(buf));
+  // Send BEGIN marker
+  proto::write_response(proto::RespType::LOG_BEGIN);
+  proto::write_log_entry(entry.size, entry.path);
+  
+  // Send file data in chunks
+  uint8_t buf[256];
+  uint32_t remaining = entry.size;
+  while (remaining > 0) {
+    size_t to_read = (remaining > 256) ? 256 : remaining;
+    size_t n = f.read(buf, to_read);
     if (n == 0) break;
+    
+    proto::write_response(proto::RespType::LOG_DATA);
+    Serial.write((uint8_t)n);
     Serial.write(buf, n);
-    sent += n;
-    delay(0);
+    
+    remaining -= n;
+    delay(0);  // Yield to other tasks
   }
   f.close();
-
-  Serial.println();
-  Serial.print(F("END_LOG "));
-  Serial.print(file.path);
-  Serial.print(F(" "));
-  Serial.println((unsigned long)sent);
-  return true;
+  
+  // Send END marker
+  proto::write_response(proto::RespType::LOG_END);
+  proto::write_log_entry(entry.size, entry.path);
 }
 
-static void handle_log_export_list(const String &line) {
-  if (line == "b" || line == "B") {
-    sd_logger::set_paused(false);
-    state = State::MainMenu;
-    print_main_menu();
-    return;
+// Send WiFi scan results
+static void send_wifi_scan() {
+  Serial.println(F("Scanning..."));  // Debug message to serial monitor
+  g_scan_cache = wifi::scan();
+  
+  proto::write_response(proto::RespType::WIFI_LIST);
+  Serial.write((uint8_t)g_scan_cache.size());
+  
+  for (const auto& net : g_scan_cache) {
+    uint8_t sec = 0;
+    if (net.sec == wifi::Sec::WPA2_ENTERPRISE) sec = 2;
+    else if (net.sec == wifi::Sec::WPA_PSK || net.sec == wifi::Sec::WPA2_PSK || net.sec == wifi::Sec::WPA_WPA2_PSK) sec = 1;
+    else sec = 0;  // OPEN or other
+    
+    proto::write_wifi_entry((int8_t)net.rssi, sec, net.ssid);
   }
-  if (line == "r" || line == "R") {
-    print_log_export_menu();
-    return;
-  }
+}
 
-  int sel = line.toInt();
-  if (sel <= 0) {
-    Serial.println(F("Invalid selection."));
-    Serial.print(F("> "));
+// Send current WiFi connection info
+static void send_wifi_status() {
+  proto::write_response(proto::RespType::WIFI_INFO);
+  
+  if (!wifi::is_connected()) {
+    Serial.write(0);  // not connected
     return;
   }
-  if (sel > (int)g_log_files.size()) {
-    Serial.println(F("Out of range."));
-    Serial.print(F("> "));
-    return;
-  }
+  
+  Serial.write(1);  // connected
+  Serial.write((uint8_t)WiFi.RSSI());
+  
+  String ssid = WiFi.SSID();
+  String ip = WiFi.localIP().toString();
+  String gw = WiFi.gatewayIP().toString();
+  String dns = WiFi.dnsIP().toString();
+  
+  proto::write_string(ssid);
+  proto::write_string(ip);
+  proto::write_string(gw);
+  proto::write_string(dns);
+}
 
-  const auto& file = g_log_files[(size_t)(sel - 1)];
-  Serial.println(F("\nStreaming file over serial..."));
-  if (!stream_log_file(file)) {
-    Serial.println(F("Stream failed."));
+// Send list of saved WiFi networks
+static void send_saved_networks() {
+  auto saved = wifi::saved();
+  
+  proto::write_response(proto::RespType::WIFI_SAVED);
+  Serial.write((uint8_t)saved.size());
+  
+  for (const auto& net : saved) {
+    uint8_t sec = 0;
+    if (net.sec == wifi::Sec::WPA2_ENTERPRISE) sec = 2;
+    else if (net.sec == wifi::Sec::WPA_PSK || net.sec == wifi::Sec::WPA2_PSK || net.sec == wifi::Sec::WPA_WPA2_PSK) sec = 1;
+    else sec = 0;
+    
+    proto::write_wifi_entry(0, sec, net.ssid);  // rssi is not relevant for saved
+  }
+}
+
+// Send RTC time
+static void send_rtc_time() {
+  proto::write_response(proto::RespType::RTC_RESPONSE);
+  
+  char buf[32];
+  get_rtc_time_string(buf, sizeof(buf));
+  proto::write_string(buf, strlen(buf));
+}
+
+// Connect to WiFi (PSK)
+static void handle_wifi_connect_psk() {
+  String ssid, password;
+  
+  if (!read_string(ssid)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
+    return;
+  }
+  if (!read_string(password)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
+    return;
+  }
+  
+  if (wifi::connect_psk(ssid, password, true)) {
+    proto::write_response(proto::RespType::OK);
   } else {
-    Serial.println(F("\nDone. Use scripts/download_csv.py for automatic CSV save."));
+    proto::write_error(proto::ErrorCode::WIFI_ERROR);
   }
-  Serial.print(F("> "));
 }
 
-// ---- State handlers ----
-static void handle_main_menu(const String &line) {
-  if (line == "1") {
-    g_live_stream = true;
-    state = State::LiveData;
-    Serial.println(F("\nStreaming live data. Press 'b' to go back.\n"));
-  } else if (line == "2") {
-    state = State::WifiMenu;
-    print_wifi_menu();
-  } else if (line == "3") {
-  if (!sd_logger::is_mounted()) {
-    Serial.println(F("SD not mounted."));
-    print_main_menu();
+// Connect to WiFi (WPA2-EAP)
+static void handle_wifi_connect_eap() {
+  String ssid, username, password;
+  
+  if (!read_string(ssid)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
     return;
   }
-  sd_logger::set_paused(true);
-  state = State::LogExportList;
-  print_log_export_menu();
-  } else if (line == "4") {
-    Serial.println();
-    print_rtc_time();
-    print_main_menu();
+  if (!read_string(username)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
+    return;
+  }
+  if (!read_string(password)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
+    return;
+  }
+  
+  if (wifi::connect_eap_peap_mschapv2(ssid, username, password, true)) {
+    proto::write_response(proto::RespType::OK);
   } else {
-    Serial.println(F("Invalid choice."));
-    print_main_menu();
+    proto::write_error(proto::ErrorCode::WIFI_ERROR);
   }
 }
 
-static void handle_wifi_menu(const String &line) {
-  if (line == "1") {
-    // Scan
-    Serial.println(F("\nScanning..."));
-    g_scan_cache = wifi::scan(); // freeze list until user exits this flow
-    if (g_scan_cache.empty()) {
-      Serial.println(F("No networks found."));
-      print_wifi_menu();
+// Connect to a scanned network
+static void handle_wifi_connect_from_scan() {
+  uint8_t index;
+  if (!read_byte_timeout(index)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
+    return;
+  }
+  
+  if (index >= g_scan_cache.size()) {
+    proto::write_error(proto::ErrorCode::INVALID_INDEX);
+    return;
+  }
+  
+  const auto& net = g_scan_cache[index];
+  
+  if (net.sec == wifi::Sec::WPA2_ENTERPRISE) {
+    String username, password;
+    if (!read_string(username)) {
+      proto::write_error(proto::ErrorCode::TIMEOUT);
       return;
     }
-    Serial.println(F("\n#  RSSI  SEC  SSID"));
-    for (size_t i = 0; i < g_scan_cache.size(); ++i) {
-      const auto& n = g_scan_cache[i];
-      Serial.print(i+1); Serial.print(F(") "));
-      Serial.print(n.rssi); Serial.print(F("  "));
-      Serial.print(wifi::sec_to_str(n.sec)); Serial.print(F("  "));
-      Serial.println(n.ssid);
-    }
-    Serial.println(F("\nSelect a network number, or 'b' to go back:"));
-    Serial.print(F("> "));
-    state = State::WifiScanList;
-  } else if (line == "2") {
-    String ssid = read_line_blocking(F("SSID: "));
-    String pass = read_line_blocking(F("Password: "));
-    Serial.println(F("Connecting..."));
-    if (wifi::connect_psk(ssid, pass, /*save=*/true)) {
-      Serial.println(F("Connected. Returning to main menu."));
-      state = State::MainMenu;
-      print_main_menu();
-    } else {
-      Serial.println(F("Failed to connect."));
-      print_wifi_menu();
-    }
-  } else if (line == "3") {
-    String ssid = read_line_blocking(F("SSID: "));
-    String user = read_line_blocking(F("Username/Identity: "));
-    String pass = read_line_blocking(F("Password: "));
-    Serial.println(F("Connecting (WPA2-Enterprise PEAP/MSCHAPv2)..."));
-    if (wifi::connect_eap_peap_mschapv2(ssid, user, pass, /*save=*/true)) {
-      Serial.println(F("Connected. Returning to main menu."));
-      state = State::MainMenu;
-      print_main_menu();
-    } else {
-      Serial.println(F("Failed to connect."));
-      print_wifi_menu();
-    }
-  } else if (line == "4") {
-    auto sv = wifi::saved();
-    if (sv.empty()) {
-      Serial.println(F("\nNo saved networks."));
-      print_wifi_menu();
+    if (!read_string(password)) {
+      proto::write_error(proto::ErrorCode::TIMEOUT);
       return;
     }
-    Serial.println(F("\nSaved networks:"));
-    for (size_t i=0;i<sv.size();++i) {
-      Serial.print(i+1); Serial.print(F(") "));
-      Serial.print(sv[i].ssid); Serial.print(F(" [")); Serial.print(wifi::sec_to_str(sv[i].sec)); Serial.println(F("]"));
-    }
-    Serial.println(F("\nSelect a saved network number, or 'b' to go back:"));
-    Serial.print(F("> "));
-    state = State::WifiSavedList;
-  } else if (line == "5") {
-    wifi::disconnect();
-    Serial.println(F("Disconnected."));
-    print_wifi_menu();
-  } else if (line == "6") {
-    wifi::reset_saved();
-    Serial.println(F("All saved networks deleted."));
-    print_wifi_menu();
-  } else if (line == "b" || line == "B") {
-    state = State::MainMenu;
-    print_main_menu();
-  } else {
-    Serial.println(F("Invalid choice."));
-    print_wifi_menu();
-  }
-}
-
-static void handle_wifi_scan_list(const String &line) {
-  if (line == "b" || line == "B") {
-    g_scan_cache.clear();
-    state = State::WifiMenu;
-    print_wifi_menu();
-    return;
-  }
-  int sel = line.toInt();
-  if (sel <= 0) {
-    Serial.println(F("Invalid selection."));
-    Serial.print(F("> "));
-    return;
-  }
-  if (sel > (int)g_scan_cache.size()) {
-    Serial.println(F("Out of range."));
-    Serial.print(F("> "));
-    return;
-  }
-  auto n = g_scan_cache[sel - 1];
-  if (n.sec == wifi::Sec::WPA2_ENTERPRISE) {
-    String user = read_line_blocking(F("Username/Identity: "));
-    String pass = read_line_blocking(F("Password: "));
-    Serial.println(F("Connecting..."));
-    if (wifi::connect_eap_exact(n, user, pass, /*save=*/true)) {
-      Serial.println(F("Connected. Returning to main menu."));
-      state = State::MainMenu;
-      print_main_menu();
+    
+    if (wifi::connect_eap_exact(net, username, password, true)) {
+      proto::write_response(proto::RespType::OK);
     } else {
-      Serial.println(F("Failed to connect."));
-      print_wifi_menu();
-      state = State::WifiMenu;
+      proto::write_error(proto::ErrorCode::WIFI_ERROR);
     }
   } else {
-    String pass;
-    if (n.sec == wifi::Sec::OPEN) {
-      // no password
-    } else {
-      pass = read_line_blocking(F("Password: "));
+    String password;
+    if (net.sec != wifi::Sec::OPEN) {
+      if (!read_string(password)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        return;
+      }
     }
-    Serial.println(F("Connecting..."));
-    if (wifi::connect_psk_exact(n, pass, /*save=*/true)) {
-      Serial.println(F("Connected. Returning to main menu."));
-      state = State::MainMenu;
-      print_main_menu();
+    
+    if (wifi::connect_psk_exact(net, password, true)) {
+      proto::write_response(proto::RespType::OK);
     } else {
-      Serial.println(F("Failed to connect."));
-      print_wifi_menu();
-      state = State::WifiMenu;
+      proto::write_error(proto::ErrorCode::WIFI_ERROR);
     }
   }
 }
 
-static void handle_wifi_saved_list(const String &line) {
-  if (line == "b" || line == "B") {
-    g_scan_cache.clear();
-    state = State::WifiMenu;
-    print_wifi_menu();
+// Connect to a saved network
+static void handle_wifi_connect_saved() {
+  uint8_t index;
+  if (!read_byte_timeout(index)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
     return;
   }
-  int sel = line.toInt();
-  if (sel <= 0) {
-    Serial.println(F("Invalid selection."));
-    Serial.print(F("> "));
+  
+  auto saved = wifi::saved();
+  if (index >= saved.size()) {
+    proto::write_error(proto::ErrorCode::INVALID_INDEX);
     return;
   }
-  auto sv = wifi::saved();
-  if (sel > (int)sv.size()) {
-    Serial.println(F("Out of range."));
-    Serial.print(F("> "));
-    return;
-  }
-  selected_index = sel - 1;
-  Serial.println(F("\n1) Connect\n2) Forget\nb) Back"));
-  Serial.print(F("> "));
-  state = State::WifiSavedAction;
-}
-
-static void handle_wifi_saved_action(const String &line) {
-  if (line == "1") {
-    if (wifi::connect_saved((size_t)selected_index)) {
-      Serial.println(F("Connected. Returning to main menu."));
-      state = State::MainMenu;
-      print_main_menu();
-    } else {
-      Serial.println(F("Failed to connect."));
-      state = State::WifiMenu;
-      print_wifi_menu();
-    }
-  } else if (line == "2") {
-    if (wifi::forget((size_t)selected_index)) {
-      Serial.println(F("Deleted.\n"));
-    } else {
-      Serial.println(F("Delete failed.\n"));
-    }
-    state = State::WifiMenu;
-    print_wifi_menu();
-  } else if (line == "b" || line == "B") {
-    state = State::WifiMenu;
-    print_wifi_menu();
+  
+  if (wifi::connect_saved(index)) {
+    proto::write_response(proto::RespType::OK);
   } else {
-    Serial.println(F("Invalid choice."));
-    Serial.print(F("> "));
+    proto::write_error(proto::ErrorCode::WIFI_ERROR);
   }
 }
 
+// Forget a saved network
+static void handle_wifi_forget() {
+  uint8_t index;
+  if (!read_byte_timeout(index)) {
+    proto::write_error(proto::ErrorCode::TIMEOUT);
+    return;
+  }
+  
+  auto saved = wifi::saved();
+  if (index >= saved.size()) {
+    proto::write_error(proto::ErrorCode::INVALID_INDEX);
+    return;
+  }
+  
+  if (wifi::forget(index)) {
+    proto::write_response(proto::RespType::OK);
+  } else {
+    proto::write_error(proto::ErrorCode::WIFI_ERROR);
+  }
+}
+
+// Main command handler
 void poll() {
-  // Track connection transitions
+  // Check if serial is connected
   bool connected = serial_connected();
-  if (connected && !seen_connection) {
-    seen_connection = true;
-    g_live_stream = false;
-    state = State::MainMenu;
-    inbuf = "";
-    Serial.println(F("\n(Serial connected)"));
-    print_main_menu();
-  } else if (!connected) {
+  if (!connected) {
     if (seen_connection) {
-      // lost connection
       seen_connection = false;
       g_live_stream = false;
-      state = State::Idle;
-      inbuf = "";
     }
     return;
   }
 
-  // While streaming live data, listen for 'b' to go back
-  if (state == State::LiveData) {
+  if (!seen_connection) {
+    seen_connection = true;
+    g_live_stream = false;
+    // Send a welcome message to indicate protocol is ready
+    proto::write_response(proto::RespType::OK);
+  }
+
+  // If in live stream mode, only check for stop command
+  if (g_live_stream) {
     if (Serial.available()) {
-      char c = (char)Serial.read();
-      if (c == 'b' || c == 'B') {
+      uint8_t cmd;
+      if (Serial.read() == (uint8_t)proto::Cmd::LIVE_STOP) {
         g_live_stream = false;
-        state = State::MainMenu;
-        print_main_menu();
+        proto::write_response(proto::RespType::OK);
       }
     }
-    return; // nothing else to do
+    return;
   }
 
-  // For menu states, parse full lines
-  String line;
-  if (read_line_nonblocking(line)) {
-    line.trim();
-    switch (state) {
-      case State::MainMenu:          handle_main_menu(line); break;
-      case State::WifiMenu:          handle_wifi_menu(line); break;
-      case State::WifiScanList:      handle_wifi_scan_list(line); break;
-      case State::WifiSavedList:     handle_wifi_saved_list(line); break;
-      case State::WifiSavedAction:   handle_wifi_saved_action(line); break;
-      case State::LogExportList:     handle_log_export_list(line); break;
-      default: break;
-    }
-  } else {
-    // Periodic reprint in case user attached mid-stream and missed prompt
-    if (millis() - last_menu_print_ms > 5000 &&
-        (state == State::MainMenu || state == State::WifiMenu || state == State::LogExportList)) {
-      last_menu_print_ms = millis();
-      if (state == State::MainMenu) {
-        print_main_menu();
+  // Read command byte
+  if (!Serial.available()) {
+    return;
+  }
+
+  uint8_t cmd_byte = Serial.read();
+  proto::Cmd cmd = (proto::Cmd)cmd_byte;
+
+  switch (cmd) {
+    case proto::Cmd::LIVE_START:
+      g_live_stream = true;
+      proto::write_response(proto::RespType::OK);
+      break;
+
+    case proto::Cmd::LIVE_STOP:
+      g_live_stream = false;
+      proto::write_response(proto::RespType::OK);
+      break;
+
+    case proto::Cmd::WIFI_SCAN:
+      send_wifi_scan();
+      break;
+
+    case proto::Cmd::WIFI_CONNECT:
+      handle_wifi_connect_psk();
+      break;
+
+    case proto::Cmd::WIFI_CONNECT_EAP:
+      handle_wifi_connect_eap();
+      break;
+
+    case proto::Cmd::WIFI_SAVED_LIST:
+      send_saved_networks();
+      break;
+
+    case proto::Cmd::WIFI_DISCONNECT:
+      wifi::disconnect();
+      proto::write_response(proto::RespType::OK);
+      break;
+
+    case proto::Cmd::WIFI_FORGET:
+      handle_wifi_forget();
+      break;
+
+    case proto::Cmd::WIFI_STATUS:
+      send_wifi_status();
+      break;
+
+    case proto::Cmd::LOG_LIST:
+      send_log_list();
+      break;
+
+    case proto::Cmd::LOG_GET: {
+      uint8_t index;
+      if (read_byte_timeout(index)) {
+        send_log_file(index);
       } else {
-        Serial.print(F("> "));
+        proto::write_error(proto::ErrorCode::TIMEOUT);
       }
+      break;
     }
-  }
 
+    case proto::Cmd::RTC_TIME:
+      send_rtc_time();
+      break;
+
+    default:
+      proto::write_error(proto::ErrorCode::INVALID_CMD);
+      break;
+  }
 }
+
+
 
 } // namespace ui

@@ -224,6 +224,17 @@ void print_rtc_time() {
   Serial.println(ts);
 }
 
+// Get RTC time as string (for binary protocol)
+void get_rtc_time_string(char* out, size_t n) {
+  if (rtc_present && rtc.updateTime()) {
+    int y = rtc.getYear(); if (y < 100) y += 2000;
+    snprintf(out, n, "%04d-%02d-%02d %02d:%02d:%02d",
+             y, rtc.getMonth(), rtc.getDate(), rtc.getHours(), rtc.getMinutes(), rtc.getSeconds());
+  } else {
+    snprintf(out, n, "RTC NA");
+  }
+}
+
 static void reset_windows_and_flags() {
   for (auto &w : win_trhp_sht45_t) w.reset();
   for (auto &w : win_trhp_sht45_rh) w.reset();
