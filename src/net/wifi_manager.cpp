@@ -5,6 +5,7 @@
 #include <cstring>     //for std::memset/strncpy/memcpy
 
 #include "net/wifi_manager.hpp"
+#include "ui/serial_protocol.hpp"
 
 extern "C" {
   #include "esp_wifi.h"
@@ -37,12 +38,16 @@ namespace wifi {
   }
 
   static void log_link_info() {
-    Serial.printf("[WiFi] SSID=%s  IP=%s  GW=%s  DNS0=%s  RSSI=%d\n",
+    // Use STATUS message format instead of raw Serial.printf
+    // to avoid corrupting the binary protocol stream
+    char buf[128];
+    snprintf(buf, sizeof(buf), "[WiFi] SSID=%s  IP=%s  GW=%s  DNS0=%s  RSSI=%d",
       WiFi.SSID().c_str(),
       WiFi.localIP().toString().c_str(),
       WiFi.gatewayIP().toString().c_str(),
       WiFi.dnsIP().toString().c_str(),
       WiFi.RSSI());
+    ui::proto::write_status(buf, strlen(buf));
   }
 
   const char* sec_to_str(Sec s) {
@@ -66,7 +71,8 @@ namespace wifi {
   std::vector<NetInfo> scan() {
     std::vector<NetInfo> out;
     WiFi.mode(WIFI_STA);
-    WiFi.disconnect(); // ensures fresh scan
+    // Note: do NOT call WiFi.disconnect() here — it would drop an active connection.
+    // WiFi.scanNetworks() works while connected on ESP32.
     int n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
 
     for (int i = 0; i < n; ++i) {
@@ -210,8 +216,6 @@ namespace wifi {
     WiFi.begin(ssid.c_str(), password.c_str());
     if (!wait_for_ip(timeout_ms)) return false;
     
-    log_link_info();
-    
     if (save) {
       Saved s; s.ssid = ssid; s.sec = Sec::WPA2_PSK; s.pass = password;
       add_or_update_saved(s);
@@ -242,8 +246,6 @@ namespace wifi {
       esp_wifi_sta_enterprise_disable();
       return false;
     }
-
-    log_link_info();
 
     if (save) {
       Saved s; s.ssid = ssid; s.sec = Sec::WPA2_ENTERPRISE; s.user = identity; s.pass = password;

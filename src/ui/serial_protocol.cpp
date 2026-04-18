@@ -56,5 +56,28 @@ void write_status(const String& msg) {
   write_status(msg.c_str(), msg.length());
 }
 
+void write_line(const char* str, size_t len) {
+  // Clamp to 255 bytes (single byte length field)
+  if (len > 255) len = 255;
+  Serial.write((uint8_t)len);
+  Serial.write((const uint8_t*)str, len);
+}
+
+void write_line(const String& str) {
+  write_line(str.c_str(), str.length());
+}
+
+void write_message(uint8_t type, const char* str, size_t len) {
+  // Clamp to 255 bytes (single byte length field)
+  if (len > 255) len = 255;
+  Serial.write(type);           // Message type (0x02 = STATUS, 0x20 = LIVE_DATA, etc)
+  Serial.write((uint8_t)len);   // Payload length
+  Serial.write((const uint8_t*)str, len);  // Payload data
+}
+
+void write_message(uint8_t type, const String& str) {
+  write_message(type, str.c_str(), str.length());
+}
+
 } // namespace proto
 } // namespace ui

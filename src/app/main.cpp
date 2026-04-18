@@ -5,6 +5,7 @@
 #include <SensirionI2cScd4x.h>
 #include <RV-3028-C7.h>          // constiko / RV-3028_C7-Arduino_Library
 #include <math.h>
+#include <time.h>
 #include <driver/ledc.h>   // ESP-IDF LEDC driver
 #include <array>
 
@@ -20,6 +21,7 @@
 #include "common/tgs_lookup_tables.hpp"
 #include "common/calib/tgs_calibration.hpp"
 #include "ui/serial_menu.hpp"
+#include "ui/serial_protocol.hpp"
 #include "net/wifi_manager.hpp"
 #include "ui/oled_ui.hpp"
 
@@ -140,12 +142,7 @@ uint8_t crc8(const uint8_t* data, int len) {
   }
   return crc;
 }
-static void print_avg_kv(const char* key, const RunningAvg& a, int digits, const char* unit, bool trailingComma = true) {
-  Serial.print(key);
-  if (a.count) Serial.print(a.mean(), digits); else Serial.print("NA");
-  if (unit) Serial.print(unit);
-  if (trailingComma) Serial.print(", ");
-}
+
 
 // ---------- Pump helpers ----------
 
@@ -188,48 +185,65 @@ static inline void pump_off() { pump_set_percent(0); }
 static inline void pump_on()  { pump_set_percent(100); }
 
 // ---------- RTC helpers ----------
+
+// Read UTC from RTC registers and convert to UK local time (GMT/BST).
+// The process TZ is set to "GMT0BST,M3.5.0/1,M10.5.0/2" by rtc_sync after NTP sync.
+static bool rtc_read_uk(struct tm& local) {
+  if (!rtc_present || !rtc.updateTime()) return false;
+  int y = rtc.getYear(); if (y < 100) y += 2000;
+
+  struct tm utc{};
+  utc.tm_year  = y - 1900;
+  utc.tm_mon   = rtc.getMonth() - 1;   // 0-based
+  utc.tm_mday  = rtc.getDate();
+  utc.tm_hour  = rtc.getHours();
+  utc.tm_min   = rtc.getMinutes();
+  utc.tm_sec   = rtc.getSeconds();
+  utc.tm_isdst = 0;
+
+  // Convert UTC struct to epoch via mktime with TZ temporarily set to UTC,
+  // then convert epoch to UK local time via localtime_r.
+  setenv("TZ", "UTC0", 1); tzset();
+  time_t epoch = mktime(&utc);
+  setenv("TZ", "GMT0BST,M3.5.0/1,M10.5.0/2", 1); tzset();
+  if (epoch < 0) return false;
+  localtime_r(&epoch, &local);
+  return true;
+}
+
 static void format_timestamp(char* out, size_t n) {
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
+  struct tm local;
+  if (rtc_read_uk(local)) {
     snprintf(out, n, "%04d-%02d-%02d %02d:%02d:%02d",
-             y, rtc.getMonth(), rtc.getDate(), rtc.getHours(), rtc.getMinutes(), rtc.getSeconds());
+             local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+             local.tm_hour, local.tm_min, local.tm_sec);
   } else {
     snprintf(out, n, "RTC NA (%lus)", millis()/1000);
   }
 }
-static void print_timestamp() { char buf[24]; format_timestamp(buf, sizeof(buf)); Serial.print("["); Serial.print(buf); Serial.print("] "); }
+
 
 static void format_timestamp_no_sec(char* out, size_t n) {
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
+  struct tm local;
+  if (rtc_read_uk(local)) {
     // DD/MM/YYYY HH:MM
     snprintf(out, n, "%02d/%02d/%04d %02d:%02d",
-             rtc.getDate(), rtc.getMonth(), y,
-             rtc.getHours(), rtc.getMinutes());
+             local.tm_mday, local.tm_mon + 1, local.tm_year + 1900,
+             local.tm_hour, local.tm_min);
   } else {
     snprintf(out, n, "RTC NA");
   }
 }
 
-// Public function to print RTC time (called from serial menu)
-void print_rtc_time() {
-  char ts[32];
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
-    snprintf(ts, sizeof(ts), "RTC: %04d-%02d-%02d %02d:%02d",
-             y, rtc.getMonth(), rtc.getDate(), rtc.getHours(), rtc.getMinutes());
-  } else {
-    snprintf(ts, sizeof(ts), "RTC: Not available");
-  }
-  Serial.println(ts);
-}
+
 
 // Get RTC time as string (for binary protocol)
 void get_rtc_time_string(char* out, size_t n) {
-  if (rtc_present && rtc.updateTime()) {
-    int y = rtc.getYear(); if (y < 100) y += 2000;
+  struct tm local;
+  if (rtc_read_uk(local)) {
     snprintf(out, n, "%04d-%02d-%02d %02d:%02d:%02d",
-             y, rtc.getMonth(), rtc.getDate(), rtc.getHours(), rtc.getMinutes(), rtc.getSeconds());
+             local.tm_year + 1900, local.tm_mon + 1, local.tm_mday,
+             local.tm_hour, local.tm_min, local.tm_sec);
   } else {
     snprintf(out, n, "RTC NA");
   }
@@ -289,17 +303,9 @@ static void commit_and_reset_all_windows() {
     line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
   }
 
-  // Print to Serial ONLY when "Live data" is selected in the menu
-  static bool live_header_sent = false;
+  // Send live CSV data only when GUI has started live streaming
   if (ui::live_stream_enabled()) {
-    if (!live_header_sent) {
-      Serial.print("LIVE_HEADER ");
-      Serial.println(logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
-      live_header_sent = true;
-    }
-    Serial.println(line);
-  } else {
-    live_header_sent = false;
+    ui::proto::write_message(0x20, line);
   }
 
   // Only SD work is gated
@@ -420,8 +426,8 @@ namespace {
 
 void setup() {
   Serial.begin(115200);
-  delay(5000); // let the serial port settle
-  Serial.println("Serial open");
+  delay(100); // brief USB settle; won't affect binary protocol sync
+  ui::proto::write_message(0x02, "Serial open");
 
   // triggered re‑enumeration; doing it here once avoids the disconnect.
 
@@ -456,19 +462,19 @@ void setup() {
   // RTC on WireRTC
   rtc_present = rtc.begin(WireRTC);
   if (rtc_present) {
-    Serial.println("RV-3028 RTC ready");
+    ui::proto::write_message(0x02, "RV-3028 RTC ready");
   } else {
-    Serial.println("WARNING: RV-3028 not found on RTC bus.");
+    ui::proto::write_message(0x02, "WARNING: RV-3028 not found on RTC bus.");
   }
 
   rtc_sync::begin(rtc, rtc_present); // sync RTC from WiFi NTP on boot
 
   // Mux present?
   if (!hal::Mux::probe(Wire)) {
-    Serial.println("ERROR: TCA9548A not found at 0x70!");
+    ui::proto::write_message(0x02, "ERROR: TCA9548A not found at 0x70!");
     while (1) delay(1000);
   }
-  Serial.println("TCA9548A connected");
+  ui::proto::write_message(0x02, "TCA9548A connected");
 
   // Calibrate TGS2611 channels
   app::calibrate_all_tgs2611(muxStateWire);
@@ -483,8 +489,10 @@ void setup() {
   for (auto ch : hal::Mux::SCD4x) if (select_channel(Wire, ch, muxStateWire)) {
     uint64_t sn = 0;
     if (scd4x.getSerialNumber(sn) == NO_ERROR) {
-      Serial.printf("SCD4x[ch=%u] serial: %08X%08X\n",
+      char buf[64];
+      snprintf(buf, sizeof(buf), "SCD4x[ch=%u] serial: %08X%08X",
                     to_u8(ch), (uint32_t)(sn >> 32), (uint32_t)(sn & 0xFFFFFFFF));
+      ui::proto::write_message(0x02, buf);
     }
   }
 
@@ -493,38 +501,50 @@ void setup() {
   for (auto ch : hal::Mux::TRHP) {
     if (select_channel(Wire, ch, muxStateWire)) {
       if (!lps22df_begin_on_selected(lps22df_nodes[i])) {
-        Serial.printf("LPS22DF init failed on ch %u\n", to_u8(ch));
+        char buf[64];
+        snprintf(buf, sizeof(buf), "LPS22DF init failed on ch %u", to_u8(ch));
+        ui::proto::write_message(0x02, buf);
       }
     }
     ++i;
   }
 
   if (!sd_logger::begin()) {
-    Serial.println("WARNING: SD logging disabled.");
+    ui::proto::write_message(0x02, "WARNING: SD logging disabled.");
   }
 
   pump_begin();
   pump_set_percent(1);  // start at 50% (pick what you want)
 
-  delay(10000); // Give time to open serial monitor
+  // SHORT delay to let devices settle
+  delay(1000);
 
   // Print TGS state on boot (ID + CRC + wiper + kΩ).
   // Set 'true' to include the extra +1 kΩ series resistor in the reported value.
-  app::print_tgs_boot_status(
-      muxStateWire,      // your local mux state
-      Wire,                        // I²C bus you use for sensors
-      hal::I2CAddr::TCA9548A,      // mux address from your central header
-      false  // set true if you want +1 kΩ added in the printout
-  );
+  // DISABLED: Uses Serial.printf() which breaks binary protocol
+  // app::print_tgs_boot_status(
+  //     muxStateWire,      // your local mux state
+  //     Wire,                        // I²C bus you use for sensors
+  //     hal::I2CAddr::TCA9548A,      // mux address from your central header
+  //     false  // set true if you want +1 kΩ added in the printout
+  // );
 }
 
 void loop() {
   rtc_sync::poll();
   ui::poll();
 
+  // --- Send CSV header periodically (every ~10 seconds) when live streaming ---
+  // This ensures the GUI always has a fresh header, even if it connects after startup
+  static uint32_t last_header_sent_ms = 0;
+  uint32_t now = millis();
+  if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0)) {
+    ui::proto::write_message(0x20, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
+    last_header_sent_ms = now;
+  }
+
   // --- Poll SD hot-plug (~2 Hz) ---
   static uint32_t last_sd_poll = 0;
-  uint32_t now = millis();
   if (now - last_sd_poll >= 500) {
     if (!sd_logger::paused()) {
       sd_logger::poll_hotplug(now);

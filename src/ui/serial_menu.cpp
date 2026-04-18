@@ -56,8 +56,8 @@ static bool read_string(String& out, uint32_t timeout_ms = 2000) {
   if (len == 0) { out = ""; return true; }
   uint8_t buf[256];
   if (!read_bytes_timeout(buf, len, timeout_ms)) return false;
+  buf[len] = '\0';
   out = String((char*)buf);
-  out = out.substring(0, len);  // Ensure exact length
   return true;
 }
 
@@ -157,7 +157,6 @@ static void send_log_file(uint8_t index) {
 
 // Send WiFi scan results
 static void send_wifi_scan() {
-  Serial.println(F("Scanning..."));  // Debug message to serial monitor
   g_scan_cache = wifi::scan();
   
   proto::write_response(proto::RespType::WIFI_LIST);
@@ -316,14 +315,22 @@ static void handle_wifi_connect_from_scan() {
 
 // Connect to a saved network
 static void handle_wifi_connect_saved() {
-  uint8_t index;
-  if (!read_byte_timeout(index)) {
+  String ssid;
+  if (!read_string(ssid)) {
     proto::write_error(proto::ErrorCode::TIMEOUT);
     return;
   }
   
   auto saved = wifi::saved();
-  if (index >= saved.size()) {
+  int index = -1;
+  for (size_t i = 0; i < saved.size(); i++) {
+    if (saved[i].ssid == ssid) {
+      index = (int)i;
+      break;
+    }
+  }
+  
+  if (index < 0) {
     proto::write_error(proto::ErrorCode::INVALID_INDEX);
     return;
   }
@@ -335,21 +342,29 @@ static void handle_wifi_connect_saved() {
   }
 }
 
-// Forget a saved network
+// Forget a saved network by SSID
 static void handle_wifi_forget() {
-  uint8_t index;
-  if (!read_byte_timeout(index)) {
+  String ssid;
+  if (!read_string(ssid)) {
     proto::write_error(proto::ErrorCode::TIMEOUT);
     return;
   }
   
-  auto saved = wifi::saved();
-  if (index >= saved.size()) {
+  auto saved_list = wifi::saved();
+  int found = -1;
+  for (size_t i = 0; i < saved_list.size(); i++) {
+    if (saved_list[i].ssid == ssid) {
+      found = (int)i;
+      break;
+    }
+  }
+  
+  if (found < 0) {
     proto::write_error(proto::ErrorCode::INVALID_INDEX);
     return;
   }
   
-  if (wifi::forget(index)) {
+  if (wifi::forget(found)) {
     proto::write_response(proto::RespType::OK);
   } else {
     proto::write_error(proto::ErrorCode::WIFI_ERROR);
@@ -378,11 +393,17 @@ void poll() {
   // If in live stream mode, only check for stop command
   if (g_live_stream) {
     if (Serial.available()) {
-      uint8_t cmd;
-      if (Serial.read() == (uint8_t)proto::Cmd::LIVE_STOP) {
+      uint8_t cmd_byte = Serial.read();
+      proto::Cmd cmd = (proto::Cmd)cmd_byte;
+      
+      if (cmd == proto::Cmd::RTC_TIME) {
+        // Allow RTC polling during live stream
+        send_rtc_time();
+      } else if (cmd == proto::Cmd::LIVE_STOP) {
         g_live_stream = false;
         proto::write_response(proto::RespType::OK);
       }
+      // Ignore other commands during live streaming
     }
     return;
   }
@@ -429,6 +450,10 @@ void poll() {
 
     case proto::Cmd::WIFI_FORGET:
       handle_wifi_forget();
+      break;
+
+    case proto::Cmd::WIFI_CONNECT_SAVED:
+      handle_wifi_connect_saved();
       break;
 
     case proto::Cmd::WIFI_STATUS:

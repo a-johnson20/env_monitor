@@ -3,6 +3,7 @@
 #include "app/rtc_sync.hpp"
 #include "net/wifi_manager.hpp"
 #include "app/compat_time.hpp"   // shims for IntelliSense on Windows
+#include "ui/serial_protocol.hpp"
 
 namespace rtc_sync {
 
@@ -83,11 +84,14 @@ static bool syncFromNtp() {
     uint8_t r_mday = g_rtc->getDate();
     uint8_t r_mon  = g_rtc->getMonth();
     uint16_t r_year = g_rtc->getYear(); // full year, e.g. 2026
-    Serial.printf("[RTC verify] %04u-%02u-%02u %02u:%02u:%02u (wday=%u)\n",
+    char vbuf[80];
+    snprintf(vbuf, sizeof(vbuf), "[RTC verify] %04u-%02u-%02u %02u:%02u:%02u (wday=%u)",
                   r_year, r_mon, r_mday, r_hour, r_min, r_sec, r_wday);
-    Serial.printf("[NTP used ] %04d-%02d-%02d %02d:%02d:%02d (UTC)\n",
+    (void)vbuf; // Debug only - do not write to serial
+    snprintf(vbuf, sizeof(vbuf), "[NTP used ] %04d-%02d-%02d %02d:%02d:%02d (UTC)",
                   utc_tm.tm_year + 1900, utc_tm.tm_mon + 1, utc_tm.tm_mday,
                   utc_tm.tm_hour, utc_tm.tm_min, utc_tm.tm_sec);
+    (void)vbuf;
   }
 
   // Switch process TZ back to UK for UI/logs
@@ -117,11 +121,7 @@ void poll() {
 
   // One-shot on connection edge
   if (w && !g_prev_wifi && !g_synced_once && g_rtc_present) {
-    if (syncFromNtp()) {
-      Serial.println("[RTC] NTP -> RV-3028 sync OK");
-    } else {
-      Serial.println("[RTC] NTP sync failed (will retry on next Wi-Fi connect)");
-    }
+    syncFromNtp();
   }
 
   // Daily resync if connected (at most once every ~24h)
@@ -129,11 +129,7 @@ void poll() {
   if (w && g_rtc_present && g_synced_once &&
       (now_ms - g_last_daily_check_ms) >= (24u * 60u * 60u * 1000u)) {
     g_last_daily_check_ms = now_ms;
-    if (syncFromNtp()) {
-      Serial.println("[RTC] Daily resync OK");
-    } else {
-      Serial.println("[RTC] Daily resync failed");
-    }
+    syncFromNtp();
   }
 
   g_prev_wifi = w;
@@ -141,15 +137,16 @@ void poll() {
 
 bool force_resync() {
   if (!g_rtc_present) {
-    Serial.println("[RTC] Not present; cannot sync.");
+    ui::proto::write_status("[RTC] Not present; cannot sync.", 31);
     return false;
   }
   if (!wifi::is_connected()) {
-    Serial.println("[RTC] Wi-Fi not connected; cannot NTP sync.");
+    ui::proto::write_status("[RTC] Wi-Fi not connected; cannot NTP sync.", 44);
     return false;
   }
   const bool ok = syncFromNtp();
-  Serial.println(ok ? "[RTC] Manual resync OK" : "[RTC] Manual resync failed");
+  if (ok) ui::proto::write_status("[RTC] Manual resync OK", 22);
+  else    ui::proto::write_status("[RTC] Manual resync failed", 26);
   return ok;
 }
 

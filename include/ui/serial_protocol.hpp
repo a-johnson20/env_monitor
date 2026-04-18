@@ -20,6 +20,7 @@ enum class Cmd : uint8_t {
   WIFI_DISCONNECT = 0x18,  // Disconnect WiFi
   WIFI_FORGET     = 0x19,  // Forget network by index
   WIFI_STATUS     = 0x1A,  // Get WiFi status
+  WIFI_CONNECT_SAVED = 0x20, // Connect to saved network by SSID
   LOG_MENU        = 0x1B,  // Enter log export menu
   LOG_LIST        = 0x1C,  // List log files
   LOG_GET         = 0x1D,  // Get log file (followed by uint8_t index)
@@ -121,6 +122,18 @@ void write_error(ErrorCode code);
 // Write status
 void write_status(const char* msg, size_t len);
 void write_status(const String& msg);
+
+// Write a length-prefixed CSV/text line (for live streaming)
+// Format: [1 byte length][N bytes data]
+// Note: length is single byte, max 255 bytes
+void write_line(const char* str, size_t len);
+void write_line(const String& str);
+
+// Write a typed message (for all output: debug, CSV, RTC, etc)
+// Format: [1 byte type][1 byte length][N bytes data]
+// Types: STATUS (0x02), LIVE_DATA (0x20), RTC_RESPONSE (0x21)
+void write_message(uint8_t type, const char* str, size_t len);
+void write_message(uint8_t type, const String& str);
 
 } // namespace proto
 } // namespace ui

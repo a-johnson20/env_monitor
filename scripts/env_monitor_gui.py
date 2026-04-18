@@ -17,7 +17,6 @@ from __future__ import annotations
 import csv
 import io
 import os
-import re
 import sys
 import threading
 import time
@@ -72,17 +71,11 @@ WIFI_FONT_NAME = "DejaVu Sans Mono wifi ramp"
 # Try to register the WiFi font on Windows
 if WIFI_FONT_PATH and hasattr(ctypes, 'windll'):
     try:
-        import ctypes
         # Add font to registry for current session
         ctypes.windll.gdi32.AddFontResourceExW(str(WIFI_FONT_PATH), 0x10, 0)
     except Exception:
         pass  # Font loading failed, will fall back to default
 
-
-LIST_RE = re.compile(r"^\s*(\d+)\)\s+(.+)\s+\((\d+)\s+bytes\)\s*$")
-BEGIN_RE = re.compile(r"^BEGIN_LOG\s+(.+)\s+(\d+)\s*$")
-END_RE = re.compile(r"^END_LOG\s+(.+)\s+(\d+)\s*$")
-LIVE_HEADER_PREFIX = "LIVE_HEADER "
 
 # Binary Protocol Commands
 class ProtoCmd:
@@ -97,6 +90,7 @@ class ProtoCmd:
     WIFI_DISCONNECT = 0x18
     WIFI_FORGET = 0x19
     WIFI_STATUS = 0x1A
+    WIFI_CONNECT_SAVED = 0x20
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -120,16 +114,6 @@ class ProtoResp:
     PROMPT_STRING = 0x30
     PROMPT_CONFIRM = 0x31
 
-# Error codes
-class ProtoError:
-    INVALID_CMD = 0x01
-    SD_ERROR = 0x02
-    WIFI_ERROR = 0x03
-    TIMEOUT = 0x04
-    INVALID_INDEX = 0x05
-    NO_NETWORKS = 0x06
-    NOT_CONNECTED = 0x07
-    FILE_NOT_FOUND = 0x08
 
 
 @dataclass
@@ -153,10 +137,17 @@ class SerialMenuClient:
         return self.ser is not None and self.ser.is_open
 
     def open(self, port: str, baud: int) -> None:
-        """Open serial port"""
+        """Open serial port without resetting the device (no DTR/RTS toggle)."""
         if self.is_open:
             self.close()
-        self.ser = serial.Serial(port, baud, timeout=0.1, write_timeout=2)
+        self.ser = serial.Serial()
+        self.ser.port = port
+        self.ser.baudrate = baud
+        self.ser.timeout = 0.1
+        self.ser.write_timeout = 2
+        self.ser.dtr = False
+        self.ser.rts = False
+        self.ser.open()
         time.sleep(0.2)
         self.ser.reset_input_buffer()
 
@@ -336,12 +327,19 @@ class SerialMenuClient:
             ser = self._require_open()
             ser.reset_input_buffer()
             self._send_cmd(ProtoCmd.LIVE_START)
-            try:
-                resp = self._read_byte(1.0)
-                if resp != ProtoResp.OK:
-                    raise RuntimeError(f"Failed to start live: {resp}")
-            except:
-                pass  # Proceed anyway
+            # Read response, draining any stale bytes that arrived between
+            # the buffer reset and the OK response
+            deadline = time.time() + 2.0
+            got_ok = False
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                if b[0] == ProtoResp.OK:
+                    got_ok = True
+                    break
+            # Drain any remaining stale bytes in the buffer
+            ser.reset_input_buffer()
         
         self.live_stop.clear()
         self.live_thread = threading.Thread(
@@ -352,20 +350,47 @@ class SerialMenuClient:
         self.live_thread.start()
 
     def _live_loop(self, on_line) -> None:
-        """Live stream loop"""
+        """Live stream loop - reads typed messages from device
+        
+        Format: [type byte][length byte][message data]
+        Types: 0x02 = STATUS (debug), 0x20 = LIVE_DATA (CSV)
+        Only CSV data (0x20) is passed to on_line callback.
+        """
         ser = self._require_open()
-        buf = bytearray()
+        
         while not self.live_stop.is_set():
-            b = ser.read(1)
-            if not b:
-                continue
-            if b == b"\n":
-                line = buf.decode("utf-8", errors="replace").strip("\r")
-                buf.clear()
-                if line and "," in line:
-                    on_line(line)
-                continue
-            buf.extend(b)
+            try:
+                # Read message type
+                b = ser.read(1)
+                if not b:
+                    continue
+                
+                msg_type = b[0]
+                
+                # Read message length
+                b = ser.read(1)
+                if not b:
+                    continue
+                
+                length = b[0]
+                if length == 0:
+                    continue  # Skip zero-length messages
+                
+                # Read message data
+                msg_data = self._read_exact(length, timeout_s=5.0)
+                line = msg_data.decode("utf-8", errors="replace")
+                
+                # Only process LIVE_DATA (0x20) messages
+                if msg_type == 0x20:
+                    if line:
+                        on_line(line)
+                # Ignore STATUS (0x02) debug messages
+            except Exception:
+                # On any serial error, drain the buffer to resync framing
+                try:
+                    ser.reset_input_buffer()
+                except Exception:
+                    pass
         
         # Stop live mode
         try:
@@ -422,7 +447,7 @@ class SerialMenuClient:
             
             return networks
 
-    def wifi_connect(self, ssid: str, password: str, auth_type: str = "PSK", username: str = "", timeout_s: float = 20.0) -> dict:
+    def wifi_connect(self, ssid: str, password: str, auth_type: str = "PSK", username: str = "", timeout_s: float = 60.0) -> dict:
         """Connect to WiFi"""
         if not self.is_open:
             raise RuntimeError("Serial port not open")
@@ -552,184 +577,139 @@ class SerialMenuClient:
             except Exception:
                 return []
 
+    def wifi_connect_saved(self, ssid: str, timeout_s: float = 60.0) -> dict:
+        """Connect to a previously saved WiFi network by SSID."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            
+            try:
+                self._send_cmd(ProtoCmd.WIFI_CONNECT_SAVED)
+                # Send SSID
+                encoded = ssid.encode('utf-8')
+                if len(encoded) > 255:
+                    encoded = encoded[:255]
+                ser.write(bytes([len(encoded)]))
+                ser.write(encoded)
+                ser.flush()
+                
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type == ProtoResp.OK:
+                    return {"success": True, "ssid": ssid, "message": "Connected"}
+                elif resp_type == ProtoResp.ERROR:
+                    self._read_byte(timeout_s)
+                    return {"success": False, "ssid": ssid, "message": "Connection failed"}
+                else:
+                    return {"success": False, "ssid": ssid, "message": f"Unexpected response: {resp_type}"}
+            except Exception as e:
+                return {"success": False, "ssid": ssid, "message": str(e)}
+
+    def wifi_forget_by_ssid(self, ssid: str, timeout_s: float = 10.0) -> dict:
+        """Forget a saved WiFi network by SSID."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            
+            try:
+                self._send_cmd(ProtoCmd.WIFI_FORGET)
+                
+                # Send SSID
+                encoded = ssid.encode('utf-8')
+                if len(encoded) > 255:
+                    encoded = encoded[:255]
+                ser.write(bytes([len(encoded)]))
+                ser.write(encoded)
+                ser.flush()
+                
+                # Read response
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type == ProtoResp.OK:
+                    return {"success": True, "ssid": ssid, "message": "Network forgotten"}
+                elif resp_type == ProtoResp.ERROR:
+                    error_code = self._read_byte(timeout_s)
+                    return {"success": False, "ssid": ssid, "message": f"Error code {error_code}"}
+                else:
+                    return {"success": False, "ssid": ssid, "message": f"Unexpected response: {resp_type}"}
+            except Exception as e:
+                return {"success": False, "ssid": ssid, "message": str(e)}
+
+    def wifi_reset(self, timeout_s: float = 10.0) -> dict:
+        """Forget all saved WiFi networks by forgetting each one."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        
+        saved = self.wifi_get_saved_networks(timeout_s=timeout_s)
+        for ssid in saved:
+            self.wifi_forget_by_ssid(ssid, timeout_s=timeout_s)
+        return {"success": True, "message": f"Forgot {len(saved)} network(s)"}
+
+    def poll_rtc_during_live(self, timeout_s: float = 1.0) -> dict:
+        """Poll RTC time during live streaming without interrupting the stream.
+        
+        This sends RTC_TIME command and reads the response, but does NOT:
+        - Take the lock (would deadlock with _live_loop)
+        - Reset input buffer (would lose live data)
+        
+        Safe to call from GUI event handlers while live streaming is active.
+        """
+        if not self.is_open:
+            return {"success": False, "time": ""}
+        
+        try:
+            ser = self._require_open()
+            # Send RTC_TIME command WITHOUT lock (would deadlock)
+            ser.write(bytes([ProtoCmd.RTC_TIME]))
+            ser.flush()
+            
+            # Try to read response (with short timeout)
+            resp_type = self._read_byte(timeout_s)
+            
+            if resp_type != ProtoResp.RTC_RESPONSE:
+                return {"success": False, "time": ""}
+            
+            # Read the length-prefixed time string
+            time_str = self._read_string(timeout_s)
+            
+            return {"success": True, "time": time_str}
+        except Exception as e:
+            return {"success": False, "time": ""}
+
+    def get_rtc_time(self, timeout_s: float = 3.0) -> dict:
+        """Get RTC time when live streaming is NOT active."""
+        if not self.is_open:
+            return {"success": False, "time": ""}
+        
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            
+            try:
+                self._send_cmd(ProtoCmd.RTC_TIME)
+                
+                resp_type = self._read_byte(timeout_s)
+                
+                if resp_type != ProtoResp.RTC_RESPONSE:
+                    return {"success": False, "time": ""}
+                
+                time_str = self._read_string(timeout_s)
+                return {"success": True, "time": time_str}
+            except Exception:
+                return {"success": False, "time": ""}
+
 
 # ============ GUI APPLICATION ============
 
 
 
 
-class LiveGraphsWindow(tk.Toplevel):
-    def __init__(self, master: tk.Misc) -> None:
-        super().__init__(master)
-        self.title("Live Graphs")
-        self.geometry("980x760")
-        self.minsize(760, 520)
-        self.c_bg = getattr(master, "c_bg", "#eef2f8")
-        self.c_surface = getattr(master, "c_surface", "#ffffff")
-        self.c_border = getattr(master, "c_border", "#d4dbe6")
-        self.configure(bg=self.c_bg)
-
-        self.status_var = tk.StringVar(value="Waiting for live data...")
-        ttk.Label(self, textvariable=self.status_var, style="Muted.TLabel").pack(anchor="w", padx=10, pady=(8, 4))
-
-        outer = ttk.Frame(self)
-        outer.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        self.scroll_canvas = tk.Canvas(outer, highlightthickness=0, bg=self.c_bg)
-        self.scroll_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        vsb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=self.scroll_canvas.yview)
-        vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.scroll_canvas.configure(yscrollcommand=vsb.set)
-
-        self.content = ttk.Frame(self.scroll_canvas)
-        self.content_id = self.scroll_canvas.create_window((0, 0), window=self.content, anchor="nw")
-        self.content.bind("<Configure>", self._on_content_configure)
-        self.scroll_canvas.bind("<Configure>", self._on_canvas_configure)
-
-        self.graph_names: list[str] = []
-        self.graph_canvases: list[tk.Canvas] = []
-
-        self._last_headers: list[str] = []
-        self._last_x: list[float] = []
-        self._last_labels: list[str] = []
-        self._last_series: list[list[float | None]] = []
-
-    def _on_content_configure(self, _event=None) -> None:
-        self.scroll_canvas.configure(scrollregion=self.scroll_canvas.bbox("all"))
-
-    def _on_canvas_configure(self, event) -> None:
-        self.scroll_canvas.itemconfigure(self.content_id, width=event.width)
-        self.redraw()
-
-    def _rebuild_graph_widgets(self, var_names: list[str]) -> None:
-        for child in self.content.winfo_children():
-            child.destroy()
-
-        self.graph_names = list(var_names)
-        self.graph_canvases = []
-
-        for name in var_names:
-            pane = ttk.LabelFrame(self.content, text=name)
-            pane.pack(fill=tk.X, padx=8, pady=6)
-            canvas = tk.Canvas(
-                pane,
-                height=170,
-                bg=self.c_surface,
-                highlightthickness=1,
-                highlightbackground=self.c_border,
-            )
-            canvas.pack(fill=tk.X, expand=True, padx=6, pady=6)
-            canvas.bind("<Configure>", lambda _e: self.redraw())
-            self.graph_canvases.append(canvas)
-
-    def render(
-        self,
-        headers: list[str],
-        x_values: list[float],
-        time_labels: list[str],
-        series: list[list[float | None]],
-    ) -> None:
-        self._last_headers = list(headers)
-        self._last_x = list(x_values)
-        self._last_labels = list(time_labels)
-        self._last_series = [list(s) for s in series]
-
-        var_names = headers[1:] if len(headers) > 1 else []
-        if var_names != self.graph_names:
-            self._rebuild_graph_widgets(var_names)
-
-        if not var_names:
-            self.status_var.set("Waiting for live data...")
-        else:
-            self.status_var.set(f"Showing {len(x_values)} point(s) per variable")
-
-        self.redraw()
-
-    def redraw(self) -> None:
-        for i, canvas in enumerate(self.graph_canvases):
-            y_vals = self._last_series[i] if i < len(self._last_series) else []
-            self._draw_series(canvas, self._last_x, self._last_labels, y_vals)
-
-    @staticmethod
-    def _draw_series(
-        canvas: tk.Canvas,
-        x_values: list[float],
-        time_labels: list[str],
-        y_values: list[float | None],
-    ) -> None:
-        canvas.delete("all")
-        w = max(canvas.winfo_width(), 320)
-        h = max(canvas.winfo_height(), 120)
-        left, top, right, bottom = 56, 10, 12, 28
-        x0, y0 = left, top
-        x1, y1 = w - right, h - bottom
-        canvas.create_rectangle(x0, y0, x1, y1, outline="#b8b8b8")
-
-        n = min(len(x_values), len(time_labels), len(y_values))
-        if n < 2:
-            canvas.create_text(
-                (x0 + x1) / 2,
-                (y0 + y1) / 2,
-                text="Waiting for more data...",
-                fill="#666666",
-            )
-            return
-
-        xs = x_values[-n:]
-        ts = time_labels[-n:]
-        ys = y_values[-n:]
-        valid = [i for i, v in enumerate(ys) if v is not None]
-        if len(valid) < 2:
-            canvas.create_text(
-                (x0 + x1) / 2,
-                (y0 + y1) / 2,
-                text="No numeric data points yet",
-                fill="#666666",
-            )
-            return
-
-        x_min, x_max = xs[0], xs[-1]
-        if x_max <= x_min:
-            x_max = x_min + 1.0
-
-        y_valid = [ys[i] for i in valid if ys[i] is not None]
-        y_min, y_max = min(y_valid), max(y_valid)
-        if y_max <= y_min:
-            span = abs(y_min) * 0.05
-            if span < 0.5:
-                span = 0.5
-            y_min -= span
-            y_max += span
-
-        def map_x(xv: float) -> float:
-            return x0 + (xv - x_min) * (x1 - x0) / (x_max - x_min)
-
-        def map_y(yv: float) -> float:
-            return y1 - (yv - y_min) * (y1 - y0) / (y_max - y_min)
-
-        # Light horizontal guides.
-        for g in range(1, 4):
-            gy = y0 + g * (y1 - y0) / 4
-            canvas.create_line(x0, gy, x1, gy, fill="#f0f0f0")
-
-        # Draw line segments, breaking on missing values.
-        segment: list[float] = []
-        for i in range(n):
-            yv = ys[i]
-            if yv is None:
-                if len(segment) >= 4:
-                    canvas.create_line(*segment, fill="#1f77b4", width=2)
-                segment = []
-                continue
-            segment.extend((map_x(xs[i]), map_y(yv)))
-        if len(segment) >= 4:
-            canvas.create_line(*segment, fill="#1f77b4", width=2)
-
-        canvas.create_text(x0 - 4, y0, text=f"{y_max:.4g}", anchor="ne", fill="#555555")
-        canvas.create_text(x0 - 4, y1, text=f"{y_min:.4g}", anchor="se", fill="#555555")
-        canvas.create_text(x0, y1 + 14, text=ts[0], anchor="w", fill="#555555")
-        canvas.create_text(x1, y1 + 14, text=ts[-1], anchor="e", fill="#555555")
 
 
 class App(tk.Tk):
@@ -754,7 +734,6 @@ class App(tk.Tk):
         self.client = SerialMenuClient()
         self.events: Queue[tuple[str, object]] = Queue()
         self.file_entries: list[FileEntry] = []
-        self.latest_fields: list[str] = []
         self.preview_cache: dict[int, tuple[str, list[str], list[list[str]], int, str]] = {}
         self.connected = False
         self.live_running = False
@@ -766,7 +745,6 @@ class App(tk.Tk):
         self.live_x_values: deque[float] = deque(maxlen=self.live_history_limit)
         self.live_time_labels: deque[str] = deque(maxlen=self.live_history_limit)
         self.live_series: list[deque[float | None]] = []
-        self.live_graphs_window: LiveGraphsWindow | None = None
 
         # WiFi settings
         self.wifi_scan_cache: list[dict] = []
@@ -788,7 +766,7 @@ class App(tk.Tk):
         # RTC settings
         self.rtc_poll_timer: int | None = None
         self.rtc_poll_inflight = False
-        self.rtc_current_datetime = "---- -- --:--"
+        self.rtc_current_datetime = "0000-00-00 00:00"
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.StringVar(value="115200")
@@ -952,7 +930,7 @@ class App(tk.Tk):
         
         # RTC date/time label on far right (after WiFi)
         standard_font = ("Segoe UI", 9)
-        self.rtc_time_label = tk.Label(right_frame, text="---- -- --:--", font=standard_font, bg=self.c_bg, fg=self.c_muted)
+        self.rtc_time_label = tk.Label(right_frame, text=self.rtc_current_datetime, font=standard_font, bg=self.c_bg, fg=self.c_muted)
         self.rtc_time_label.pack(side=tk.LEFT, padx=(12, 0))
         
         # Name label on left uses standard font
@@ -963,9 +941,6 @@ class App(tk.Tk):
         self.wifi_icon_label = tk.Label(wifi_frame, text="", font=wifi_icon_font, bg=self.c_bg, fg=self.c_muted)
         self.wifi_icon_label.pack(side=tk.LEFT, padx=(4, 0))
         
-        # Keep reference for backward compatibility
-        self.wifi_top_label = None
-
         notebook = ttk.Notebook(self)
         notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
@@ -996,49 +971,65 @@ class App(tk.Tk):
         self.live_start_btn.pack(side=tk.LEFT)
         self.live_stop_btn = ttk.Button(btns, text="Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
-        self.live_graphs_btn = ttk.Button(
-            btns,
-            text="Open Graphs",
-            command=self.open_live_graphs,
-            state=tk.DISABLED,
-            style="Accent.TButton",
-        )
-        self.live_graphs_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        split = ttk.Panedwindow(self.live_tab, orient=tk.HORIZONTAL)
+        # Create split pane: table on top, graphs on bottom
+        split = ttk.Panedwindow(self.live_tab, orient=tk.VERTICAL)
         split.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        left = ttk.Frame(split)
-        right = ttk.Frame(split)
-        split.add(left, weight=2)
-        split.add(right, weight=1)
+        # Top: Table
+        table_frame = ttk.Frame(split)
+        split.add(table_frame, weight=2)
+        
+        ttk.Label(table_frame, text="Live Data Table", style="Section.TLabel").pack(anchor="w")
+        
+        # Create frame to hold table and scrollbars using grid layout
+        table_inner = ttk.Frame(table_frame)
+        table_inner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        table_inner.rowconfigure(0, weight=1)
+        table_inner.columnconfigure(0, weight=1)
+        
+        # Create Treeview for live data table
+        self.live_table = ttk.Treeview(table_inner, show="headings")
+        self.live_table.grid(row=0, column=0, sticky="nsew")
+        
+        # Add scrollbars
+        scroll_y = ttk.Scrollbar(table_inner, orient=tk.VERTICAL, command=self.live_table.yview)
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x = ttk.Scrollbar(table_inner, orient=tk.HORIZONTAL, command=self.live_table.xview)
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.live_table.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        
+        # Will populate columns when header arrives
+        self.live_table_columns = []
 
-        ttk.Label(left, text="Incoming CSV Lines", style="Section.TLabel").pack(anchor="w")
-        self.live_text = tk.Text(left, wrap="none", height=20)
-        self.live_text.pack(fill=tk.BOTH, expand=True)
-        self.live_text.configure(
-            state=tk.DISABLED,
-            bg=self.c_surface,
-            fg=self.c_text,
-            insertbackground=self.c_text,
-            relief="flat",
-            highlightthickness=1,
-            highlightbackground=self.c_border,
-            padx=8,
-            pady=6,
-        )
+        # Bottom: Graphs
+        graphs_frame = ttk.Frame(split)
+        split.add(graphs_frame, weight=1)
+        
+        ttk.Label(graphs_frame, text="Live Graphs", style="Section.TLabel").pack(anchor="w")
+        
+        # Create scrollable canvas for graphs
+        self.graphs_canvas = tk.Canvas(graphs_frame, highlightthickness=0, bg=self.c_bg)
+        self.graphs_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        scroll_y = ttk.Scrollbar(left, orient=tk.VERTICAL, command=self.live_text.yview)
-        self.live_text.configure(yscrollcommand=scroll_y.set)
-        scroll_y.place(relx=1.0, rely=0.0, relheight=1.0, anchor="ne")
+        graphs_vsb = ttk.Scrollbar(graphs_frame, orient=tk.VERTICAL, command=self.graphs_canvas.yview)
+        graphs_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.graphs_canvas.configure(yscrollcommand=graphs_vsb.set)
 
-        ttk.Label(right, text="Latest Row", style="Section.TLabel").pack(anchor="w")
-        self.latest_tree = ttk.Treeview(right, columns=("field", "value"), show="headings", height=18)
-        self.latest_tree.heading("field", text="Field")
-        self.latest_tree.heading("value", text="Value")
-        self.latest_tree.column("field", width=90, anchor="w")
-        self.latest_tree.column("value", width=220, anchor="w")
-        self.latest_tree.pack(fill=tk.BOTH, expand=True)
+        self.graphs_content = ttk.Frame(self.graphs_canvas)
+        self.graphs_content_id = self.graphs_canvas.create_window((0, 0), window=self.graphs_content, anchor="nw")
+        self.graphs_content.bind("<Configure>", self._on_graphs_content_configure)
+        self.graphs_canvas.bind("<Configure>", self._on_graphs_canvas_configure)
+        
+        self.graph_names: list[str] = []
+        self.graph_canvases: list[tk.Canvas] = []
+        self._graph_redraw_pending = False
+
+    def _on_graphs_content_configure(self, _event=None) -> None:
+        self.graphs_canvas.configure(scrollregion=self.graphs_canvas.bbox("all"))
+
+    def _on_graphs_canvas_configure(self, event) -> None:
+        self.graphs_canvas.itemconfigure(self.graphs_content_id, width=event.width)
 
     def _build_files_tab(self) -> None:
         btns = ttk.Frame(self.files_tab)
@@ -1287,7 +1278,6 @@ class App(tk.Tk):
             return
 
         ssid = values[0]
-        rssi = values[1] if len(values) > 1 else ""
         security = values[2] if len(values) > 2 else ""
 
         # Check if this is "Other"
@@ -1332,18 +1322,17 @@ class App(tk.Tk):
                     self.connect_btn.configure(text="Disconnect")
                     self._set_port_combo_state()
                     self.live_start_btn.configure(state=tk.NORMAL)
-                    self.live_graphs_btn.configure(state=tk.NORMAL)
-                    self._update_wifi_controls()
+                    # Grey out file/WiFi buttons during initialization
+                    self.refresh_files_btn.configure(state=tk.DISABLED)
+                    self.download_btn.configure(state=tk.DISABLED)
+                    self.wifi_scan_btn.configure(state=tk.DISABLED)
+                    self.wifi_saved_btn.configure(state=tk.DISABLED)
+                    self.wifi_reset_btn.configure(state=tk.DISABLED)
                     self.refresh_ports()
-                    self._update_files_controls()
-                    # Auto-load SD file list right after serial connection opens.
-                    self.refresh_files()
-                    # Auto-load saved WiFi networks
-                    self.wifi_load_saved()
-                    # Auto-scan WiFi networks on initial connection
-                    self.wifi_scan()
                     # Start RTC polling
                     self._schedule_rtc_poll()
+                    # Fetch initial WiFi status
+                    self._initial_status_fetch()
                 elif kind == "disconnected":
                     self.connected = False
                     self.connected_port = None
@@ -1355,7 +1344,11 @@ class App(tk.Tk):
                     self._set_port_combo_state()
                     self.live_start_btn.configure(state=tk.DISABLED)
                     self.live_stop_btn.configure(state=tk.DISABLED)
-                    self.live_graphs_btn.configure(state=tk.DISABLED)
+                    # Clear live table and graphs
+                    self.live_table.delete(*self.live_table.get_children())
+                    self.live_table_columns = []
+                    self.live_table["columns"] = ()
+                    self._reset_live_history()
                     self._update_wifi_controls()
                     self.refresh_ports()
                     self._update_files_controls()
@@ -1371,6 +1364,8 @@ class App(tk.Tk):
                     self._cancel_wifi_poll()
                     self._cancel_rtc_poll()
                     self._update_wifi_top_bar()
+                    self.rtc_current_datetime = "0000-00-00 00:00"
+                    self.rtc_time_label.configure(text=self.rtc_current_datetime)
                 elif kind == "live_line":
                     self._append_live_line(str(payload))
                 elif kind == "files":
@@ -1404,6 +1399,14 @@ class App(tk.Tk):
                     self.status_var.set("Connected")
                     self.live_start_btn.configure(state=tk.NORMAL)
                     self.live_stop_btn.configure(state=tk.DISABLED)
+                    # Clear table and graphs
+                    self.live_table.delete(*self.live_table.get_children())
+                    self.live_table_columns = []
+                    self.live_table["columns"] = ()
+                    self._reset_live_history()
+                    self._update_wifi_controls()
+                    self._update_files_controls()
+                elif kind == "initial_status_done":
                     self._update_wifi_controls()
                     self._update_files_controls()
                 elif kind == "refresh_done":
@@ -1421,25 +1424,35 @@ class App(tk.Tk):
                     result = payload
                     if result["success"]:
                         self.wifi_current_ssid = result['ssid']
-                        # Fetch WiFi status immediately to get RSSI before starting poll
-                        def fetch_status() -> None:
+                        self._update_wifi_top_bar()
+                        self._schedule_wifi_poll()
+                        self.status_var.set(f"Connected to {result['ssid']}")
+                        # Fetch status, saved networks, and rescan in a single thread
+                        # to avoid overlapping serial commands
+                        def post_connect() -> None:
                             try:
                                 status = self.client.wifi_get_status(timeout_s=5.0)
                                 self.events.put(("wifi_status_ok", status))
                             except Exception:
                                 pass
-                        threading.Thread(target=fetch_status, daemon=True).start()
-                        self._schedule_wifi_poll()
-                        # Refresh saved networks after successful connection
-                        self.wifi_load_saved()
-                        # Refresh network list to update connection status
-                        if not self.live_running:
-                            self.wifi_scan()
+                            try:
+                                networks = self.client.wifi_get_saved_networks(timeout_s=10.0)
+                                self.events.put(("wifi_saved_ok", networks))
+                            except Exception:
+                                pass
+                            try:
+                                nets = self.client.wifi_scan(timeout_s=15.0)
+                                self.events.put(("wifi_scan_ok", nets))
+                            except Exception:
+                                pass
+                        threading.Thread(target=post_connect, daemon=True).start()
                         # Refresh the form to show Disconnect button
                         if self.wifi_network_tree.selection():
                             self._on_network_select()
                     else:
-                        pass
+                        msg = result.get("message", "Connection failed")
+                        self.status_var.set(f"WiFi: {msg}")
+                        messagebox.showwarning("WiFi Connection Failed", msg)
                 elif kind == "wifi_disconnect_ok":
                     self.wifi_current_ssid = ""
                     self.wifi_current_rssi = ""
@@ -1493,10 +1506,21 @@ class App(tk.Tk):
                         self.wifi_current_ssid = new_ssid
                         self.wifi_current_rssi = new_rssi
                         self._update_wifi_top_bar()
+                    
+                    # Start wifi polling if device is connected and polling isn't running
+                    if new_ssid and self.wifi_poll_timer is None:
+                        self._schedule_wifi_poll()
                 elif kind == "rtc_time_ok":
                     result = payload
                     if result.get("success", False):
-                        self.rtc_current_datetime = result.get("time", "---- -- --:--")
+                        raw_time = result.get("time", "")
+                        # Strip seconds if present (e.g. "2026-04-18 10:04:16" -> "2026-04-18 10:04")
+                        parts = raw_time.strip().split()
+                        if len(parts) >= 2:
+                            tp = parts[1].split(":")
+                            if len(tp) >= 2:
+                                raw_time = f"{parts[0]} {tp[0]}:{tp[1]}"
+                        self.rtc_current_datetime = raw_time
                         self.rtc_time_label.configure(text=self.rtc_current_datetime)
                 elif kind == "busy":
                     self.status_var.set(str(payload))
@@ -1553,6 +1577,19 @@ class App(tk.Tk):
                 self.events.put(("connected", port))
             except Exception as exc:
                 self.events.put(("error", exc))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _initial_status_fetch(self) -> None:
+        """Fetch WiFi status and enable controls after COM connect."""
+        def worker() -> None:
+            try:
+                status = self.client.wifi_get_status(timeout_s=5.0)
+                self.events.put(("wifi_status_ok", status))
+            except Exception:
+                pass
+            finally:
+                self.events.put(("initial_status_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -1792,36 +1829,138 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _graphs_window_alive(self) -> bool:
-        return self.live_graphs_window is not None and self.live_graphs_window.winfo_exists()
-
-    def open_live_graphs(self) -> None:
-        if not self.connected:
-            messagebox.showwarning("Not Connected", "Connect to a COM port first.")
-            return
-
-        # Opening graphs implies live plotting intent, so start streaming automatically.
-        if not self.live_running:
-            self.start_live()
-
-        if not self._graphs_window_alive():
-            self.live_graphs_window = LiveGraphsWindow(self)
-        else:
-            self.live_graphs_window.lift()
-            self.live_graphs_window.focus_force()
-        self._refresh_live_graphs()
-
     def _refresh_live_graphs(self) -> None:
-        if not self._graphs_window_alive():
-            return
         if len(self.live_headers) <= 1 and self.live_series:
             self.live_headers = ["timestamp"] + [f"col_{i}" for i in range(1, len(self.live_series) + 1)]
-        self.live_graphs_window.render(
-            headers=list(self.live_headers),
-            x_values=list(self.live_x_values),
-            time_labels=list(self.live_time_labels),
-            series=[list(s) for s in self.live_series],
-        )
+        
+        var_names = self.live_headers[1:] if len(self.live_headers) > 1 else []
+        if var_names != self.graph_names:
+            self._rebuild_graph_widgets(var_names)
+        
+        # Schedule a deferred graph redraw so we don't block event processing.
+        # Multiple rapid calls coalesce into a single redraw.
+        if self.graph_canvases and not self._graph_redraw_pending:
+            self._graph_redraw_pending = True
+            self.after_idle(self._deferred_redraw_graphs)
+
+    def _deferred_redraw_graphs(self) -> None:
+        """Called via after_idle so the canvas has valid dimensions."""
+        self._graph_redraw_pending = False
+        self._redraw_graphs()
+
+    def _rebuild_graph_widgets(self, var_names: list[str]) -> None:
+        """Rebuild graph canvases for the given variable names."""
+        if not hasattr(self, 'graphs_content'):
+            return
+            
+        for child in self.graphs_content.winfo_children():
+            child.destroy()
+
+        self.graph_names = list(var_names)
+        self.graph_canvases = []
+
+        for name in var_names:
+            pane = ttk.LabelFrame(self.graphs_content, text=name)
+            pane.pack(fill=tk.X, padx=8, pady=6)
+            canvas = tk.Canvas(
+                pane,
+                height=170,
+                bg=self.c_surface,
+                highlightthickness=1,
+                highlightbackground=self.c_border,
+            )
+            canvas.pack(fill=tk.X, expand=True, padx=6, pady=6)
+            self.graph_canvases.append(canvas)
+
+    def _redraw_graphs(self) -> None:
+        """Redraw all graphs with current data."""
+        if not self.graph_canvases or not self.live_x_values:
+            return
+            
+        for i, canvas in enumerate(self.graph_canvases):
+            y_vals = list(self.live_series[i]) if i < len(self.live_series) else []
+            self._draw_series(canvas, list(self.live_x_values), list(self.live_time_labels), y_vals)
+
+    @staticmethod
+    def _draw_series(
+        canvas: tk.Canvas,
+        x_values: list[float],
+        time_labels: list[str],
+        y_values: list[float | None],
+    ) -> None:
+        """Draw a single data series on the canvas."""
+        canvas.delete("all")
+        # Skip drawing if canvas hasn't been laid out yet
+        cw = canvas.winfo_width()
+        ch = canvas.winfo_height()
+        if cw <= 1 or ch <= 1:
+            return
+        w = cw
+        h = ch
+        left, top, right, bottom = 56, 10, 12, 28
+        x0, y0 = left, top
+        x1, y1 = w - right, h - bottom
+        canvas.create_rectangle(x0, y0, x1, y1, outline="#b8b8b8")
+
+        n = min(len(x_values), len(time_labels), len(y_values))
+        if n < 2:
+            canvas.create_text(
+                (x0 + x1) / 2,
+                (y0 + y1) / 2,
+                text="Waiting for more data...",
+                fill="#666666",
+            )
+            return
+
+        xs = x_values[-n:]
+        ts = time_labels[-n:]
+        ys = y_values[-n:]
+        valid = [i for i, v in enumerate(ys) if v is not None]
+        if len(valid) < 2:
+            canvas.create_text(
+                (x0 + x1) / 2,
+                (y0 + y1) / 2,
+                text="No numeric data points yet",
+                fill="#666666",
+            )
+            return
+
+        x_min, x_max = xs[0], xs[-1]
+        if x_max <= x_min:
+            x_max = x_min + 1.0
+
+        y_valid = [ys[i] for i in valid if ys[i] is not None]
+        y_min, y_max = min(y_valid), max(y_valid)
+        if y_max <= y_min:
+            span = abs(y_min) * 0.05
+            if span < 0.5:
+                span = 0.5
+            y_min -= span
+            y_max += span
+
+        def map_x(xv: float) -> float:
+            return x0 + (xv - x_min) * (x1 - x0) / (x_max - x_min)
+
+        def map_y(yv: float) -> float:
+            return y1 - (yv - y_min) * (y1 - y0) / (y_max - y_min)
+
+        # Draw line segments, breaking on missing values.
+        segment: list[float] = []
+        for i in range(n):
+            yv = ys[i]
+            if yv is None:
+                if len(segment) >= 4:
+                    canvas.create_line(*segment, fill="#1f77b4", width=2)
+                segment = []
+                continue
+            segment.extend((map_x(xs[i]), map_y(yv)))
+        if len(segment) >= 4:
+            canvas.create_line(*segment, fill="#1f77b4", width=2)
+
+        canvas.create_text(x0 - 4, y0, text=f"{y_max:.4g}", anchor="ne", fill="#555555")
+        canvas.create_text(x0 - 4, y1, text=f"{y_min:.4g}", anchor="se", fill="#555555")
+        canvas.create_text(x0, y1 + 14, text=ts[0], anchor="w", fill="#555555")
+        canvas.create_text(x1, y1 + 14, text=ts[-1], anchor="e", fill="#555555")
 
     def _reset_live_history(self) -> None:
         self.live_sample_counter = 0
@@ -1881,46 +2020,51 @@ class App(tk.Tk):
             self.live_series[i].append(self._parse_float_or_none(raw))
 
     def _append_live_line(self, line: str) -> None:
-        self.live_text.configure(state=tk.NORMAL)
-        self.live_text.insert(tk.END, line + "\n")
-        # Keep tail reasonably small for long sessions.
-        if float(self.live_text.index("end-1c").split(".")[0]) > 2000:
-            self.live_text.delete("1.0", "500.0")
-        self.live_text.see(tk.END)
-        self.live_text.configure(state=tk.DISABLED)
-
-        # Check for header line (handle various whitespace formats)
-        if "LIVE_HEADER" in line[:20]:
-            # Extract everything after "LIVE_HEADER" and optional whitespace
-            match = re.match(r'LIVE_HEADER\s+(.*)', line)
-            if match:
-                header_csv = match.group(1)
-                if header_csv:
-                    # Split on commas and strip each field
-                    hdr = [field.strip() for field in header_csv.split(",")]
-                    # Remove any empty fields
-                    hdr = [field for field in hdr if field]
-                    if hdr:
-                        self.live_headers = hdr
-            self._refresh_live_graphs()
+        # Check for header line: first field is "timestamp"
+        if line.startswith("timestamp"):
+            # Parse header CSV
+            hdr = [field.strip() for field in line.split(",")]
+            hdr = [field for field in hdr if field]
+            if hdr:
+                self.live_headers = hdr
+                # Set up table columns
+                self.live_table_columns = hdr
+                self.live_table.configure(columns=hdr)
+                for col in hdr:
+                    self.live_table.heading(col, text=col)
+                    # Make timestamp column wider, others narrower
+                    if col == "timestamp":
+                        self.live_table.column(col, width=120, anchor="w")
+                    else:
+                        self.live_table.column(col, width=80, anchor="w")
             return
-
+        
+        # Skip data rows if columns not yet set up
+        if not self.live_table_columns:
+            return
+        
+        # Add data row to table
         fields = line.split(",")
-        self.latest_fields = fields
+        # Pad with empty strings if needed
+        while len(fields) < len(self.live_table_columns):
+            fields.append("")
+        
+        # Insert row
+        row_id = self.live_table.insert("", tk.END, values=fields)
+        
+        # Keep table size reasonable (max 2000 rows)
+        all_items = self.live_table.get_children()
+        if len(all_items) > 2000:
+            # Delete oldest 500 rows
+            for item in all_items[:500]:
+                self.live_table.delete(item)
+        
+        # Auto-scroll to bottom
+        self.live_table.see(row_id)
+
         # Try to extract and update RTC time from first field (timestamp)
         if fields and len(fields) > 0:
             self._update_rtc_from_timestamp(fields[0])
-        keys = self.live_headers
-        if len(keys) != len(fields):
-            keys = ["timestamp"] + [f"col_{i}" for i in range(1, len(fields))]
-
-        for row in self.latest_tree.get_children():
-            self.latest_tree.delete(row)
-        latest_rows: list[tuple[str, str]] = []
-        for i, value in enumerate(fields):
-            key = keys[i] if i < len(keys) else f"col_{i}"
-            latest_rows.append((key, value))
-        self._apply_tree_stripes(self.latest_tree, latest_rows)
 
         self._update_live_history(fields)
         self._refresh_live_graphs()
@@ -1940,38 +2084,6 @@ class App(tk.Tk):
                 self.events.put(("error", exc))
             finally:
                 self.events.put(("wifi_scan_done", None))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def wifi_connect(self) -> None:
-        """Connect to a WiFi network."""
-        ssid = self.wifi_ssid_var.get().strip()
-        pswd = self.wifi_pswd_var.get()
-        auth = self.wifi_auth_var.get()
-
-        if not ssid:
-            messagebox.showwarning("SSID Required", "Enter a network name (SSID)")
-            return
-
-        if not pswd:
-            messagebox.showwarning("Password Required", "Enter a password")
-            return
-
-        self.wifi_connect_btn.configure(state=tk.DISABLED)
-        self.wifi_scan_btn.configure(state=tk.DISABLED)
-
-        def worker() -> None:
-            try:
-                self.events.put(("busy", f"Connecting to {ssid}..."))
-                result = self.client.wifi_connect(ssid, pswd, auth, timeout_s=20.0)
-                self.events.put(("wifi_connect_ok", result))
-                # Clear password after successful/failed attempt
-                self.wifi_pswd_var.set("")
-            except Exception as exc:
-                self.events.put(("error", exc))
-            finally:
-                self.wifi_connect_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
-                self.wifi_scan_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2003,37 +2115,6 @@ class App(tk.Tk):
                     self.wifi_reset_btn.configure(state=tk.NORMAL if self.connected else tk.DISABLED)
 
             threading.Thread(target=worker, daemon=True).start()
-
-    def wifi_load_saved(self) -> None:
-        """Load saved WiFi networks from device."""
-        if not self.connected:
-            return
-
-        def worker() -> None:
-            try:
-                networks = self.client.wifi_get_saved_networks(timeout_s=10.0)
-                self.events.put(("wifi_saved_ok", networks))
-            except Exception as exc:
-                self.events.put(("error", exc))
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_saved_network_select(self, event) -> None:
-        """Handle click on saved network - populate SSID field in connect section."""
-        sel = self.wifi_saved_tree.selection()
-        if not sel:
-            return
-        
-        row = self.wifi_saved_tree.item(sel[0], "values")
-        ssid = row[0] if row else ""
-        
-        if not ssid:
-            return
-        
-        # Populate SSID field in the connect section
-        self.wifi_ssid_var.set(ssid)
-        # Clear password field so user must enter it
-        self.wifi_pswd_var.set("")
 
     def _update_wifi_controls(self) -> None:
         """Enable/disable WiFi buttons based on connection state and live streaming."""
@@ -2093,23 +2174,34 @@ class App(tk.Tk):
         self.wifi_viewing_saved = False
         self.wifi_saved_btn.configure(text="Saved Networks")
         
+        # Remember currently selected SSID
+        prev_ssid = None
+        sel = self.wifi_network_tree.selection()
+        if sel:
+            vals = self.wifi_network_tree.item(sel[0], "values")
+            if vals:
+                prev_ssid = vals[0]
+        
         for row in self.wifi_network_tree.get_children():
             self.wifi_network_tree.delete(row)
 
         # Add only scanned networks (not saved networks)
+        reselect_iid = None
         for net in networks:
             ssid = net.get("ssid", "")
             rssi = net.get("rssi", "")
             security = net.get("security", "")
-            self.wifi_network_tree.insert("", tk.END, values=(ssid, rssi, security))
+            iid = self.wifi_network_tree.insert("", tk.END, values=(ssid, rssi, security))
+            if ssid == prev_ssid:
+                reselect_iid = iid
 
         # Add "Other" option at the bottom
-        # Create a tag for bold text if it doesn't exist
-        try:
-            self.wifi_network_tree.tag_configure('bold', font=('TkDefaultFont', 10, 'bold'))
-        except:
-            pass
         self.wifi_network_tree.insert("", tk.END, values=("Other", "", ""))
+        
+        # Restore selection if the network is still present
+        if reselect_iid:
+            self.wifi_network_tree.selection_set(reselect_iid)
+            self.wifi_network_tree.see(reselect_iid)
 
     def _toggle_saved_networks_view(self) -> None:
         """Toggle between viewing scanned networks and saved networks."""
@@ -2149,7 +2241,7 @@ class App(tk.Tk):
         def worker() -> None:
             try:
                 self.events.put(("busy", f"Connecting to saved network {ssid}..."))
-                result = self.client.wifi_connect_saved(ssid, timeout_s=20.0)
+                result = self.client.wifi_connect_saved(ssid, timeout_s=60.0)
                 self.events.put(("wifi_connect_ok", result))
             except Exception as exc:
                 self.events.put(("error", exc))
@@ -2170,7 +2262,7 @@ class App(tk.Tk):
         def worker() -> None:
             try:
                 self.events.put(("busy", f"Forgetting network {ssid}..."))
-                result = self.client.wifi_forget_by_ssid(ssid, timeout_s=10.0)
+                result = self.client.wifi_forget_by_ssid(ssid, timeout_s=20.0)
                 self.events.put(("wifi_forget_ok", result))
             except Exception as exc:
                 self.events.put(("error", exc))
@@ -2195,7 +2287,7 @@ class App(tk.Tk):
         def worker() -> None:
             try:
                 self.events.put(("busy", f"Connecting to {ssid}..."))
-                result = self.client.wifi_connect(ssid, password, "PSK", timeout_s=20.0)
+                result = self.client.wifi_connect(ssid, password, "PSK", timeout_s=60.0)
                 self.events.put(("wifi_connect_ok", result))
             except Exception as exc:
                 self.events.put(("error", exc))
@@ -2219,7 +2311,7 @@ class App(tk.Tk):
         def worker() -> None:
             try:
                 self.events.put(("busy", f"Connecting to {ssid}..."))
-                result = self.client.wifi_connect(ssid, password, "WPA2-EAP", username=username, timeout_s=20.0)
+                result = self.client.wifi_connect(ssid, password, "WPA2-EAP", username=username, timeout_s=60.0)
                 self.events.put(("wifi_connect_ok", result))
             except Exception as exc:
                 self.events.put(("error", exc))
@@ -2259,9 +2351,9 @@ class App(tk.Tk):
                 self.events.put(("busy", f"Connecting to {ssid}..."))
                 auth_type = "PSK" if security == "WPA2-PSK" else "WPA2-EAP"
                 if security == "WPA2-PSK":
-                    result = self.client.wifi_connect(ssid, password, auth_type, timeout_s=20.0)
+                    result = self.client.wifi_connect(ssid, password, auth_type, timeout_s=60.0)
                 else:  # WPA2-ENT
-                    result = self.client.wifi_connect(ssid, password, auth_type, username=username, timeout_s=20.0)
+                    result = self.client.wifi_connect(ssid, password, auth_type, username=username, timeout_s=60.0)
                 self.events.put(("wifi_connect_ok", result))
             except Exception as exc:
                 self.events.put(("error", exc))
@@ -2327,6 +2419,13 @@ class App(tk.Tk):
             self.rtc_poll_timer = self.after(10000, self._rtc_poll_tick)
             return
 
+        # During live streaming, RTC time comes from the data timestamps
+        # (handled by _update_rtc_from_timestamp). Don't send serial commands
+        # that would race with the live loop and corrupt framing.
+        if self.live_running:
+            self.rtc_poll_timer = self.after(10000, self._rtc_poll_tick)
+            return
+
         self.rtc_poll_inflight = True
 
         def worker() -> None:
@@ -2334,11 +2433,9 @@ class App(tk.Tk):
                 result = self.client.get_rtc_time(timeout_s=3.0)
                 self.events.put(("rtc_time_ok", result))
             except Exception:
-                # Silently fail - don't disrupt the user
                 pass
             finally:
                 self.rtc_poll_inflight = False
-                # Reschedule for next check regardless of success/failure
                 self.rtc_poll_timer = self.after(10000, self._rtc_poll_tick)
 
         threading.Thread(target=worker, daemon=True).start()
@@ -2364,8 +2461,6 @@ class App(tk.Tk):
     def on_close(self) -> None:
         try:
             self._cancel_wifi_poll()
-            if self._graphs_window_alive():
-                self.live_graphs_window.destroy()
             self.client.close()
         finally:
             self.destroy()
