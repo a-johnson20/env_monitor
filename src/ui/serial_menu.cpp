@@ -9,9 +9,15 @@
 // External function from main.cpp to get RTC time as string
 extern void get_rtc_time_string(char* out, size_t n);
 
+// External pump control from main.cpp
+extern float pump_percent;
+extern void pump_set_percent(float pct);
+void pump_save_percent(float pct);
+
 namespace ui {
 
 static bool g_live_stream = false;
+static bool g_live_just_started = false;
 static bool seen_connection = false;
 
 struct LogFileEntry {
@@ -67,6 +73,7 @@ bool serial_connected() {
 }
 
 bool live_stream_enabled() { return g_live_stream; }
+bool live_just_started()   { bool v = g_live_just_started; g_live_just_started = false; return v; }
 
 void begin() {
   // Binary protocol doesn't need initialization
@@ -419,6 +426,7 @@ void poll() {
   switch (cmd) {
     case proto::Cmd::LIVE_START:
       g_live_stream = true;
+      g_live_just_started = true;
       proto::write_response(proto::RespType::OK);
       break;
 
@@ -477,6 +485,28 @@ void poll() {
     case proto::Cmd::RTC_TIME:
       send_rtc_time();
       break;
+
+    case proto::Cmd::PUMP_SET: {
+      uint8_t pct;
+      if (read_byte_timeout(pct)) {
+        if (pct > 100) pct = 100;
+        pump_set_percent((float)pct);
+        pump_percent = (float)pct;
+        pump_save_percent(pump_percent);
+        proto::write_response(proto::RespType::OK);
+      } else {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+      }
+      break;
+    }
+
+    case proto::Cmd::PUMP_GET: {
+      uint8_t pct = (uint8_t)(pump_percent + 0.5f);
+      Serial.write((uint8_t)proto::RespType::PUMP_STATUS);
+      Serial.write((uint8_t)1);
+      Serial.write(pct);
+      break;
+    }
 
     default:
       proto::write_error(proto::ErrorCode::INVALID_CMD);

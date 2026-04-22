@@ -91,6 +91,8 @@ class ProtoCmd:
     WIFI_FORGET = 0x19
     WIFI_STATUS = 0x1A
     WIFI_CONNECT_SAVED = 0x20
+    PUMP_SET = 0x21
+    PUMP_GET = 0x22
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -111,6 +113,7 @@ class ProtoResp:
     LOG_END = 0x16
     LIVE_DATA = 0x20
     RTC_RESPONSE = 0x21
+    PUMP_STATUS = 0x22
     PROMPT_STRING = 0x30
     PROMPT_CONFIRM = 0x31
 
@@ -338,8 +341,8 @@ class SerialMenuClient:
                 if b[0] == ProtoResp.OK:
                     got_ok = True
                     break
-            # Drain any remaining stale bytes in the buffer
-            ser.reset_input_buffer()
+            # Do NOT reset_input_buffer here — firmware sends the live header
+            # immediately after the OK, flushing would discard it.
         
         self.live_stop.clear()
         self.live_thread = threading.Thread(
@@ -703,6 +706,71 @@ class SerialMenuClient:
                 return {"success": True, "time": time_str}
             except Exception:
                 return {"success": False, "time": ""}
+
+    def drain_status_messages(self, listen_s: float = 1.5) -> list[str]:
+        """Read any unsolicited 0x02 STATUS messages waiting in the buffer.
+        Returns list of message strings found within the listen window."""
+        messages = []
+        if not self.is_open:
+            return messages
+        with self.lock:
+            ser = self._require_open()
+            deadline = time.time() + listen_s
+            while time.time() < deadline:
+                b = ser.read(1)
+                if not b:
+                    continue
+                if b[0] != 0x02:  # STATUS type
+                    # Not a STATUS message — put back concept: just discard non-STATUS bytes
+                    continue
+                # Read length
+                lb = ser.read(1)
+                if not lb:
+                    break
+                length = lb[0]
+                if length == 0:
+                    continue
+                data = ser.read(length)
+                if data:
+                    messages.append(data.decode("utf-8", errors="replace"))
+        return messages
+
+    def pump_set(self, percent: int, timeout_s: float = 3.0) -> dict:
+        """Set pump speed (0-100%)."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        pct = max(0, min(100, percent))
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.PUMP_SET)
+            ser.write(bytes([pct]))
+            ser.flush()
+            resp = self._read_byte(timeout_s)
+            if resp == ProtoResp.OK:
+                return {"success": True, "percent": pct}
+            elif resp == ProtoResp.ERROR:
+                code = self._read_byte(timeout_s)
+                return {"success": False, "message": f"Error code {code}"}
+            return {"success": False, "message": f"Unexpected response: {resp}"}
+
+    def pump_get(self, timeout_s: float = 3.0) -> dict:
+        """Get current pump speed."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.PUMP_GET)
+            resp = self._read_byte(timeout_s)
+            if resp == ProtoResp.PUMP_STATUS:
+                length = self._read_byte(timeout_s)
+                pct = self._read_byte(timeout_s)
+                return {"success": True, "percent": pct}
+            elif resp == ProtoResp.ERROR:
+                code = self._read_byte(timeout_s)
+                return {"success": False, "message": f"Error code {code}"}
+            return {"success": False, "message": f"Unexpected response: {resp}"}
 
 
 # ============ GUI APPLICATION ============
@@ -1145,6 +1213,42 @@ class App(tk.Tk):
         self.wifi_form_frame = ttk.Frame(right)
         self.wifi_form_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0), padx=(12, 0))
 
+        # ---- Pump Control Section ----
+        pump_frame = ttk.LabelFrame(self.wifi_tab, text="Pump Control")
+        pump_frame.pack(fill=tk.X, pady=(12, 0))
+
+        slider_row = ttk.Frame(pump_frame)
+        slider_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+
+        ttk.Label(slider_row, text="Speed:").pack(side=tk.LEFT)
+        self.pump_pct_var = tk.IntVar(value=0)
+        self.pump_slider = ttk.Scale(
+            slider_row, from_=0, to=100, orient=tk.HORIZONTAL,
+            variable=self.pump_pct_var,
+            command=lambda _: self.pump_label_var.set(f"{int(self.pump_pct_var.get())}%"),
+        )
+        self.pump_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
+        self.pump_label_var = tk.StringVar(value="0%")
+        ttk.Label(slider_row, textvariable=self.pump_label_var, width=5).pack(side=tk.LEFT)
+
+        btn_row = ttk.Frame(pump_frame)
+        btn_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        self.pump_set_btn = ttk.Button(
+            btn_row, text="Set", command=self._pump_set, state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.pump_set_btn.pack(side=tk.LEFT)
+
+        self.pump_off_btn = ttk.Button(
+            btn_row, text="Off", command=self._pump_off, state=tk.DISABLED,
+        )
+        self.pump_off_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.pump_full_btn = ttk.Button(
+            btn_row, text="100%", command=self._pump_full, state=tk.DISABLED,
+        )
+        self.pump_full_btn.pack(side=tk.LEFT, padx=(8, 0))
+
     def _clear_wifi_form(self) -> None:
         """Clear all widgets from the form area."""
         for widget in self.wifi_form_frame.winfo_children():
@@ -1524,6 +1628,21 @@ class App(tk.Tk):
                         self.rtc_time_label.configure(text=self.rtc_current_datetime)
                 elif kind == "busy":
                     self.status_var.set(str(payload))
+                elif kind == "device_status":
+                    msg = str(payload)
+                    if msg.startswith("ERROR"):
+                        self.status_var.set(f"Device error: {msg}")
+                        messagebox.showerror("Device Error", f"The device reported an error at startup:\n\n{msg}")
+                    else:
+                        self.status_var.set(f"Device: {msg}")
+                elif kind == "pump_ok":
+                    self.status_var.set(f"Pump set to {payload}%")
+                elif kind == "pump_done":
+                    self._update_wifi_controls()
+                elif kind == "pump_init":
+                    pct = int(payload)
+                    self.pump_pct_var.set(pct)
+                    self.pump_label_var.set(f"{pct}%")
         except Empty:
             pass
         self._schedule_poll()
@@ -1581,11 +1700,21 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _initial_status_fetch(self) -> None:
-        """Fetch WiFi status and enable controls after COM connect."""
+        """Fetch WiFi status and pump speed after COM connect."""
         def worker() -> None:
+            # First, drain any unsolicited STATUS messages (e.g. boot errors like missing mux)
+            msgs = self.client.drain_status_messages(listen_s=1.5)
+            for m in msgs:
+                self.events.put(("device_status", m))
             try:
                 status = self.client.wifi_get_status(timeout_s=5.0)
                 self.events.put(("wifi_status_ok", status))
+            except Exception:
+                pass
+            try:
+                pump = self.client.pump_get(timeout_s=3.0)
+                if pump.get("success"):
+                    self.events.put(("pump_init", pump["percent"]))
             except Exception:
                 pass
             finally:
@@ -2117,12 +2246,55 @@ class App(tk.Tk):
             threading.Thread(target=worker, daemon=True).start()
 
     def _update_wifi_controls(self) -> None:
-        """Enable/disable WiFi buttons based on connection state and live streaming."""
+        """Enable/disable WiFi and pump buttons based on connection state and live streaming."""
         # Disable WiFi controls during live streaming to avoid interference
         wifi_ok = self.connected and not self.live_running
         self.wifi_scan_btn.configure(state=tk.NORMAL if wifi_ok and not self.wifi_scan_inflight else tk.DISABLED)
         self.wifi_saved_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
         self.wifi_reset_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
+        # Pump controls
+        pump_ok = self.connected and not self.live_running
+        pump_st = tk.NORMAL if pump_ok else tk.DISABLED
+        self.pump_set_btn.configure(state=pump_st)
+        self.pump_off_btn.configure(state=pump_st)
+        self.pump_full_btn.configure(state=pump_st)
+
+    def _pump_set(self) -> None:
+        """Set pump to slider value."""
+        pct = int(self.pump_pct_var.get())
+        self._pump_send(pct)
+
+    def _pump_off(self) -> None:
+        """Turn pump off."""
+        self.pump_pct_var.set(0)
+        self.pump_label_var.set("0%")
+        self._pump_send(0)
+
+    def _pump_full(self) -> None:
+        """Set pump to 100%."""
+        self.pump_pct_var.set(100)
+        self.pump_label_var.set("100%")
+        self._pump_send(100)
+
+    def _pump_send(self, pct: int) -> None:
+        """Send pump speed command in background thread."""
+        self.pump_set_btn.configure(state=tk.DISABLED)
+        self.pump_off_btn.configure(state=tk.DISABLED)
+        self.pump_full_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                result = self.client.pump_set(pct, timeout_s=3.0)
+                if result.get("success"):
+                    self.events.put(("pump_ok", pct))
+                else:
+                    self.events.put(("error", result.get("message", "Pump set failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("pump_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _update_wifi_top_bar(self) -> None:
         """Update WiFi status display in top bar with WiFi strength icons."""

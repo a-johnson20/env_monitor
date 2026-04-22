@@ -7,6 +7,7 @@
 #include <math.h>
 #include <time.h>
 #include <driver/ledc.h>   // ESP-IDF LEDC driver
+#include <Preferences.h>
 #include <array>
 
 #include "app/boot_read.hpp"
@@ -147,6 +148,7 @@ uint8_t crc8(const uint8_t* data, int len) {
 // ---------- Pump helpers ----------
 
 float pump_percent = 0.0f;      // current setting (0..100)
+static Preferences pump_prefs;
 
 // Init PWM on GPIO21
 static void pump_begin() {
@@ -167,13 +169,13 @@ static void pump_begin() {
   ccfg.duty           = 0;        // start off
   ccfg.hpoint         = 0;
 #if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
-  ccfg.flags.output_invert = 0;   // set to 1 if your buffer inverts
+  ccfg.flags.output_invert = 1;   // inverted: high duty = pump off
 #endif
   ledc_channel_config(&ccfg);
 }
 
-// Set duty as percent (0..100)
-static void pump_set_percent(float pct) {
+// Set duty as percent (0..100)  — non-static so serial_menu can call it
+void pump_set_percent(float pct) {
   if (pct < 0) pct = 0; if (pct > 100) pct = 100;
   const uint32_t maxDuty = (1u << LEDC_TIMER_12_BIT) - 1;
   uint32_t duty = (uint32_t)((pct / 100.0f) * maxDuty + 0.5f);
@@ -183,6 +185,10 @@ static void pump_set_percent(float pct) {
 
 static inline void pump_off() { pump_set_percent(0); }
 static inline void pump_on()  { pump_set_percent(100); }
+
+void pump_save_percent(float pct) {
+  pump_prefs.putFloat("pct", pct);
+}
 
 // ---------- RTC helpers ----------
 
@@ -425,6 +431,11 @@ namespace {
 }
 
 void setup() {
+  // Enable sensor LDOs immediately — must be first to guarantee power before any I2C init
+  pinMode(LDO_Sensors_EN, OUTPUT);
+  digitalWrite(LDO_Sensors_EN, HIGH);
+  delay(50); // allow LDO output to stabilise before I2C traffic
+
   Serial.begin(115200);
   delay(100); // brief USB settle; won't affect binary protocol sync
   ui::proto::write_message(0x02, "Serial open");
@@ -434,9 +445,6 @@ void setup() {
 
   wifi::begin();
   ui::begin();
-
-  pinMode(LDO_Sensors_EN, OUTPUT);
-  digitalWrite(LDO_Sensors_EN, HIGH); // power sensors
 
   // Initialize TCA9548A mux
   hal::Mux::init(TCA_RESET);
@@ -471,8 +479,10 @@ void setup() {
 
   // Mux present?
   if (!hal::Mux::probe(Wire)) {
-    ui::proto::write_message(0x02, "ERROR: TCA9548A not found at 0x70!");
-    while (1) delay(1000);
+    while (1) {
+      ui::proto::write_message(0x02, "ERROR: TCA9548A not found at 0x70!");
+      delay(2000);
+    }
   }
   ui::proto::write_message(0x02, "TCA9548A connected");
 
@@ -514,7 +524,9 @@ void setup() {
   }
 
   pump_begin();
-  pump_set_percent(1);  // start at 50% (pick what you want)
+  pump_prefs.begin("pump", false);
+  pump_percent = pump_prefs.getFloat("pct", 0.0f);
+  pump_set_percent(pump_percent);
 
   // SHORT delay to let devices settle
   delay(1000);
@@ -538,7 +550,7 @@ void loop() {
   // This ensures the GUI always has a fresh header, even if it connects after startup
   static uint32_t last_header_sent_ms = 0;
   uint32_t now = millis();
-  if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0)) {
+  if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
     ui::proto::write_message(0x20, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
     last_header_sent_ms = now;
   }

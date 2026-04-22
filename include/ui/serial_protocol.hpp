@@ -21,6 +21,8 @@ enum class Cmd : uint8_t {
   WIFI_FORGET     = 0x19,  // Forget network by index
   WIFI_STATUS     = 0x1A,  // Get WiFi status
   WIFI_CONNECT_SAVED = 0x20, // Connect to saved network by SSID
+  PUMP_SET        = 0x21,  // Set pump speed (followed by uint8_t percent)
+  PUMP_GET        = 0x22,  // Get current pump speed
   LOG_MENU        = 0x1B,  // Enter log export menu
   LOG_LIST        = 0x1C,  // List log files
   LOG_GET         = 0x1D,  // Get log file (followed by uint8_t index)
@@ -45,6 +47,7 @@ enum class RespType : uint8_t {
   LOG_END         = 0x16,  // Log file transfer end
   LIVE_DATA       = 0x20,  // Live sensor data (binary encoded)
   RTC_RESPONSE    = 0x21,  // RTC time response
+  PUMP_STATUS     = 0x22,  // Pump speed response (followed by uint8_t percent)
   
   // Prompts
   PROMPT_STRING   = 0x30,  // Request string input (followed by length + prompt_text)
