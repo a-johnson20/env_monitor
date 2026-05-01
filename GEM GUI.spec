@@ -6,7 +6,7 @@ datas += collect_data_files('ttkbootstrap')
 
 
 a = Analysis(
-    ['scripts\\env_monitor_gui.py'],
+    ['gui\\env_monitor_gui.py'],
     pathex=[],
     binaries=[],
     datas=datas,

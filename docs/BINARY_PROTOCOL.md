@@ -120,14 +120,14 @@ Some commands require multiple values. They're sent sequentially:
 
 ### GUI Side
 
-1. **scripts/env_monitor_gui.py** (COMPLETELY REPLACED)
+1. **gui/env_monitor_gui.py** (COMPLETELY REPLACED)
    - New binary protocol client implementation
    - Binary command sending methods
    - Binary response parsing
    - All operations updated for binary protocol
    - Maintained same UI/UX
 
-2. **scripts/env_monitor_gui.py.bak**
+2. **gui/env_monitor_gui.py.bak**
    - Backup of original text-based GUI
 
 ## Usage Notes

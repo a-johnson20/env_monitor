@@ -79,7 +79,7 @@ python env_monitor_gui.py
 - Ensure Python 3.7+ is installed
 - Install required packages: `pip install pyserial`
 - Check for errors in console output
-- Try running from project root: `python scripts/env_monitor_gui.py`
+- Try running from project root: `python gui/env_monitor_gui.py`
 
 ## Protocol Details (For Developers)
 
@@ -111,7 +111,7 @@ See `BINARY_PROTOCOL.md` for:
 ## Key Files
 
 ```
-scripts/env_monitor_gui.py          - Main GUI application
+gui/env_monitor_gui.py              - Main GUI application
 include/ui/serial_protocol.hpp      - Protocol definitions
 src/ui/serial_protocol.cpp          - Protocol helpers
 src/ui/serial_menu.cpp              - Device-side protocol handler
@@ -123,7 +123,7 @@ SERIAL_OPTIMIZATION.md              - Project completion summary
 
 The original text-based GUI is preserved as:
 ```
-scripts/env_monitor_gui.py.bak
+gui/env_monitor_gui.py.bak
 ```
 
 If you need to revert to the old protocol:

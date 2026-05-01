@@ -29,7 +29,7 @@ The serial communication protocol for the env_monitor project has been completel
 ### 2. GUI Application
 
 **File Modified:**
-- `scripts/env_monitor_gui.py` - Completely replaced with binary protocol version
+- `gui/env_monitor_gui.py` - Completely replaced with binary protocol version
   - Original backed up as `env_monitor_gui.py.bak`
   - Maintains identical user interface
   - All serial communication now uses binary protocol
@@ -118,8 +118,8 @@ src/app/main.cpp                        (MODIFIED - Added 1 function)
 
 ### GUI & Documentation
 ```
-scripts/env_monitor_gui.py              (MODIFIED - Completely replaced)
-scripts/env_monitor_gui.py.bak          (NEW - Backup of original)
+gui/env_monitor_gui.py                  (MODIFIED - Completely replaced)
+gui/env_monitor_gui.py.bak              (NEW - Backup of original)
 BINARY_PROTOCOL.md                      (NEW - Protocol specification)
 SERIAL_OPTIMIZATION.md                  (THIS FILE)
 ```
@@ -146,7 +146,7 @@ SERIAL_OPTIMIZATION.md                  (THIS FILE)
 
 2. **Run updated GUI**:
    ```
-   python scripts/env_monitor_gui.py
+   python gui/env_monitor_gui.py
    ```
 
 3. **Connect to device**:

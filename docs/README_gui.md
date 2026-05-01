@@ -4,13 +4,13 @@
 
 ```powershell
 python -m pip install pyserial ttkbootstrap
-python scripts/env_monitor_gui.py
+python gui/env_monitor_gui.py
 ```
 
 ## Build portable EXE (Windows)
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File scripts/build_gui_exe.ps1
+powershell -ExecutionPolicy Bypass -File gui/build_gui_exe.ps1
 ```
 
 Output:

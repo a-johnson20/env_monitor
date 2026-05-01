@@ -5,9 +5,9 @@ Download a log file from the device's serial menu and save it as CSV.
 Requires: pyserial
 
 Examples:
-  python scripts/download_csv.py --port COM4 --index 1
-  python scripts/download_csv.py --port COM4 --name 2026-03-04.csv
-  python scripts/download_csv.py --port COM4 --list
+  python gui/download_csv.py --port COM4 --index 1
+  python gui/download_csv.py --port COM4 --name 2026-03-04.csv
+  python gui/download_csv.py --port COM4 --list
 """
 
 from __future__ import annotations
