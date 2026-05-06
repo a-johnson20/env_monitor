@@ -57,7 +57,7 @@ static bool syncFromNtp() {
   // ESP32 Arduino overload: (gmtOffsetSec, dstOffsetSec, s1, s2, s3)
   configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
 
-  const uint32_t deadline = millis() + 15000;   // ~15s budget
+  const uint32_t deadline = millis() + 5000;   // 5s budget (keep well under GUI 15s scan timeout)
   time_t now = 0;
   struct tm utc_tm{};
   bool got = false;

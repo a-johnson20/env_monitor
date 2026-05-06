@@ -413,7 +413,9 @@ class SerialMenuClient:
         """Scan WiFi networks"""
         if not self.is_open:
             raise RuntimeError("Serial port not open")
-        
+        if self.live_thread is not None and self.live_thread.is_alive():
+            raise RuntimeError("Stop live stream before scanning WiFi")
+
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
@@ -2549,6 +2551,12 @@ class App(tk.Tk):
         """Called periodically to poll WiFi status."""
         if not self.connected or self.wifi_poll_inflight:
             # Reschedule for next check
+            self.wifi_poll_timer = self.after(5000, self._wifi_poll_tick)
+            return
+
+        # Don't send serial commands while live stream is running — they race
+        # with _live_loop reads and corrupt framing (same as _rtc_poll_tick).
+        if self.live_running:
             self.wifi_poll_timer = self.after(5000, self._wifi_poll_tick)
             return
 
