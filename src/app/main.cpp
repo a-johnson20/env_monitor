@@ -21,6 +21,7 @@
 #include "app/rtc_sync.hpp"
 #include "common/tgs_lookup_tables.hpp"
 #include "common/calib/tgs_calibration.hpp"
+#include "common/sensors/platinum_n2o_uart.hpp"
 #include "ui/serial_menu.hpp"
 #include "ui/serial_protocol.hpp"
 #include "net/wifi_manager.hpp"
@@ -49,8 +50,16 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define LDO_Sensors_EN  41
 #define TCA_RESET       3
 
-// ---------- Pump PWM (GPIO21) ----------
-#define PUMP_PWM_PIN     21
+// ---------- UART1 (Platinum N2O) ----------
+// Board pin 21 = GPIO17 (RX), board pin 22 = GPIO18 (TX).
+// Arduino Serial1.begin() takes GPIO numbers, not physical board pin numbers.
+#define UART1_RX_PIN      17   // GPIO17 — board pin 21 — sensor TX
+#define UART1_TX_PIN      18   // GPIO18 — board pin 22 — sensor RX
+#define UART1_BAUD        38400
+
+// ---------- Pump PWM ----------
+// Moved away from pin 21 to avoid conflict with UART1 RX/TX mapping.
+#define PUMP_PWM_PIN     42
 #define PUMP_PWM_FREQ    1000              // Hz
 #define PUMP_PWM_RES     LEDC_TIMER_12_BIT // 12-bit
 #define PUMP_LEDC_MODE   LEDC_LOW_SPEED_MODE
@@ -126,6 +135,10 @@ std::array<RunningAvg, N_TGS2611> win_tgs2611_raw{};
 std::array<RunningAvg, N_TGS2611> win_tgs2611_v{};
 std::array<RunningAvg, N_TGS2616> win_tgs2616_raw{};
 std::array<RunningAvg, N_TGS2616> win_tgs2616_v{};
+RunningAvg win_n2o_ppm{};
+
+sensors::PlatinumN2oUart n2o_uart;
+sensors::PlatinumN2oReading n2o_reading;
 
 // --- SCD4x sync for aligned commits ---
 static const unsigned long SCD4X_SYNC_TIMEOUT_MS = 10000; // 10s fallback
@@ -267,6 +280,8 @@ static void reset_windows_and_flags() {
   for (auto &w : win_tgs2616_raw) w.reset();
   for (auto &w : win_tgs2616_v)   w.reset();
 
+  win_n2o_ppm.reset();
+
   for (size_t k = 0; k < N_SCD4X; ++k) scd4x_fresh[k] = false;
 }
 
@@ -309,6 +324,10 @@ static void commit_and_reset_all_windows() {
     line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
   }
 
+  // Platinum N2O UART average over the current commit window.
+  line += ',';
+  line += (win_n2o_ppm.count ? String(win_n2o_ppm.mean(), 2) : "NA");
+
   // Send live CSV data only when GUI has started live streaming
   if (ui::live_stream_enabled()) {
     ui::proto::write_message(0x20, line);
@@ -317,7 +336,7 @@ static void commit_and_reset_all_windows() {
   // Only SD work is gated
   if (sd_logger::is_mounted() && !sd_logger::paused()) {
     const String path = logfmt::current_log_path(rtc_present, rtc);
-    sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
+    sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true));
     sd_logger::append_line(path, line);
   }
 
@@ -440,6 +459,9 @@ void setup() {
   delay(100); // brief USB settle; won't affect binary protocol sync
   ui::proto::write_message(0x02, "Serial open");
 
+  n2o_uart.begin(Serial1, UART1_RX_PIN, UART1_TX_PIN, UART1_BAUD, SERIAL_8N1);
+  ui::proto::write_message(0x02, "N2O UART1 init: RX=GPIO17(pin21), TX=GPIO18(pin22)");
+
   // triggered re‑enumeration; doing it here once avoids the disconnect.
 
 
@@ -551,7 +573,7 @@ void loop() {
   static uint32_t last_header_sent_ms = 0;
   uint32_t now = millis();
   if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
-    ui::proto::write_message(0x20, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616));
+    ui::proto::write_message(0x20, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true));
     last_header_sent_ms = now;
   }
 
@@ -652,6 +674,13 @@ void loop() {
       default:
         advance_to_next_page();
         break;
+    }
+  }
+
+  // --------- Platinum N2O UART ---------
+  {
+    if (n2o_uart.poll(n2o_reading) && n2o_reading.valid) {
+      win_n2o_ppm.add(n2o_reading.ppm);
     }
   }
 

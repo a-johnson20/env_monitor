@@ -1,0 +1,1121 @@
+<!DOCTYPE HTML>
+<html lang="en">
+
+	<head>
+		
+<!-- Start Microsoft Clarity -->
+<script type="text/javascript">
+    (function(c,l,a,r,i,t,y){
+        c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
+        t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
+        y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
+	})(window, document, "clarity", "script", "orai4x1rfd");
+</script>
+<!-- End -->
+
+
+<!-- Start UserCentrics Google Tag Manager -->
+<script type="text/javascript">
+	// create dataLayer
+	window.dataLayer = window.dataLayer || [];
+	function gtag() {
+		dataLayer.push(arguments);
+	}
+	
+	// set „denied" as default for both ad and analytics storage, as well as ad_user_data and ad_personalization,
+	gtag("consent", "default", {
+		ad_user_data: "denied",
+		ad_personalization: "denied",
+		ad_storage: "denied",
+		analytics_storage: "denied",
+		wait_for_update: 2000 // milliseconds to wait for update
+	});
+	
+	// Enable ads data redaction by default [optional]
+	gtag("set", "ads_data_redaction", true);
+</script>
+
+<script type="text/javascript">
+	// Google Tag Manager
+	(function(w, d, s, l, i) {
+		w[l] = w[l] || [];
+		w[l].push({
+			'gtm.start': new Date().getTime(),
+			event: 'gtm.js'
+		});
+		var f = d.getElementsByTagName(s)[0],
+		j = d.createElement(s),
+		dl = l != 'dataLayer' ? '&l=' + l : '';
+		j.async = true;
+		j.src =
+		'https://www.googletagmanager.com/gtm.js?id=' + i + dl;
+		f.parentNode.insertBefore(j, f);
+	})(window, document, 'script', 'dataLayer', 'GTM-TGVZ8MB'); //replace GTM-XXXXXX with Google Tag Manager ID
+</script>
+<!-- End UserCentrics Google Tag Manager -->
+
+<!-- S - ZoomInfo -->
+<script>
+	window[(function(_dse,_VV){var _YG='';for(var _Rv=0;_Rv<_dse.length;_Rv++){_VV>1;_Lh!=_Rv;var _Lh=_dse[_Rv].charCodeAt();_YG==_YG;_Lh-=_VV;_Lh+=61;_Lh%=94;_Lh+=33;_YG+=String.fromCharCode(_Lh)}return _YG})(atob('fm10ODUwKyk6bys/'), 36)] = '7c1cec05971679995016';     var zi = document.createElement('script');     (zi.type = 'text/javascript'),     (zi.async = true),     (zi.src = (function(_qe2,_QA){var _lA='';for(var _uZ=0;_uZ<_qe2.length;_uZ++){var _pG=_qe2[_uZ].charCodeAt();_pG-=_QA;_pG+=61;_QA>1;_pG!=_uZ;_lA==_lA;_pG%=94;_pG+=33;_lA+=String.fromCharCode(_pG)}return _lA})(atob('IS0tKSxRRkYjLEUzIkQseisiKS0sRXooJkYzIkQteH5FIyw='), 23)),     document.readyState === 'complete'?document.body.appendChild(zi):     window.addEventListener('load', function(){         document.body.appendChild(zi)     });
+</script>
+<!-- E - ZoomInfo -->
+
+<!--Dynamic Search-->
+
+<script src="https://code.jquery.com/jquery-3.5.1.min.js"></script>
+
+<script>
+	$(document).ready(function(){
+		$('.search-boxDS input[type="text"]').on("keyup input", function(){
+			/* Get input value on change */
+			var inputVal = $(this).val();
+			var resultDropdown = $(this).siblings(".resultDS");
+			if(inputVal.length){
+				$.get("/en-us/search/dynamic-search.php", {term: inputVal}).done(function(data){
+					// Display the returned data in browser
+					resultDropdown.html(data);
+				});
+				} else{
+				resultDropdown.empty();
+			}
+		});
+		
+		// Set search input value on click of result item
+		$(document).on("click", ".resultDS P", function(){
+			$(this).parents(".search-boxDS").find('input[type="text"]').val($(this).text());
+			$(this).parent(".resultDS").empty();
+			document.searchHead.submit();
+		});
+	});
+</script>	
+ 
+	
+
+
+
+	    <!--META DATA-->
+		<meta charset="utf-8">
+		<meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
+		<meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+		<meta http-equiv="X-UA-Compatible" content="IE=edge">
+				
+		<title>404 - Page not found</title>
+		<!--CANONICAL-->
+		<link rel="canonical">
+		<!--- filter --->
+		<script src="/includes/js/jquery-1.10.2.min.js"></script>
+		<script src="/includes/js/jquery-ui.js"></script>
+		<!--Style Sheets-->
+		<link rel="stylesheet" href="/includes/css/bootstrap.min.css">
+		<link rel="stylesheet" href="/includes/css/custom.css">
+		<link rel="stylesheet" href="/includes/flag-icon-css/css/flag-icon.min.css">
+		<!---Lato font--->
+		<link href="https://fonts.googleapis.com/css2?family=Lato:ital,wght@0,400;0,700;0,900;1,300&display=swap" rel="stylesheet">
+		<!--FAVICON-->
+		<link rel="shortcut icon" type="image/jpg" href="/includes/img/PSTfavicon.ico"/>
+
+	</head>
+	<body>
+	
+
+		<!--- NAV --->
+		
+		
+
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+
+<!--<script id="usercentrics-cmp" data-language="language_code" src="https://app.usercentrics.eu/browser-ui/latest/loader.js" data-settings-id="D8qz5vq4jBMdY2" async></script>-->
+
+<script id="usercentrics-cmp" src="https://app.usercentrics.eu/browser-ui/latest/bundle.js" data-settings-id="D8qz5vq4jBMdY2" async></script>
+
+<!-- Google Tag Manager (noscript) -->
+<noscript><iframe src="https://www.googletagmanager.com/ns.html?id=GTM-TGVZ8MB"
+height="0" width="0" style="display:none;visibility:hidden"></iframe></noscript>
+<!-- End Google Tag Manager (noscript) -->
+
+<!------Dealfornt------>
+
+<script> (function(ss,ex){ window.ldfdr=window.ldfdr||function(){(ldfdr._q=ldfdr._q||[]).push([].slice.call(arguments));}; (function(d,s){ fs=d.getElementsByTagName(s)[0]; function ce(src){ var cs=d.createElement(s); cs.src=src; cs.async=1; fs.parentNode.insertBefore(cs,fs); }; ce('https://sc.lfeeder.com/lftracker_v1_'+ss+(ex?'_'+ex:'')+'.js'); })(document,'script'); })('YEgkB8leqv17ep3Z'); </script>
+
+<!------Dealfornt------>
+
+
+<!-- Clarity tracking code for https://www.processsensing.com/ --->
+
+<script type="text/javascript">
+    (function(c,l,a,r,i,t,y){
+        c[a]=c[a]||function(){(c[a].q=c[a].q||[]).push(arguments)};
+        t=l.createElement(r);t.async=1;t.src="https://www.clarity.ms/tag/"+i;
+        y=l.getElementsByTagName(r)[0];y.parentNode.insertBefore(t,y);
+    })(window, document, "clarity", "script", "rxamde9dz0");
+</script>
+
+<!-- End Clarity tracking code for https://www.processsensing.com/ --->
+
+<!--OLD COOKIE-->
+<!--<link rel="stylesheet" type="text/css" href="//cdnjs.cloudflare.com/ajax/libs/cookieconsent2/3.1.0/cookieconsent.min.css" />-->
+<!--<script src="//cdnjs.cloudflare.com/ajax/libs/cookieconsent2/3.1.0/cookieconsent.min.js"></script>-->
+<!--<script>
+	window.addEventListener("load", function(){
+	window.cookieconsent.initialise({
+	"palette": {
+	"popup": {
+	"background": "#ed1c24"
+	},
+	"button": {
+	"background": "#fff",
+	"text": "#237afc"
+	}
+	},
+	"content": {
+	"href": "/en-us/privacy/"
+	}
+	})});
+	</script>
+	<script>
+	window.addEventListener("load", function(){
+	window.cookieconsent.initialise({
+	"palette": {
+	"popup": {
+	"background": "#ed1c24"
+	},
+	"button": {
+	"background": "#fff",
+	"text": "#237afc"
+	}
+	},
+	"content": {
+	"href": "/en-us/privacy/"
+	}
+	})});
+</script> -->
+
+
+<!--- dynamics365 marketing tracking -->
+<div id="ddsjkrooUiHfqTrW5dgCtDbcbttx2YHRRkDL6kuKoeJ8"></div><script src="https://mktdplp102cdn.azureedge.net/public/latest/js/ws-tracking.js?v=1.71.2017.0"></script><div class="d365-mkt-config" data-ignore-prevent-default="true" style="display:none" data-website-id="dsjkrooUiHfqTrW5dgCtDbcbttx2YHRRkDL6kuKoeJ8" data-hostname="cb4a982ac84f45f890a47008f1050ce6.svc.dynamics.com"> </div>
+
+<!-----dynamics 365 web tracking for marketing--->
+<script>
+                (function (a, t, i) { var e = "MSCI"; var s = "Analytics"; var o = e + "queue"; a[o] = a[o] || []; var r = a[e] || function (n) { var t = {}; t[s] = {}; function e(e) { while (e.length) { var r = e.pop(); t[s][r] = function (e) { return function () { a[o].push([e, n, arguments]) } }(r) } } var r = "track"; var i = "set"; e([r + "Event", r + "View", r + "Action", i + "Config", i + "Property", i + "User", "initialize", "teardown"]); return t }(i.name); var n = i.name; if (!a[e]) { a[n] = r[s]; a[o].push(["new", n]); setTimeout(function () { var e = "script"; var r = t.createElement(e); r.async = 1; r.src = i.src; var n = t.getElementsByTagName(e)[0]; n.parentNode.insertBefore(r, n) }, 1) } else { a[n] = new r[s] } if (i.user) { a[n].setUser(i.user) } if (i.props) { for (var c in i.props) { a[n].setProperty(c, i.props[c]) } } a[n].initialize(i.cfg) })(window, document, {
+ 
+                    src: "https://cxppgbr1rdrect01sa02cdn.blob.core.windows.net/webtracking/WebTracking/WebTracking.bundle.js",
+                    name: "MSCI",
+                    cfg: {
+ 
+                        ingestionKey: "c9f3eed6b5f64bcd8576f00a43c88093-766dd500-24e8-4433-bb23-065194e3f4dc-7500",
+                        endpointUrl: "https://mobile.events.data.microsoft.com/OneCollector/1.0/",
+                        autoCapture: {
+                            view: true,
+                            click: true
+                        },
+                        orgInfo: {
+                            orgId: "f4c9a8ee-cfb7-4a69-9f63-d805ff212537",
+                            orgTenantId: "eb705521-d712-46b8-b16e-389d1bc6bf28",
+                            orgGeo: "GBR"
+                        }
+                    }
+                });
+</script>
+
+<!-----Google Campagin ID cookie--->
+<script>
+(function() {
+  const keyword = "campaignid";
+  const currentUrl = window.location.href;
+
+  if (currentUrl.toLowerCase().includes(keyword)) {
+    const cookieName = "campain_url";
+    const expiryDays = 120; // Set cookie to expire in 120 days
+
+    const date = new Date();
+    date.setTime(date.getTime() + (expiryDays * 24 * 60 * 60 * 1000)); // 120 days in ms
+    const expires = "expires=" + date.toUTCString();
+
+    document.cookie = `${cookieName}=${encodeURIComponent(currentUrl)}; ${expires}; path=/`;
+  }
+})();
+</script>
+<!-----End Google Campagin ID cookie--->
+
+
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=AW-1035893331">
+</script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'AW-1035893331');
+</script>
+
+
+<!--<script id="usercentrics-cmp" src="https://app.usercentrics.eu/browser-ui/latest/loader.js" data-settings-id="D8qz5vq4jBMdY2" async></script>-->
+
+
+<!--<script type="text/javascript">
+	function googleTranslateElementInit() {
+	new google.translate.TranslateElement({pageLanguage: 'en', layout: google.translate.TranslateElement.InlineLayout.SIMPLE}, 'google_translate_element');
+	}
+	</script>
+	<script> 
+	var $buoop = {required:{e:-4,f:-3,o:-3,s:-1,c:-3},insecure:true,unsupported:true,api:2021.02,shift_page_down:true,reminder:0,reminderClosed:0,text_for_i:"{brow_name}, is out of date and is not compatible with our website, we reccomend you: <a{up_but}>update to a newer browser</a> for the best experience."}; 
+	function $buo_f(){ 
+	var e = document.createElement("script"); 
+	e.src = "//browser-update.org/update.min.js"; 
+	document.body.appendChild(e);
+	};
+	try {document.addEventListener("DOMContentLoaded", $buo_f,false)}
+	catch(e){window.attachEvent("onload", $buo_f)}
+	
+	</script>
+<script type="text/javascript" src="//translate.google.com/translate_a/element.js?cb=googleTranslateElementInit"></script>-->
+
+
+<div class="rd-navbar-wrap">
+	<nav data-layout="rd-navbar-fixed" data-sm-layout="rd-navbar-static" data-md-device-layout="rd-navbar-fixed" data-lg-layout="rd-navbar-static" data-lg-device-layout="rd-navbar-static" data-sm-stick-up-offset="50px" data-lg-stick-up-offset="150px" class="rd-navbar">
+		
+		
+		<div class="rd-navbar-panel">
+			
+			<div class="rd-navbar-inner toggle-original-elements">
+				<div class="rd-navbar-panel-canvas"></div>
+				<button class="rd-navbar-toggle" data-rd-navbar-toggle=".rd-navbar-nav-wrap" aria-label="Panel"><span></span></button>
+				
+				<ul class="rd-navbar-collapse my-auto">
+					
+					<li>
+						<a href="/en-us/brands/">Brands</a>
+					</li>
+					<li>
+						<a href="/en-us/contact/?utm_source=header&utm_medium=link">Contact</a>
+					</li>
+					
+					<li>
+						<a href="/en-us/blog">Blog</a>
+					</li>
+					
+					</ul>
+				<div class="rd-navbar-brand">
+					<div class="logo-show 	d-block d-sm-none">
+						<a href="/en-us/" class=" navbar-brand-mob" aria-label="Home">
+								<img src="/includes/logo/DO-logo-282x35.png" alt="DwyerOmega Logo" class="brand-mob" width="282" style=" max-width: 250%;">
+							<!--<img src="/includes/logo/pst_logo.png" alt="PST Logo" class="brand-mob">-->
+						</a>
+					</div>
+					
+					<div class="col-sm my-auto" style="display: flex; align-items: center;">
+						<div class="dropdown d-none d-lg-block mx-auto">
+							<button onclick="myFunction()" class="dropbtn">Change Language</button>
+							<div id="myDropdown" class="dropdown-content">
+								<a class="dropdown-item" href="https://www.processsensing.cn">Chinese (中文)</a>
+  								<a class="dropdown-item" href="https://www.processsensing.com/nl-nl/">Dutch (Nederlands)</a>
+ 								<a class="dropdown-item" href="https://www.processsensing.com/en-us/">English (English)</a>
+								<a class="dropdown-item" href="https://www.processsensing.com/fr-fr/">French (Français)</a>
+								<a class="dropdown-item" href="https://www.processsensing.com/de-de/">German (Deutsch)</a>
+								<a class="dropdown-item" href="https://www.processsensing.com/it-it/">Italian (Italiano)</a>
+								<a class="dropdown-item" href="https://www.processsensing.com/pt-br/">Portuguese (Português)</a>
+								<a class="dropdown-item" href="https://www.processsensing.com/es-es/">Spanish (Español)</a>
+							</div>
+						</div>
+					<p style="color: white; font-size: 0.9em; padding-top: 15px; padding-left: 15px">For select products, you’ll be redirected to dwyeromega.com.</p>						
+					</div>
+					
+					
+					
+				</div>
+			</div>
+		</div>
+		<div class="rd-navbar-outer">
+			<div class="rd-navbar-inner toggle-original-elements">
+				<div class="rd-navbar-subpanel">
+					<div class="rd-navbar-nav-wrap">
+						<ul class="rd-navbar-nav my-auto" >
+							<a href="/en-us/" class=" navbar-brand brand-name" aria-label="Home">
+							<img src="/includes/logo/DO-logo-282x35.png" alt="DwyerOmega Logo" class="brand">
+							<!--	<img src="/includes/logo/pst_logo.png" alt="PST Logo" class="brand">-->
+							</a>
+							
+							
+						<!------<li>
+								<a class="nav-title">Sensors</a>
+								<ul class="rd-navbar-dropdown">
+									<li>
+										<a href="/en-us/industrial-safety-sensors/carbon-dioxide-sensors/">Carbon Dioxide</a>
+									</li> 
+									<li>
+										<a href="/en-us/industrial-safety-sensors/humidity-sensors/">Humidity</a>
+									</li>									
+									<li>
+										<a href="/en-us/industrial-safety-sensors/hydrocarbon-gas-sensors/">Hydrocarbons</a>
+									</li>
+									<li>
+										<a href="/en-us/level-sensors/">Liquid Level</a>
+									</li>	
+									<li>
+										<a href="/en-us/industrial-safety-sensors/hydrocarbon-gas-sensors/">Methane</a>
+									</li>									
+									<li>
+										<a href="/en-us/industrial-safety-sensors/nitrous-oxide-sensors/">Nitrous Oxide</a>
+									</li>
+									<li>
+										<a href="/en-us/industrial-oxygen-sensors/" class="nav-title-sub">Oxygen</a>
+										<ul class="rd-navbar-dropdown">
+											<li>
+												<a href='/en-us/industrial-oxygen-sensors/optical-oxygen-sensors/'>Optical Sensors</a>
+											</li>
+											<li>
+												<a href='/en-us/industrial-oxygen-sensors/galvanic-electrochemical-sensors/'>Galvanic Electrochemical</a>
+												
+											</li>
+											
+											<li>
+												<a href='/en-us/industrial-oxygen-sensors/oxygen-sensor-gas-compatibility/'>Oxygen Sensor Gas Compatibility</a>
+												
+											</li>
+											<li>
+												<a href='/en-us/industrial-oxygen-sensors/zirconia-sensors/'>Zirconia Sensors</a>
+											</li>
+											<li>
+												<a href='/en-us/industrial-oxygen-sensors/replacement-sensors/'>Replacement Oxygen for Industrial</a>
+											</li>
+											<li>
+												<a href='/en-us/medical-and-diving/medical-sensors/'>Medical Sensors</a>
+											</li>
+											<li>
+												<a href='/en-us/medical-and-diving/diving-sensors/'>Diving Sensors</a>
+											</li>											
+											
+										</ul>
+									</li>
+									<li>
+										<a href="/en-us/industrial-safety-sensors/hydrocarbon-gas-sensors/">Propane</a>
+									</li>
+									<li>
+										<a href="/en-us/industrial-safety-sensors/refrigerant-gas-sensors/">Refrigerant Gases</a>
+									</li>
+									
+									
+									
+								</ul>
+							</li>	----->
+							
+							
+
+
+							
+							<li>
+								<a  class="nav-title">Products</a>
+								<ul class="rd-navbar-dropdown">
+									<li>
+										<a href="/en-us/dewpoint/">Dew Point and Moisture</a>
+									</li>
+									<li>
+										<a href="/en-us/humidity/">Humidity & Temperature</a>
+									</li>
+									
+									<li>
+										<a href="/en-us/water-activity/">Water Activity</a>
+									</li>
+									<li>
+										<a href="/en-us/oxygen/">Oxygen</a>
+									</li>
+									<li>
+										<a href="/en-us/trace-impurities/">Trace Impurities</a>
+									</li>
+									
+									<li>
+										<a href="/en-us/flow-level/">Flow & Level</a>
+									</li>
+									
+									
+									<li>
+										<a href="/en-us/co2-and-pressure/">CO2 & Pressure</a>
+									</li>
+									<li>
+										<a href="/en-us/h2-binary-toxic-flammable-gases/"> Hydrogen, Binary, Toxic & Flammable Gases</a>
+									</li>
+									<li>
+										<a href="/en-us/temperature/">Temperature</a>
+									</li>
+									<!-- <li>
+										<a href="/en-us/refrigerant-gas/">Refrigerant Gas</a>
+									</li> -->
+									
+									<li>
+										<a href="/en-us/aerospace/">Aerospace Products</a>
+									</li>
+									
+									<li>
+										<a href="/en-us/rms/">Real-Time Monitoring Solutions</a>
+									</li>
+								</ul>
+							</li>
+							
+							
+							
+							<li>
+								<a class="nav-title">Monitoring</a>
+								<ul class="rd-navbar-dropdown">
+									<li>
+										<a href="/en-us/rms/">DwyerOmega Monitoring Overview</a>
+									</li>
+									<li>
+										<a href="/en-us/rms/system-overview/">Rotronic Monitoring</a>
+									</li>
+									<li>
+										<a href="https://www.sensoscientific.com/" target="new">SensoScientific Monitoring</a>
+									</li>
+									<li>
+										<a href="https://isensix.com/guardian/" target="new">Isensix Monitoring</a>
+									</li>
+									
+									
+									
+									<li>
+										<a href="https://rms.rotronic.com/RMS/Login.aspx?_ga=2.242193282.1214161972.1664175806-405771331.1658741556" target="new">Rotronic Login/Register</a>
+									</li>								
+									
+									
+								</ul>
+							</li>
+							
+							
+							
+							
+							<li>
+								<a class="nav-title" href="/en-us/services">Services</a>
+								<ul class="rd-navbar-dropdown">
+									<li>
+										<a href="/en-us/services/calibration/" class="nav-title-sub">Calibration</a>
+										<ul class="rd-navbar-dropdown">
+											
+											<li>
+												<a href='/en-us/services/calibration/dewpoint-calibration/'>Dew Point</a>
+											</li>
+											
+											<li>
+												<a href='/en-us/services/calibration/rh-calibration/'>Relative Humidity</a>
+											</li>
+											<li>
+												<a href='/en-us/services/calibration/onsite-humidity/'>On-site</a>
+											</li>
+											<li>
+												<a href='/en-us/services/calibration/gas-testing-calibration/'>Gas Testing Calibration</a>
+											</li>
+										</ul>
+									</li>
+									
+									<li>
+										<a href="/en-us/services/engineering-services/" class="nav-title-sub">Engineering Services</a>
+										<ul class="rd-navbar-dropdown">
+											<li>
+												<a href='/en-us/services/engineering-services/system-engineering/'>System Engineering Services</a>
+											</li>
+											<li>
+												<a href='/en-us/services/engineering-services/product-customization/'>Product Customization</a>
+											</li>
+											<li>
+												<a href='/en-us/services/engineering-services/project-planning/'>Project Planning</a>
+											</li>
+											
+										</ul>
+									</li>
+									
+									<li>
+										<a href="/en-us/services/gxp/">GxP</a>
+									</li>
+									
+									<li>
+										<a href="/en-us/services/lifecycle-maintenance" class="nav-title-sub">Lifecycle & Maintenance</a>
+										<ul class="rd-navbar-dropdown">
+											<li>
+												<a href='/en-us/services/lifecycle-maintenance/sensor-exchange/'>Easidew Transmitter Exchange</a>
+											</li>
+											<li>
+												<a href='/en-us/services/lifecycle-maintenance/maintenance-agreements/'>Maintenance Agreements</a>
+											</li>
+											<li>
+												<a href='/en-us/services/lifecycle-maintenance/serviceable-parts/'>Servicable Parts for Hazardous Areas</a>
+											</li>
+											<li>
+												<a href='/en-us/services/lifecycle-maintenance/field-engineering/'>Field Engineering Services</a>
+											</li>
+											<li>
+												<a href='/en-us/services/lifecycle-maintenance/rental-services/'>Rental Services</a>
+											</li>
+											
+										</ul>
+									</li>
+									
+								</ul>
+							</li>
+							<li>
+								<a  class="nav-title">Industries</a>
+								<ul class="rd-navbar-megamenu">
+									<li>
+										<ul style="padding-left: 0px">
+											<li>	<a href='/en-us/industries/additive-manufacturing/'>Additive Manufacturing</a>	</li>
+											<li>	<a href='/en-us/industries/lithium-battery-manufacture/'>Battery Manufacture</a>	</li>
+											<li>	<a href='/en-us/industries/carbon-capture/'>Carbon Capture</a>	</li>
+											<li>	<a href='/en-us/industries/calibration-and-metrology-laboratories/'>Calibration & Metrology</a>	</li>
+											<li>	<a href='/en-us/industries/combustion-efficiency/'>Combustion Efficiency</a>	</li>
+											<li>	<a href='/en-us/industries/compressed-air/'>Compressed Air</a>	</li>
+											
+										</ul>
+									</li>
+									<li>
+										<ul style="padding-left: 0px">
+											<li>	<a href='/en-us/industries/air-separation/'>Cryogenic Air Separation</a>	</li>
+											<li>	<a href='/en-us/industries/data-center/'>Data Centers</a>	</li>
+											<li>	<a href='/en-us/industries/humidity-measurement-environmental-chambers/'>Environmental Chambers</a>	</li>
+											<li>	<a href='/en-us/industries/food-and-beverage/'>Food & Beverage</a>	</li>
+											<li>	<a href='/en-us/industries/gas-analysis-for-process-and-manufacturing/'>Gas Analysis for Process and Manufacturing</a>	</li>
+											
+										</ul>
+									</li>
+									<li>
+										<ul style="padding-left: 0px">
+											<li>	<a href='/en-us/industries/compressed-gas-generation-and-treatment/'>Gas Generation & Treatment</a>	</li>
+											<li>	<a href='/en-us/industries/hvac/'>HVAC & Building Automation</a>	</li>
+											<li>	<a href='/en-us/industries/hydrogen/'>Hydrogen</a>	</li>
+											<li>	<a href='/en-us/industries/life-pharma/'>Life Sciences & Pharma</a>	</li>
+											<li>	<a href='/en-us/industries/medical/'>Medical</a>	</li>
+											
+											
+										</ul>
+									</li>
+									<li>
+										<ul style="padding-left: 0px">
+										<li>	<a href='/en-us/industries/metallurgy/'>Metallurgy</a>	</li>
+											<li>	<a href='/en-us/industries/meteorology/'>Meteorology</a>	</li>
+											<li>	<a href='/en-us/industries/natural-gas/'>Natural Gas</a>	</li>
+											<li>	<a href='/en-us/industries/petrochemical/'>Petrochemical</a>	</li>
+											<li>	<a href='/en-us/industries/power-generation/'>Power Generation</a>	</li>
+											
+											
+										</ul>
+									</li>
+									<li>
+										<ul style="padding-left: 0px">
+										<li>	<a href='/en-us/industries/rail/'>Rail</a>	</li>
+											<li>	<a href='/en-us/industries/semiconductor-and-electronics/'>Semiconductor & Electronics</a>	</li>
+											<li>	<a href='/en-us/industries/transportation/'>Transportation</a>	</li>
+											
+										</ul>
+									</li>
+									
+								</ul>
+							</li>
+							<li>
+								<a  class="nav-title">Resources</a>
+								<ul class="rd-navbar-dropdown">
+									<li>
+										<a href="/en-us/technologies/" class="nav-title-sub">DwyerOmega Technologies</a>
+										<ul class="rd-navbar-dropdown">
+											<li>
+												<a href='/en-us/technologies/moisture-sensing-technologies/'>Moisture Sensing</a>
+											</li>
+											<li>
+												<a href='/en-us/technologies/oxygen-sensing-technologies/'>Oxygen Sensing</a>
+											</li>
+											<li>
+												<a href='/en-us/technologies/gas-sensing-technologies/'>Gas Sensing</a>
+											</li>
+											
+										</ul>
+									</li>
+									<!--<li>
+										<a href="quotation">Quotation Calculator</a>
+									</li>-->
+									<li>
+										<a href="#" class="nav-title-sub">Engineering tools</a>
+										<ul class="rd-navbar-dropdown">
+											<li>
+												<a href='/en-us/humidity-calculator/'>Humidity Calculator</a>
+											</li>
+											<!--<li>
+												<a href='#'>CAD Drawings</a>
+											</li>-->
+											
+											<!--<li>
+												<a href='#'>Product Configurator</a>
+											</li>-->
+										</ul>
+									</li>
+									<!--- <li>
+										<a href="/en-us/resources/documentation" class="">Documentation</a>
+										<!-- <ul class="rd-navbar-dropdown">
+										<li>
+										<a href='/en-us/resources/documentation'>Datasheets, Manuals & Guides</a>
+										</li>
+										<li>
+										<a href='#'>Ebooks</a>
+										</li>
+										<li>
+										<a href='#'>Certificates & Approvals</a>
+										</li>
+									</ul> -->
+									<!--</li> --->
+									<!--<li>
+										<a href="/en-us/resources/customer-stories/">Customer Stories</a>
+									</li>-->
+									<!-- <li>
+										<a href="faq">FAQ</a>
+									</li>-->
+									<!---	<li>
+										<a href="/en-us/resources/white-papers">White papers</a>
+									</li> --->
+									<li>
+										<a href="/en-us/resources/software-downloads/">Software downloads</a>
+									</li>
+									
+									<li>
+										<a href='/en-us/knowledge-base/'>Knowledge Base</a>
+									</li>
+									<li>
+										<a href='/en-us/blog/'>Blog</a>
+									</li>
+									<li>
+										<a href="/en-us/chromatograms/">Chromatograms</a>
+									</li>
+									<li>
+										<a href='/en-us/resources/'>Documents</a>
+									</li>
+									<li>
+										<a href='/en-us/resources/certificates/'>Online Calibration Certificates</a>
+									</li>
+									<li>
+										<a href='https://www.aii1.com/en-us/industrial-oxygen-sensors/oxygen-sensor-gas-compatibility/' target='_new'>Oxygen Sensor Gas Compatibility</a>
+									</li>
+									
+								</ul>
+							</li>
+							
+							
+							
+							
+							<li>
+								<a  class="nav-title">About</a>
+								<ul class="rd-navbar-dropdown">
+									<li>
+										<a href="/en-us/about/">About DwyerOmega</a>
+									</li>
+									<li>
+										<a href="/en-us/sustainability/">Sustainability</a>
+									</li>
+									<li>
+										<a href="/en-us/esg/">ESG at DwyerOmega</a>
+									</li>
+									<li>
+										<a href="/en-us/contact/">Contact us</a>
+									</li>
+									<li>
+										<a href="/en-us/careers/">Careers</a>
+									</li>
+									<li>
+										<a href="/en-us/events/" >Events</a>
+									</li>
+									<li>
+										<a href="/en-us/news/" >News</a>
+									</li>
+									
+									<li>
+										<a href="/en-us/blog/">Blog</a>
+									</li>
+									<li>
+										<a href="/en-us/privacy/">Privacy Policy</a>
+									</li>
+									
+								</ul>
+							</li>
+							
+							
+							
+							
+							<li class="d-sm-block d-md-none">
+								<a  class="nav-title">Change Language</a>
+								<ul class="rd-navbar-dropdown">
+									
+									
+									<li><a href="https://www.processsensing.cn">Chinese (中文)</a></li>
+									<li><a href="https://www.processsensing.com/nl-nl/">Dutch (Nederlands)</a> 	</li>
+									<li><a href="https://www.processsensing.com/en-us/">English (English)</a></li>
+									<li><a href="https://www.processsensing.com/fr-fr/">French (Français)</a></li>
+									<li><a href="https://www.processsensing.com/de-de/">German (Deutsch)</a></li>
+									<li><a href="https://www.processsensing.com/it-it/">Italian (Italiano)</a></li>
+									<li><a href="https://www.processsensing.com/pt-br/">Portuguese (Português)</a></li>
+									<li><a href="https://www.processsensing.com/es-es/">Spanish (Español)</a></li>
+
+								</ul>
+							</li>
+						</ul>
+					</div>
+					<div class="rd-navbar-search-wrap">
+						<button class="rd-navbar-search-toggle" aria-label="Search" data-rd-navbar-toggle=".rd-navbar-search, .rd-navbar, .rd-navbar-inner">
+							<span></span>
+						</button>
+						<div class="rd-navbar-search">
+							<form role="search" class="navbar-form navbar-left" method="get" action="/en-us/search/"  name="searchHead">
+								
+								<div class="search-boxDS form-group my-auto">
+									<input type="text" autocomplete="off" placeholder="Search..." name="q" id="q" required />
+									
+									<div class="resultDS"></div>
+								</div>	
+								<button type="submit" class="fa-search search-button" aria-label="Search"></button>
+							</form>
+						</div>
+					</div>
+				</div>
+			</div>
+		</div>
+	</nav>
+</div>
+<script>
+	/* When the user clicks on the button,
+	toggle between hiding and showing the dropdown content */
+	function myFunction() {
+		document.getElementById("myDropdown").classList.toggle("show");
+	}
+	
+	// Close the dropdown menu if the user clicks outside of it
+	window.onclick = function(event) {
+		if (!event.target.matches('.dropbtn')) {
+			var dropdowns = document.getElementsByClassName("dropdown-content");
+		var i;
+		for (i = 0; i < dropdowns.length; i++) {
+		var openDropdown = dropdowns[i];
+		if (openDropdown.classList.contains('show')) {
+		openDropdown.classList.remove('show');
+		}
+		}
+		}
+		}
+		</script> 
+		
+						
+		
+		<!--- TOP HEADER --->
+		<div class="catHeader  d-flex align-items-center ">
+			<div class="container">
+				<div class="row h-100 d-flex align-items-center ">
+					<div class="col my-auto">
+						<h1 class="header-txt">404 - Page not found. </h1>
+						
+					</div>
+				
+				</div>
+			</div>
+		</div>
+
+		<!--- CONTENT --->
+		<div class="container">
+			<div class="row">
+				<div class="col-12  mb-3"> <p>
+					 
+					<BR>
+					The page you were trying to access may have been removed or is temporarily unavailable and we apologize for any inconvenience this may have caused.
+					<br><br>
+					Please use the top navigation or the Search box to find what you are looking for.
+					<br><br>
+					Alternatively, please <a href="../contact">Contact us</a>.
+					
+					</p>  </div>
+				
+			</div>
+
+		</div>
+		
+		<!--- Contact us POP UP --->
+		<!-- Start contact pop-up --> 
+
+
+
+<!-- Button trigger modal -->
+
+
+
+<div class="popup-btn" onclick="document.getElementById('contact').style.display='block'">
+
+	<a href="/en-us/contact?utm_source=side&utm_medium=button">Contact Us</a>
+
+</div>
+
+
+						
+
+		
+		
+				<!--- BACK TO TOP ICON --->
+		<a href="javascript:" id="return-to-top"><i class="fas fa-arrow-up up-icon"></i></a>
+		<!--- FOOTER --->
+		
+
+<footer class="container-fluid bg-grey py-5">
+
+	<div class="container">
+
+		<div class="row">
+
+			<div class="col-md-6">
+
+				<div class="row">
+
+					<div class="col-md-6 px-4">
+
+						<div class="logo-part">
+
+							<!-- <a href="/en-us/"> <img src="/includes/logo/pst-logo-white.png" class="w-50 logo-footer" alt="PST Logo White"></a>
+
+								<p>
+
+							--><a href="/en-us/contact?utm_source=footer&utm_medium=button" class="red-btn"> Contact Us</a></p>
+
+							
+
+					</div>
+
+				</div>
+
+				<div class="col-md-6 px-4">
+
+					<h6><b> About us</b></h6>
+
+					<p>DwyerOmega offers a wide range of gas, oxygen and level sensors as well as measurement instruments including probes, transmitters and analyzers for humidity, moisture, oxygen and trace impurities. </p><br>
+
+				</div>
+
+			</div>
+
+		</div>
+
+		<div class="col-md-6">
+
+			<div class="row">
+
+				<div class="col-12 col-md-6 px-4">
+
+					<h6> <b>Navigation</b></h6>
+
+					<div class="row ">
+
+						<div class="col-4 col-md-6">
+
+							<ul>
+
+								<li> <a href="/en-us/"> Home</a> </li>
+
+								<li> <a href="/en-us/about"> About DwyerOmega</a> </li>
+
+								<li> <a href="/en-us/sustainability">Sustainability</a> </li>
+
+								<li> <a href="/en-us/esg">ESG</a> </li>
+
+								<li> <a href="/en-us/news"> News</a> </li>
+
+								<li> <a href="/en-us/blog"> Blog</a> </li>
+
+								<li> <a href="/en-us/events/"> Events</a> </li>
+
+								<li> <a href="/en-us/careers"> Careers</a> </li> 
+
+								<li> <a href="/en-us/contact?utm_source=footer&utm_medium=link"> Contact</a> </li>
+
+							</ul>
+
+						</div>
+
+						<div class="col-4 col-md-6 px-4">
+
+							<ul>
+
+								
+
+								<!--    <a href="/products"> Products</a> </li> 
+
+									<li> <a href="/en-us/services/calibration"> Services</a> </li>
+
+									<li> <a href="/en-us/industries"> Industries</a> </li>
+
+								<!--  <li> <a href="/resources"> Resources</a> </li> -->
+
+								<li> <a href="/en-us/brands"> Our brands</a> </li>
+
+								<li> <a href="/en-us/privacy"> Privacy</a> </li>
+
+								<li><a href="#" onClick="UC_UI.showSecondLayer();"> Privacy Settings</a></li>
+
+								<li> <a href="/docs/modern_slavery_statement.pdf" target="_new"> Modern slavery statement</a> </li>
+
+								<li> <a href="/en-us/imprint"> Imprint</a> </li>
+
+							</ul>
+
+						</div>
+
+					</div>
+
+				</div>
+
+				<div class="col-12 col-md-6 px-4">
+
+					
+
+					<h6> <b>Connect</b></h6>
+
+					<div class="social">
+
+						<a href=" https://www.linkedin.com/company/dwyeromega/" target="_blank"><i class="fab fa-linkedin" aria-hidden="true"></i></a>
+
+						<a href="https://youtube.com/@dwyeromega?si=sSwPbjO_Jmy2McSr" target="_blank"><i class="fab fa-youtube" aria-hidden="true"></i></a>
+
+						<p class="mt-4">Subscribe to our newsletter</p>
+
+						<a href="https://www.processsensing.com/subscriptions/" target="_new" rel="noopener noreferrer" class="red-btn btn">Subscribe</a>
+
+						
+
+						
+
+					</div>
+
+					<!--- <form class="form-footer my-3">
+
+						<input type="text"  placeholder="E-mail address" name="search">
+
+						<input type="button" value="Sign up" >
+
+						</form>
+
+					<p>Sign up to our newsletter to stay up to date with us</p> -->
+
+				</div>
+
+			</div>
+
+		</div>
+
+	</div>
+
+	<div class="row">
+
+		<a href="https://www.dwyeromega.com/en-us/help/policies-and-compliance/copyright-notice" target="_new" style="color:white;">Copyright &copy; Dwyer Instruments, LLC. All Rights Reserved.</a>
+
+		
+
+	</div>
+
+</div>
+
+</footer>
+
+
+
+<script type="text/javascript"> _linkedin_partner_id = "2859354"; window._linkedin_data_partner_ids = window._linkedin_data_partner_ids || []; window._linkedin_data_partner_ids.push(_linkedin_partner_id); </script><script type="text/javascript"> (function(){var s = document.getElementsByTagName("script")[0]; var b = document.createElement("script"); b.type = "text/javascript";b.async = true; b.src = "https://snap.licdn.com/li.lms-analytics/insight.min.js"; s.parentNode.insertBefore(b, s);})(); </script> <noscript> <img height="1" width="1" style="display:none;" alt="" src="https://px.ads.linkedin.com/collect/?pid=2859354&fmt=gif" /> </noscript>
+
+
+<!-- Start of HubSpot Embed Code -->
+<script type="text/javascript" id="hs-script-loader" async defer src="//js.hs-scripts.com/8001982.js"></script>
+<!-- End of HubSpot Embed Code -->
+
+
+<!----PST HubSpot Tracking Code----->
+<!-- Start of HubSpot Embed Code -->
+<script type="text/javascript" id="hs-script-loader" async defer src="//js-na2.hs-scripts.com/242084967.js"></script>
+<!-- End of HubSpot Embed Code -->
+<!----PST HubSpot Tracking Code----->
+
+
+<!-- Hotjar Tracking Code for https://www.processsensing.com/en-us/ -->
+
+<script>
+
+    (function(h,o,t,j,a,r){
+
+        h.hj=h.hj||function(){(h.hj.q=h.hj.q||[]).push(arguments)};
+
+        h._hjSettings={hjid:1975800,hjsv:6};
+
+        a=o.getElementsByTagName('head')[0];
+
+        r=o.createElement('script');r.async=1;
+
+        r.src=t+h._hjSettings.hjid+j+h._hjSettings.hjsv;
+
+        a.appendChild(r);
+
+	})(window,document,'https://static.hotjar.com/c/hotjar-','.js?sv=');
+
+</script>
+
+
+
+
+<!----Google Ads Campagin maper----->
+
+
+<script>
+  // Function to set a cookie that lasts for 90 days
+  function setCookie(name, value) {
+    const date = new Date();
+    date.setTime(date.getTime() + (90 * 24 * 60 * 60 * 1000)); // 90 days in milliseconds
+    const expires = "expires=" + date.toUTCString();
+    document.cookie = name + "=" + encodeURIComponent(value) + ";" + expires + ";path=/";
+  }
+
+  // Function to get a cookie by name
+  function getCookie(name) {
+    const nameEQ = name + "=";
+    const decodedCookies = decodeURIComponent(document.cookie);
+    const cookieArray = decodedCookies.split(';');
+    for (let cookie of cookieArray) {
+      cookie = cookie.trim();
+      if (cookie.indexOf(nameEQ) === 0) {
+        return cookie.substring(nameEQ.length);
+      }
+    }
+    return null;
+  }
+
+  // Main logic to run when the page is loaded
+  document.addEventListener("DOMContentLoaded", function () {
+    const cookieName = "campain_url";
+    let cookieValue = getCookie(cookieName);
+
+    // If the cookie does not exist, try to set it from the URL
+    if (!cookieValue) {
+      const urlParam = new URLSearchParams(window.location.search).get("utm_campaign");
+      if (urlParam) {
+        setCookie(cookieName, urlParam); // Set the cookie for 90 days
+        cookieValue = urlParam;
+        console.log(`Cookie "${cookieName}" created:`, cookieValue);
+      }
+    } else {
+      console.log(`Cookie "${cookieName}" found:`, cookieValue);
+    }
+
+    // Fill the hidden form field if the cookie value is available
+    if (cookieValue) {
+      const textarea = document.getElementById("longtext1952-1770376616995");
+      if (textarea) {
+        textarea.value = cookieValue;
+      } else {
+        console.warn("Form field not found.");
+      }
+    }
+  });
+</script>
+
+
+<!----End Google Ads Campagin maper----->		<!--- SCRIPT - (bottom of page to load faster)--->
+		<script src="/includes/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
+		<script src="/includes/ajax/libs/angularjs/1.2.26/angular.js"></script>
+		<script src="/includes/ajax/libs/angularjs/1.2.26/angular-sanitize.js"></script>
+		<script defer src="/includes/fonts/v5.0.6/js/all.js"></script>
+		<script src="/includes/js/ui-bootstrap-tpls-0.10.0.min.js"></script>
+		<script src="/includes/js/core.min.js"></script>
+
+	</body>
+	
+</html>

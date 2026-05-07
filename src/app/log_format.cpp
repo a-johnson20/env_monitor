@@ -27,7 +27,8 @@ String current_log_path(bool rtc_present, RV3028& rtc) {
 String make_header(size_t n_scd4x,
                    size_t n_trhp,
                    size_t n_tgs2611,
-                   size_t n_tgs2616)
+                   size_t n_tgs2616,
+                   bool include_n2o_uart)
 {
   String h = "timestamp";
 
@@ -55,6 +56,10 @@ String make_header(size_t n_scd4x,
   for (size_t i = 0; i < n_tgs2616; ++i) {
     h += ",tgs2616_"; h += String(i+1); h += "_raw_avg";
     h += ",tgs2616_"; h += String(i+1); h += "_v_avg";
+  }
+
+  if (include_n2o_uart) {
+    h += ",n2o_uart_ppm_avg";
   }
 
   return h;
