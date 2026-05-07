@@ -815,6 +815,8 @@ class App(tk.Tk):
         self.live_x_values: deque[float] = deque(maxlen=self.live_history_limit)
         self.live_time_labels: deque[str] = deque(maxlen=self.live_history_limit)
         self.live_series: list[deque[float | None]] = []
+        self.live_last_values: dict[str, tuple[float, float]] = {}
+        self.live_hold_timeout_s = 15.0
 
         # WiFi settings
         self.wifi_scan_cache: list[dict] = []
@@ -2099,6 +2101,7 @@ class App(tk.Tk):
         self.live_x_values.clear()
         self.live_time_labels.clear()
         self.live_series = []
+        self.live_last_values.clear()
         self._refresh_live_graphs()
 
     def _ensure_live_series_shape(self, n_vars: int) -> None:
@@ -2117,10 +2120,42 @@ class App(tk.Tk):
         t = raw.strip()
         if not t or t.upper() == "NA":
             return None
+        if t.lower().endswith("ppm"):
+            t = t[:-3].strip()
         try:
             return float(t)
         except ValueError:
             return None
+
+    @staticmethod
+    def _is_n2o_column(col_name: str) -> bool:
+        return "n2o" in col_name.strip().lower()
+
+    def _apply_live_value_hold(self, fields: list[str]) -> list[str]:
+        if len(fields) <= 1 or len(self.live_headers) <= 1:
+            return fields
+
+        now = time.time()
+        out = list(fields)
+        n_vars = min(len(out) - 1, len(self.live_headers) - 1)
+
+        for i in range(n_vars):
+            col_name = self.live_headers[i + 1]
+            raw = out[i + 1]
+            parsed = self._parse_float_or_none(raw)
+
+            if parsed is not None:
+                self.live_last_values[col_name] = (parsed, now)
+                continue
+
+            # N2O arrives slower than the commit cadence; hold last valid value
+            # briefly so a sparse sample doesn't appear as repeated NA in GUI.
+            if raw.strip().upper() == "NA" and self._is_n2o_column(col_name):
+                last = self.live_last_values.get(col_name)
+                if last is not None and (now - last[1]) <= self.live_hold_timeout_s:
+                    out[i + 1] = f"{last[0]:.2f}"
+
+        return out
 
     @staticmethod
     def _timestamp_to_axis_value(ts: str, fallback: float) -> float:
@@ -2158,6 +2193,7 @@ class App(tk.Tk):
             hdr = [field for field in hdr if field]
             if hdr:
                 self.live_headers = hdr
+                self.live_last_values.clear()
                 # Set up table columns
                 self.live_table_columns = hdr
                 self.live_table.configure(columns=hdr)
@@ -2179,6 +2215,7 @@ class App(tk.Tk):
         # Pad with empty strings if needed
         while len(fields) < len(self.live_table_columns):
             fields.append("")
+        fields = self._apply_live_value_hold(fields)
         
         # Insert row
         row_id = self.live_table.insert("", tk.END, values=fields)
