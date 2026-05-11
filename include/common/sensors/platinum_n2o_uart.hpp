@@ -58,7 +58,7 @@ class PlatinumN2oUart {
   uint16_t checksum_accum_ = 0;    // running 16-bit sum of all framing bytes
 
   // Periodic request timing
-  static constexpr unsigned long kPollIntervalMs = 5000;
+  static constexpr unsigned long kPollIntervalMs = 2000;
   unsigned long last_poll_ms_ = 0;
 };
 

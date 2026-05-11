@@ -93,11 +93,47 @@ static bool write_id(uint16_t id){
 }
 
 static bool read_id(uint16_t &out_id, bool &crc_ok){
-  uint8_t rb[3] = {0};
-  if (!at24_read(hal::I2CAddr::AT24, 0x00, rb, 3)) return false;
-  out_id = (uint16_t(rb[0])<<8) | rb[1];
-  crc_ok = (crc8_xor(rb, 2) == rb[2]);
+  // Retry to reduce false CRC_BAD from transient I2C noise.
+  uint8_t last_rb[3] = {0};
+  for (uint8_t attempt = 0; attempt < 3; ++attempt) {
+    uint8_t rb[3] = {0};
+    if (!at24_read(hal::I2CAddr::AT24, 0x00, rb, 3)) continue;
+    out_id = (uint16_t(rb[0])<<8) | rb[1];
+    crc_ok = (crc8_xor(rb, 2) == rb[2]);
+    last_rb[0] = rb[0];
+    last_rb[1] = rb[1];
+    last_rb[2] = rb[2];
+    if (crc_ok) return true;
+  }
+
+  out_id = (uint16_t(last_rb[0])<<8) | last_rb[1];
+  crc_ok = false;
   return true;
+}
+
+static bool id_is_blank(uint16_t id) {
+  return id == 0xFFFFu;
+}
+
+static void dump_eeprom(uint8_t start, uint8_t count) {
+  if (count == 0) return;
+  uint8_t line[16] = {0};
+  uint8_t addr = start;
+  uint8_t remaining = count;
+  while (remaining > 0) {
+    uint8_t n = remaining > 16 ? 16 : remaining;
+    if (!at24_read(hal::I2CAddr::AT24, addr, line, n)) {
+      Serial.printf("DUMP FAIL at 0x%02X\n", addr);
+      return;
+    }
+    Serial.printf("0x%02X:", addr);
+    for (uint8_t i = 0; i < n; ++i) {
+      Serial.printf(" %02X", line[i]);
+    }
+    Serial.println();
+    addr = static_cast<uint8_t>(addr + n);
+    remaining = static_cast<uint8_t>(remaining - n);
+  }
 }
 
 /* ================== Lot# block (separate, backward-compatible) ================== */
@@ -155,18 +191,64 @@ static bool read_lot(char* out, uint8_t out_size) {
   if (out_size == 0) return false;
   uint8_t len=0, crc=0, data[LOT_MAX_LEN]={0};
   if (!at24_read(hal::I2CAddr::AT24, LOT_OFF, &len, 1)) return false;
-  if (len > LOT_MAX_LEN) return false;
   if (!at24_read(hal::I2CAddr::AT24, LOT_DATA_OFF, data, LOT_MAX_LEN)) return false;
   if (!at24_read(hal::I2CAddr::AT24, LOT_CRC_OFF, &crc, 1)) return false;
 
-  uint8_t crc_chk = crc8_xor(&len, 1);
-  for (uint8_t i=0; i<len; i++) crc_chk ^= data[i];
-  if (crc_chk != crc) return false;
+  if (len <= LOT_MAX_LEN) {
+    uint8_t crc_chk = crc8_xor(&len, 1);
+    for (uint8_t i=0; i<len; i++) crc_chk ^= data[i];
+    if (crc_chk == crc) {
+      uint8_t n = min<uint8_t>(len, out_size-1);
+      memcpy(out, data, n);
+      out[n] = '\0';
+      return true;
+    }
+  }
 
-  uint8_t n = min<uint8_t>(len, out_size-1);
-  memcpy(out, data, n);
-  out[n] = '\0';
-  return true;
+  // Legacy fallback #1: plain ASCII in 0x21..0x2F with no CRC.
+  // (Keep 0x20 as len/metadata and stop at first non-printable or NUL.)
+  uint8_t n_ascii = 0;
+  while (n_ascii < LOT_MAX_LEN) {
+    const uint8_t c = data[n_ascii];
+    if (c == 0x00 || c == 0xFF) break;
+    const bool allowed =
+      (c >= 'A' && c <= 'Z') ||
+      (c >= 'a' && c <= 'z') ||
+      (c >= '0' && c <= '9') ||
+      c == '-';
+    if (!allowed) break;
+    ++n_ascii;
+  }
+  if (n_ascii > 0) {
+    uint8_t n = min<uint8_t>(n_ascii, out_size-1);
+    memcpy(out, data, n);
+    out[n] = '\0';
+    return true;
+  }
+
+  // Legacy fallback #2: plain ASCII in 0x20..0x2F with no len/CRC.
+  uint8_t raw[LOT_MAX_LEN + 1] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, LOT_OFF, raw, LOT_MAX_LEN + 1)) return false;
+  uint8_t n_raw = 0;
+  while (n_raw < (LOT_MAX_LEN + 1)) {
+    const uint8_t c = raw[n_raw];
+    if (c == 0x00 || c == 0xFF) break;
+    const bool allowed =
+      (c >= 'A' && c <= 'Z') ||
+      (c >= 'a' && c <= 'z') ||
+      (c >= '0' && c <= '9') ||
+      c == '-';
+    if (!allowed) break;
+    ++n_raw;
+  }
+  if (n_raw > 0) {
+    uint8_t n = min<uint8_t>(n_raw, out_size-1);
+    memcpy(out, raw, n);
+    out[n] = '\0';
+    return true;
+  }
+
+  return false;
 }
 
 /* ================== CLI ================== */
@@ -202,6 +284,8 @@ static void print_help() {
   Serial.println("  SCAN      - scan I2C on current channel");
   Serial.println("  W <id>    - write ID at 0x00..0x02 and verify");
   Serial.println("  R         - read back ID + CRC");
+  Serial.println("  DUMP      - dump EEPROM 0x00..0x3F (hex)");
+  Serial.println("  DUMP <a> <n> - dump EEPROM from addr a, n bytes (decimal)");
   Serial.println("  LOT <txt> - store Lot# (A-Z 0-9 -), max 15 chars");
   Serial.println("  LR        - read back Lot#");
   Serial.println("  OFF       - deselect mux (all channels off)");
@@ -279,8 +363,36 @@ void loop(){
           if (currentCh>7) { Serial.println("Select CH first"); }
           else {
             uint16_t id=0; bool ok=false;
-            if (read_id(id, ok)) Serial.printf("ID=%u, CRC=%s\n", id, ok?"OK":"BAD");
+            if (read_id(id, ok)) {
+              if (id_is_blank(id)) {
+                Serial.printf("ID=BLANK, CRC=%s\n", ok?"OK":"BAD");
+              } else {
+                Serial.printf("ID=%u, CRC=%s\n", id, ok?"OK":"BAD");
+              }
+            }
             else Serial.println("EEPROM read FAILED");
+          }
+
+        } else if (cmd == "DUMP") {
+          if (currentCh>7) Serial.println("Select CH first");
+          else dump_eeprom(0x00, 0x40);
+
+        } else if (cmd.startsWith("DUMP ")) {
+          if (currentCh>7) Serial.println("Select CH first");
+          else {
+            String args = line.substring(5);
+            int sep = args.indexOf(' ');
+            if (sep <= 0) {
+              Serial.println("Usage: DUMP <addr> <len>");
+            } else {
+              int a = args.substring(0, sep).toInt();
+              int n = args.substring(sep + 1).toInt();
+              if (a < 0 || a > 255 || n < 1 || n > 255) {
+                Serial.println("Range error: addr 0..255, len 1..255");
+              } else {
+                dump_eeprom((uint8_t)a, (uint8_t)n);
+              }
+            }
           }
 
         } else if (cmd.startsWith("W ")) {
