@@ -758,6 +758,9 @@ void loop() {
         if (lps22df_nodes[i].p_ready) {
           win_trhp_lps_p[i].add(lps22df_nodes[i].pressure);
         }
+        if (lps22df_nodes[i].t_ready) {
+          win_trhp_lps_t[i].add(lps22df_nodes[i].temp);
+        }
       }
 
       ++i;
