@@ -151,34 +151,23 @@ bool PlatinumN2oUart::poll(PlatinumN2oReading& out) {
         break;
 
       case State::READ_CHK_LO:
-        // payload layout can vary by Platinum firmware revision.
-        // Common layouts observed:
-        //  - [sub][status][ppm_f32_le][...]
-        //  - [sub][status][....][ppm_f32_le] (trailing 4 bytes)
-        if (verify_checksum_(chk_hi_, b) && payload_len_ >= 6) {
+        // Payload layout per AN0007:
+        //   [0]=DataLen [1..2]=Version [3..4]=StatusFlags [5..8]=GasReading(f32 LE)
+        if (verify_checksum_(chk_hi_, b) && payload_len_ >= 9) {
           float gas_ppm = NAN;
           bool have_ppm = false;
 
-          // Primary decode path used by earlier implementation.
-          have_ppm = decode_nonnegative_float_le(&payload_[2], gas_ppm);
+          // Gas Reading is always at payload[5..8], IEEE-754 little-endian.
+          have_ppm = decode_nonnegative_float_le(&payload_[5], gas_ppm);
 
-          // Fallback: some units place the concentration in the trailing 4 bytes.
-          if ((!have_ppm || gas_ppm == 0.0f) && payload_len_ >= 9) {
-            float alt_ppm = NAN;
-            if (decode_nonnegative_float_le(&payload_[5], alt_ppm)) {
-              gas_ppm = alt_ppm;
-              have_ppm = true;
-            }
-          }
-
-          // payload[1] is status byte (logged for diagnostics only).
+          // payload[3..4] are status flags (logged for diagnostics only).
           if (have_ppm) {
           if (isfinite(gas_ppm) && gas_ppm >= 0.0f) {
 #ifdef N2O_DEBUG
             Serial.print("[N2O] PARSED ppm=");
             Serial.print(gas_ppm);
             Serial.print(" status=0x");
-            Serial.println(payload_[1], HEX);
+            Serial.println((payload_[3] << 8) | payload_[4], HEX);
 #endif
             out.ppm        = gas_ppm;
             out.valid      = true;
