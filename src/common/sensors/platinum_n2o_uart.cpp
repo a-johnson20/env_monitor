@@ -7,6 +7,18 @@
 
 namespace sensors {
 
+namespace {
+
+static bool decode_nonnegative_float_le(const uint8_t* p, float& out) {
+  float v;
+  memcpy(&v, p, sizeof(float));
+  if (!isfinite(v) || v < 0.0f) return false;
+  out = v;
+  return true;
+}
+
+} // namespace
+
 // Request command: "Read Live Data Simple" (DLE-ETX framed, 16-bit checksum)
 // [DLE=0x10][CMD=0x13][data: 0x06][DLE=0x10][ETX=0x1F][CHK_HI=0x00][CHK_LO=0x58]
 // 16-bit checksum = sum(0x10+0x13+0x06+0x10+0x1F) = 0x0058
@@ -139,11 +151,28 @@ bool PlatinumN2oUart::poll(PlatinumN2oReading& out) {
         break;
 
       case State::READ_CHK_LO:
-        // payload layout: [sub_hdr][status][float_b0..b3][...]
+        // payload layout can vary by Platinum firmware revision.
+        // Common layouts observed:
+        //  - [sub][status][ppm_f32_le][...]
+        //  - [sub][status][....][ppm_f32_le] (trailing 4 bytes)
         if (verify_checksum_(chk_hi_, b) && payload_len_ >= 6) {
-          // payload[1] = status, payload[2..5] = gas concentration (IEEE-754 LE)
-          float gas_ppm;
-          memcpy(&gas_ppm, &payload_[2], sizeof(float));
+          float gas_ppm = NAN;
+          bool have_ppm = false;
+
+          // Primary decode path used by earlier implementation.
+          have_ppm = decode_nonnegative_float_le(&payload_[2], gas_ppm);
+
+          // Fallback: some units place the concentration in the trailing 4 bytes.
+          if ((!have_ppm || gas_ppm == 0.0f) && payload_len_ >= 9) {
+            float alt_ppm = NAN;
+            if (decode_nonnegative_float_le(&payload_[5], alt_ppm)) {
+              gas_ppm = alt_ppm;
+              have_ppm = true;
+            }
+          }
+
+          // payload[1] is status byte (logged for diagnostics only).
+          if (have_ppm) {
           if (isfinite(gas_ppm) && gas_ppm >= 0.0f) {
 #ifdef N2O_DEBUG
             Serial.print("[N2O] PARSED ppm=");
@@ -172,6 +201,7 @@ bool PlatinumN2oUart::poll(PlatinumN2oReading& out) {
           Serial.println(checksum_accum_, HEX);
         }
 #endif
+  }
         reset_frame_();
         break;
     }
