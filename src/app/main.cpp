@@ -58,8 +58,7 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define UART1_BAUD        38400
 
 // ---------- Pump PWM ----------
-// Moved away from pin 21 to avoid conflict with UART1 RX/TX mapping.
-#define PUMP_PWM_PIN     42
+#define PUMP_PWM_PIN     21
 #define PUMP_PWM_FREQ    1000              // Hz
 #define PUMP_PWM_RES     LEDC_TIMER_12_BIT // 12-bit
 #define PUMP_LEDC_MODE   LEDC_LOW_SPEED_MODE
