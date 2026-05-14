@@ -432,10 +432,13 @@ bool lps22df_read_with_autorecover(Lps22dfReading &st) {
 }
 
 // ---------- ADS1113 ----------
-static const float    ADS1113_LSB_V = 0.000125f;
+// ADS1113 has NO programmable gain amplifier — PGA bits are ignored.
+// Fixed internal reference gives FSR = ±2.048 V, LSB = 62.5 µV.
+// V_RL must be kept below ~1.8 V via the digipot R_L setting to avoid saturation.
+static const float    ADS1113_LSB_V = 0.0000625f;  // 62.5 µV/LSB, fixed ±2.048 V FSR
 bool ads1113_single_shot(int16_t &raw) {
   const uint8_t a = hal::I2CAddr::ADS1113;
-  uint16_t cfg = (1u<<15)|(0b100<<12)|(0b001<<9)|(1u<<8)|(0b100<<5)|(0b11);
+  uint16_t cfg = (1u<<15)|(0b100<<12)|(0b001<<9)|(1u<<8)|(0b100<<5)|(0b11);  // PGA bits ignored by ADS1113
   Wire.beginTransmission(a); Wire.write(0x01); Wire.write((uint8_t)(cfg>>8)); Wire.write((uint8_t)(cfg&0xFF));
   if (Wire.endTransmission()!=0) return false;
   delay(9);
