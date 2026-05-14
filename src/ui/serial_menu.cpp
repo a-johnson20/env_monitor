@@ -141,10 +141,11 @@ static void send_log_file(uint8_t index) {
   proto::write_log_entry(entry.size, entry.path);
   
   // Send file data in chunks
-  uint8_t buf[256];
+  // Max 255 bytes per chunk — length is sent as a single uint8_t, so 256 would overflow to 0.
+  uint8_t buf[255];
   uint32_t remaining = entry.size;
   while (remaining > 0) {
-    size_t to_read = (remaining > 256) ? 256 : remaining;
+    size_t to_read = (remaining > 255) ? 255 : remaining;
     size_t n = f.read(buf, to_read);
     if (n == 0) break;
     
