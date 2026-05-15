@@ -14,6 +14,10 @@ extern float pump_percent;
 extern void pump_set_percent(float pct);
 void pump_save_percent(float pct);
 
+// External TGS2611 R2ppm calibration from main.cpp
+// Measures current Rs and writes it as R2ppm to the sensor EEPROM on channel ch.
+extern bool tgs2611_save_r2ppm(uint8_t ch);
+
 namespace ui {
 
 static bool g_live_stream = false;
@@ -506,6 +510,23 @@ void poll() {
       Serial.write((uint8_t)proto::RespType::PUMP_STATUS);
       Serial.write((uint8_t)1);
       Serial.write(pct);
+      break;
+    }
+
+    case proto::Cmd::CALIB_R2PPM: {
+      // Payload: 1 byte channel index (0-based).
+      // Reads current sensor Rs and writes it as R2ppm to EEPROM.
+      // The sensor must be sampling ambient ~2 ppm CH4 air for >=24 h before issuing this command.
+      uint8_t ch;
+      if (!read_byte_timeout(ch)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      if (tgs2611_save_r2ppm(ch)) {
+        proto::write_response(proto::RespType::OK);
+      } else {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+      }
       break;
     }
 

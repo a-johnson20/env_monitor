@@ -22,6 +22,8 @@
 #include "common/tgs_lookup_tables.hpp"
 #include "common/calib/tgs_calibration.hpp"
 #include "common/sensors/platinum_n2o_uart.hpp"
+#include "common/sensors/tgs2611_ch4.hpp"
+#include "common/sensors/tgs_eeprom.hpp"
 #include "ui/serial_menu.hpp"
 #include "ui/serial_protocol.hpp"
 #include "net/wifi_manager.hpp"
@@ -132,8 +134,14 @@ std::array<RunningAvg, N_TRHP> win_trhp_lps_t{};
 
 std::array<RunningAvg, N_TGS2611> win_tgs2611_raw{};
 std::array<RunningAvg, N_TGS2611> win_tgs2611_v{};
+std::array<RunningAvg, N_TGS2611> win_tgs2611_rs{};   // sensor resistance (kΩ)
+std::array<RunningAvg, N_TGS2611> win_tgs2611_ppm{};  // CH4 ppm via Shah 2023 Eq.(6)
 std::array<RunningAvg, N_TGS2616> win_tgs2616_raw{};
 std::array<RunningAvg, N_TGS2616> win_tgs2616_v{};
+
+// R2ppm reference resistance per TGS2611 channel (kΩ), loaded from EEPROM at boot.
+// NAN until calibrated (calib command writes it; then reboot to reload).
+static float tgs2611_r2ppm_kohm[N_TGS2611 > 0 ? N_TGS2611 : 1];
 RunningAvg win_n2o_ppm{};
 
 sensors::PlatinumN2oUart n2o_uart;
@@ -276,6 +284,8 @@ static void reset_windows_and_flags() {
 
   for (auto &w : win_tgs2611_raw) w.reset();
   for (auto &w : win_tgs2611_v)   w.reset();
+  for (auto &w : win_tgs2611_rs)  w.reset();
+  for (auto &w : win_tgs2611_ppm) w.reset();
   for (auto &w : win_tgs2616_raw) w.reset();
   for (auto &w : win_tgs2616_v)   w.reset();
 
@@ -317,6 +327,8 @@ static void commit_and_reset_all_windows() {
   for (size_t i = 0; i < N_TGS2611; ++i) {
     line += ','; line += (win_tgs2611_raw[i].count ? String(win_tgs2611_raw[i].mean(), 0) : "NA");
     line += ','; line += (win_tgs2611_v[i].count   ? String(win_tgs2611_v[i].mean(),   5) : "NA");
+    line += ','; line += (win_tgs2611_rs[i].count  ? String(win_tgs2611_rs[i].mean(),  3) : "NA");
+    line += ','; line += (win_tgs2611_ppm[i].count ? String(win_tgs2611_ppm[i].mean(), 2) : "NA");
   }
   for (size_t i = 0; i < N_TGS2616; ++i) {
     line += ','; line += (win_tgs2616_raw[i].count ? String(win_tgs2616_raw[i].mean(), 0) : "NA");
@@ -447,6 +459,22 @@ bool ads1113_single_shot(int16_t &raw) {
   raw = (int16_t)((Wire.read()<<8)|Wire.read()); return true;
 }
 
+// Called by serial_menu to store the current Rs as R2ppm for TGS2611 channel ch (0-based).
+// The sensor must be sampling ambient ~2 ppm CH4 air for >=24 h before issuing this command.
+// Returns true on success.
+bool tgs2611_save_r2ppm(uint8_t ch) {
+  if (ch >= N_TGS2611) return false;
+  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
+  int16_t raw;
+  if (!ads1113_single_shot(raw)) return false;
+  float v_rl = raw * ADS1113_LSB_V;
+  float rs = tgs2611::calc_rs_kohm(v_rl);
+  if (isnan(rs) || rs <= 0.0f) return false;
+  if (!tgs_write_r2ppm_on_selected(rs)) return false;
+  tgs2611_r2ppm_kohm[ch] = rs;
+  return true;
+}
+
 namespace {
   static inline uint8_t to_u8(hal::Mux::Ch ch) { return static_cast<uint8_t>(ch); }
 }
@@ -512,6 +540,26 @@ void setup() {
 
   // Calibrate TGS2611 channels
   app::calibrate_all_tgs2611(muxStateWire);
+
+  // Load R2ppm reference resistances from TGS2611 EEPROMs (calibrated in ambient ~2 ppm CH4 air).
+  for (size_t i = 0; i < N_TGS2611; ++i) tgs2611_r2ppm_kohm[i] = NAN;
+  {
+    size_t i = 0;
+    for (auto ch : hal::Mux::TGS2611) {
+      if (select_channel(Wire, ch, muxStateWire)) {
+        float r2ppm = NAN; bool crc_ok = false;
+        if (tgs_read_r2ppm_on_selected(r2ppm, crc_ok) && crc_ok && r2ppm > 0.0f) {
+          tgs2611_r2ppm_kohm[i] = r2ppm;
+          char buf[64];
+          snprintf(buf, sizeof(buf), "TGS2611[%u] R2ppm=%.3f kohm", (unsigned)(i+1), r2ppm);
+          ui::proto::write_message(0x02, buf);
+        } else {
+          ui::proto::write_message(0x02, "TGS2611[1] R2ppm: not calibrated — ppm output will be NA");
+        }
+      }
+      ++i;
+    }
+  }
 
   // Calibrate TGS2616 channels
   app::calibrate_all_tgs2616(muxStateWire);
@@ -783,6 +831,13 @@ void loop() {
         readings.ads.valid = true;
         win_tgs2611_raw[i].add((float)raw);
         win_tgs2611_v[i].add(readings.ads.volts);
+
+        float rs = tgs2611::calc_rs_kohm(readings.ads.volts);
+        if (!isnan(rs)) {
+          win_tgs2611_rs[i].add(rs);
+          float ppm = tgs2611::calc_ppm_ch4_shah(rs, tgs2611_r2ppm_kohm[i]);
+          if (!isnan(ppm)) win_tgs2611_ppm[i].add(ppm);
+        }
       }
       ++i;
     }

@@ -23,6 +23,7 @@ enum class Cmd : uint8_t {
   WIFI_CONNECT_SAVED = 0x20, // Connect to saved network by SSID
   PUMP_SET        = 0x21,  // Set pump speed (followed by uint8_t percent)
   PUMP_GET        = 0x22,  // Get current pump speed
+  CALIB_R2PPM     = 0x23,  // Calibrate TGS2611 R2ppm (followed by uint8_t channel index)
   LOG_MENU        = 0x1B,  // Enter log export menu
   LOG_LIST        = 0x1C,  // List log files
   LOG_GET         = 0x1D,  // Get log file (followed by uint8_t index)

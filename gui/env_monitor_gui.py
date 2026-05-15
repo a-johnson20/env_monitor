@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Simple desktop GUI for env_monitor serial menu.
 
@@ -93,6 +93,7 @@ class ProtoCmd:
     WIFI_CONNECT_SAVED = 0x20
     PUMP_SET = 0x21
     PUMP_GET = 0x22
+    CALIB_R2PPM = 0x23
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -774,6 +775,24 @@ class SerialMenuClient:
                 return {"success": False, "message": f"Error code {code}"}
             return {"success": False, "message": f"Unexpected response: {resp}"}
 
+    def calib_r2ppm(self, channel: int = 0, timeout_s: float = 5.0) -> dict:
+        """Send CALIB_R2PPM (0x23) to store current Rs as R2ppm for TGS2611 channel."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.CALIB_R2PPM)
+            ser.write(bytes([channel & 0xFF]))
+            ser.flush()
+            resp = self._read_byte(timeout_s)
+            if resp == ProtoResp.OK:
+                return {"success": True}
+            elif resp == ProtoResp.ERROR:
+                code = self._read_byte(timeout_s)
+                return {"success": False, "message": f"Error code {code}"}
+            return {"success": False, "message": f"Unexpected response: {resp}"}
+
 
 # ============ GUI APPLICATION ============
 
@@ -1253,6 +1272,46 @@ class App(tk.Tk):
         )
         self.pump_full_btn.pack(side=tk.LEFT, padx=(8, 0))
 
+        # ---- CH4 Calibration Section ----
+        calib_frame = ttk.LabelFrame(self.wifi_tab, text="CH\u2084 Sensor Calibration (TGS2611)")
+        calib_frame.pack(fill=tk.X, pady=(12, 0))
+
+        info_row = ttk.Frame(calib_frame)
+        info_row.pack(fill=tk.X, padx=10, pady=(8, 2))
+        ttk.Label(
+            info_row,
+            text="Place sensor in clean outdoor air and allow \u226524 h warm-up, then click Calibrate.",
+            wraplength=500,
+            justify=tk.LEFT,
+        ).pack(anchor="w")
+        ttk.Label(
+            info_row,
+            text="This stores the current Rs as R\u2082ppm in the sensor EEPROM and enables ppm output.",
+            wraplength=500,
+            justify=tk.LEFT,
+            foreground="#888888",
+        ).pack(anchor="w", pady=(2, 0))
+
+        entry_row = ttk.Frame(calib_frame)
+        entry_row.pack(fill=tk.X, padx=10, pady=(6, 4))
+        ttk.Label(entry_row, text="Channel index:").pack(side=tk.LEFT)
+        self.calib_ch_var = tk.StringVar(value="1")
+        calib_ch_entry = ttk.Entry(entry_row, textvariable=self.calib_ch_var, width=5)
+        calib_ch_entry.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(entry_row, text="  (1 for first/only TGS2611, matches CSV column)", foreground="#888888").pack(side=tk.LEFT)
+
+        calib_btn_row = ttk.Frame(calib_frame)
+        calib_btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
+        self.calib_r2ppm_btn = ttk.Button(
+            calib_btn_row, text="Store Clean-Air R\u2082ppm",
+            command=self._calib_r2ppm_send, state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.calib_r2ppm_btn.pack(side=tk.LEFT)
+        self.calib_r2ppm_status_var = tk.StringVar(value="")
+        ttk.Label(calib_btn_row, textvariable=self.calib_r2ppm_status_var, foreground="#888888").pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
+
     def _clear_wifi_form(self) -> None:
         """Clear all widgets from the form area."""
         for widget in self.wifi_form_frame.winfo_children():
@@ -1642,6 +1701,11 @@ class App(tk.Tk):
                 elif kind == "pump_ok":
                     self.status_var.set(f"Pump set to {payload}%")
                 elif kind == "pump_done":
+                    self._update_wifi_controls()
+                elif kind == "calib_r2ppm_ok":
+                    self.calib_r2ppm_status_var.set(f"R\u2082ppm stored for channel {payload} \u2713")
+                    self.status_var.set(f"TGS2611 ch{payload} R\u2082ppm calibrated")
+                elif kind == "calib_r2ppm_done":
                     self._update_wifi_controls()
                 elif kind == "pump_init":
                     pct = int(payload)
@@ -2297,6 +2361,8 @@ class App(tk.Tk):
         self.pump_set_btn.configure(state=pump_st)
         self.pump_off_btn.configure(state=pump_st)
         self.pump_full_btn.configure(state=pump_st)
+        # CH4 calibration
+        self.calib_r2ppm_btn.configure(state=pump_st)
 
     def _pump_set(self) -> None:
         """Set pump to slider value."""
@@ -2320,6 +2386,7 @@ class App(tk.Tk):
         self.pump_set_btn.configure(state=tk.DISABLED)
         self.pump_off_btn.configure(state=tk.DISABLED)
         self.pump_full_btn.configure(state=tk.DISABLED)
+        self.calib_r2ppm_btn.configure(state=tk.DISABLED)
 
         def worker() -> None:
             try:
@@ -2332,6 +2399,33 @@ class App(tk.Tk):
                 self.events.put(("error", exc))
             finally:
                 self.events.put(("pump_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _calib_r2ppm_send(self) -> None:
+        """Send CALIB_R2PPM command to store current Rs as R2ppm in sensor EEPROM."""
+        try:
+            ch_display = int(self.calib_ch_var.get())
+            if ch_display < 1:
+                raise ValueError
+            ch = ch_display - 1  # firmware is 0-based
+        except ValueError:
+            self.calib_r2ppm_status_var.set("Invalid channel (must be \u2265 1)")
+            return
+        self.calib_r2ppm_btn.configure(state=tk.DISABLED)
+        self.calib_r2ppm_status_var.set("Sending\u2026")
+
+        def worker() -> None:
+            try:
+                result = self.client.calib_r2ppm(channel=ch, timeout_s=5.0)
+                if result.get("success"):
+                    self.events.put(("calib_r2ppm_ok", ch_display))
+                else:
+                    self.events.put(("error", result.get("message", "Calibration failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("calib_r2ppm_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2690,4 +2784,5 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
 
