@@ -1345,12 +1345,12 @@ class App(tk.Tk):
         self.pump_set_btn.pack(side=tk.LEFT)
 
         self.pump_off_btn = ttk.Button(
-            btn_row, text="Off", command=self._pump_off, state=tk.DISABLED,
+            btn_row, text="Off", command=self._pump_off, state=tk.DISABLED, style="Accent.TButton",
         )
         self.pump_off_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.pump_full_btn = ttk.Button(
-            btn_row, text="100%", command=self._pump_full, state=tk.DISABLED,
+            btn_row, text="100%", command=self._pump_full, state=tk.DISABLED, style="Accent.TButton",
         )
         self.pump_full_btn.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1396,10 +1396,13 @@ class App(tk.Tk):
         lora_frame = ttk.LabelFrame(_scroll_inner, text="LoRa")
         lora_frame.pack(fill=tk.X, pady=(8, 4))
 
-        self.lora_dev_eui_var = tk.StringVar(value="—")
-        self.lora_app_eui_var = tk.StringVar(value="—")
-        self.lora_app_key_var = tk.StringVar(value="—")
-        self.lora_status_var  = tk.StringVar(value="")
+        self.lora_dev_eui_var  = tk.StringVar(value="—")
+        self.lora_app_eui_var  = tk.StringVar(value="—")
+        self.lora_app_key_var  = tk.StringVar(value="—")
+        self.lora_status_var   = tk.StringVar(value="")
+        self._lora_colon_var   = tk.BooleanVar(value=True)
+        self._lora_dev_eui_raw = ""
+        self._lora_app_eui_raw = ""
 
         lora_grid = ttk.Frame(lora_frame)
         lora_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
@@ -1428,9 +1431,14 @@ class App(tk.Tk):
 
         self.lora_gen_btn = ttk.Button(
             lora_btn_row, text="Generate Keys", command=self._lora_gen_keys,
-            state=tk.DISABLED,
+            state=tk.DISABLED, style="Accent.TButton",
         )
         self.lora_gen_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        ttk.Checkbutton(
+            lora_btn_row, text="Colon separators", variable=self._lora_colon_var,
+            command=self._toggle_eui_colons,
+        ).pack(side=tk.LEFT, padx=(8, 0))
 
         ttk.Label(lora_btn_row, textvariable=self.lora_status_var, foreground="#888888").pack(
             side=tk.LEFT, padx=(12, 0)
@@ -1833,8 +1841,10 @@ class App(tk.Tk):
                     self._update_wifi_controls()
                 elif kind == "lora_info_ok":
                     info = payload
-                    self.lora_dev_eui_var.set(info.get("dev_eui") or "READ_ERROR")
-                    self.lora_app_eui_var.set(info.get("app_eui") or "Not configured")
+                    self._lora_dev_eui_raw = info.get("dev_eui") or "READ_ERROR"
+                    self._lora_app_eui_raw = info.get("app_eui") or "Not configured"
+                    self.lora_dev_eui_var.set(self._fmt_eui(self._lora_dev_eui_raw))
+                    self.lora_app_eui_var.set(self._fmt_eui(self._lora_app_eui_raw))
                     self.lora_app_key_var.set(info.get("app_key") or "Not configured")
                     if info.get("generated"):
                         self.lora_status_var.set("Keys generated ✓")
@@ -2607,6 +2617,17 @@ class App(tk.Tk):
                 self.events.put(("calib_r2ppm_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _fmt_eui(self, raw: str) -> str:
+        """Return EUI with or without colon separators based on toggle state."""
+        if not raw or ":" not in raw:
+            return raw
+        return raw if self._lora_colon_var.get() else raw.replace(":", "")
+
+    def _toggle_eui_colons(self) -> None:
+        """Re-format EUI fields when the colon toggle changes."""
+        self.lora_dev_eui_var.set(self._fmt_eui(self._lora_dev_eui_raw))
+        self.lora_app_eui_var.set(self._fmt_eui(self._lora_app_eui_raw))
 
     def _lora_refresh(self) -> None:
         """Read DevEUI from module and AppEUI/AppKey from device NVS."""
