@@ -2249,16 +2249,42 @@ class App(tk.Tk):
             raw = fields[i + 1] if i + 1 < len(fields) else ""
             self.live_series[i].append(self._parse_float_or_none(raw))
 
+    @staticmethod
+    def _is_valid_timestamp(ts: str) -> bool:
+        """Return True if ts looks like a firmware-generated timestamp.
+
+        The firmware emits one of two forms:
+          - "YYYY-MM-DD HH:MM:SS"  (exactly 19 chars, dashes at [4]/[7], space at [10])
+          - "RTC NA (...)"         (fallback when the RTC hasn't synced yet)
+
+        A framing-slipped partial payload always puts a truncated time string
+        like "2:30:00" in field[0]; those are caught here and discarded.
+        """
+        s = ts.strip()
+        if len(s) == 19 and s[4] == '-' and s[7] == '-' and s[10] == ' ':
+            return True
+        if s.startswith("RTC"):
+            return True
+        return False
+
     def _append_live_line(self, line: str) -> None:
         # Check for header line: first field is "timestamp"
         if line.startswith("timestamp"):
             # Parse header CSV
             hdr = [field.strip() for field in line.split(",")]
             hdr = [field for field in hdr if field]
-            if hdr:
-                self.live_headers = hdr
-                self.live_last_values.clear()
-                # Set up table columns
+            # Require at least 2 columns (timestamp + at least one data field).
+            # A single-element result means a corrupted/partial header — ignore it
+            # to avoid wiping the table with a bogus column configuration.
+            if len(hdr) < 2:
+                return
+            self.live_headers = hdr
+            self.live_last_values.clear()
+            # Only reconfigure columns when the column list has actually changed.
+            # Calling configure(columns=...) on a Treeview destroys all existing
+            # rows even when the list is identical, which caused the table to clear
+            # every 10 seconds when the firmware re-sends the periodic header.
+            if hdr != self.live_table_columns:
                 self.live_table_columns = hdr
                 self.live_table.configure(columns=hdr)
                 for col in hdr:
@@ -2276,9 +2302,18 @@ class App(tk.Tk):
         
         # Add data row to table
         fields = line.split(",")
-        # Pad with empty strings if needed
-        while len(fields) < len(self.live_table_columns):
-            fields.append("")
+
+        # If the timestamp looks like a framing-slip partial row, mark every
+        # missing or empty field as "NA" so the row is still visible but clearly
+        # flagged rather than showing misleadingly blank cells.
+        if not self._is_valid_timestamp(fields[0] if fields else ""):
+            while len(fields) < len(self.live_table_columns):
+                fields.append("NA")
+            fields = ["NA" if f.strip() == "" else f for f in fields]
+        else:
+            # Pad with empty strings if needed
+            while len(fields) < len(self.live_table_columns):
+                fields.append("")
         fields = self._apply_live_value_hold(fields)
         
         # Insert row
