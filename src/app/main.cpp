@@ -29,6 +29,7 @@
 #include "net/wifi_manager.hpp"
 #include "ui/oled_ui.hpp"
 #include "common/drivers/lora_e5.hpp"
+#include <FastLED.h>
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -67,6 +68,12 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define PUMP_LEDC_MODE   LEDC_LOW_SPEED_MODE
 #define PUMP_LEDC_TIMER  LEDC_TIMER_0
 #define PUMP_LEDC_CH     LEDC_CHANNEL_0
+
+// ---------- Status LEDs (WS2812B chain on GPIO40) ----------
+#define LED_PIN     40
+#define NUM_LEDS     9
+static CRGB     s_leds[NUM_LEDS];
+static uint32_t s_led_off_ms = 0;  // non-zero: turn LED1 off at this millis()
 
 // ---------- Error Definition ----------
 #ifdef NO_ERROR
@@ -476,6 +483,91 @@ bool tgs2611_save_r2ppm(uint8_t ch) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// LoRa uplink helpers
+// ---------------------------------------------------------------------------
+
+static bool     s_lora_joined       = false;
+static uint32_t s_last_lora_send_ms = 0;
+
+// Get the current RTC time as a UTC Unix epoch (0 = unavailable).
+static uint32_t get_utc_epoch() {
+  if (!rtc_present || !rtc.updateTime()) return 0;
+  int y = rtc.getYear(); if (y < 100) y += 2000;
+  struct tm utc{};
+  utc.tm_year = y - 1900;
+  utc.tm_mon  = rtc.getMonth() - 1;
+  utc.tm_mday = rtc.getDate();
+  utc.tm_hour = rtc.getHours();
+  utc.tm_min  = rtc.getMinutes();
+  utc.tm_sec  = rtc.getSeconds();
+  setenv("TZ", "UTC0", 1); tzset();
+  time_t e = mktime(&utc);
+  setenv("TZ", "GMT0BST,M3.5.0/1,M10.5.0/2", 1); tzset();
+  return (e > 0) ? (uint32_t)e : 0;
+}
+
+// Build the 14-byte LoRa uplink payload (big-endian):
+//   [0..3]   uint32  Unix UTC epoch       (0 = unavailable)
+//   [4..5]   uint16  CO2 ppm              (0xFFFF = N/A)
+//   [6..7]   uint16  SHT45 RH × 100 %    (0xFFFF = N/A;  5500 = 55.00 %)
+//   [8..9]   int16   TMP117 temp × 100 °C (0x8000 = N/A;  2500 = 25.00 °C)
+//   [10..11] uint16  LPS22DF pres × 10 hPa(0xFFFF = N/A; 10132 = 1013.2 hPa)
+//   [12..13] uint16  TGS2611 CH4 × 100 ppm(0xFFFF = N/A;   200 = 2.00 ppm)
+static void lora_build_payload(uint8_t* buf) {
+  uint32_t epoch = get_utc_epoch();
+  buf[0] = (epoch >> 24) & 0xFF;
+  buf[1] = (epoch >> 16) & 0xFF;
+  buf[2] = (epoch >>  8) & 0xFF;
+  buf[3] =  epoch        & 0xFF;
+
+  auto enc_u16 = [](float v, float scale) -> uint16_t {
+    if (isnan(v)) return 0xFFFF;
+    long r = lroundf(v * scale);
+    return (uint16_t)(r < 0 ? 0 : r > 65534 ? 65534 : r);
+  };
+  auto enc_i16 = [](float v, float scale) -> int16_t {
+    if (isnan(v)) return (int16_t)0x8000;
+    long r = lroundf(v * scale);
+    return (int16_t)(r < -32767 ? -32767 : r > 32767 ? 32767 : r);
+  };
+
+  uint16_t co2 = 0xFFFF;
+  if (N_SCD4X > 0 && scd4x_nodes[0].last_ok_ms &&
+      (millis() - scd4x_nodes[0].last_ok_ms <= 10000UL)) {
+    co2 = scd4x_nodes[0].co2;
+  }
+  buf[4] = co2 >> 8;  buf[5] = co2 & 0xFF;
+
+  float rh   = (N_TRHP > 0 && win_trhp_sht45_rh[0].count) ? win_trhp_sht45_rh[0].mean() : NAN;
+  float temp = (N_TRHP > 0 && win_trhp_tmp117_t[0].count) ? win_trhp_tmp117_t[0].mean() : NAN;
+  float pres = (N_TRHP > 0 && win_trhp_lps_p[0].count)    ? win_trhp_lps_p[0].mean()    : NAN;
+  float ch4  = (N_TGS2611 > 0 && win_tgs2611_ppm[0].count) ? win_tgs2611_ppm[0].mean()  : NAN;
+
+  uint16_t rh_enc   = enc_u16(rh,   100.0f);
+  int16_t  temp_enc = enc_i16(temp, 100.0f);
+  uint16_t pres_enc = enc_u16(pres,  10.0f);
+  uint16_t ch4_enc  = enc_u16(ch4,  100.0f);
+
+  buf[6]  = rh_enc >> 8;            buf[7]  = rh_enc & 0xFF;
+  buf[8]  = (uint16_t)temp_enc >> 8; buf[9]  = (uint16_t)temp_enc & 0xFF;
+  buf[10] = pres_enc >> 8;           buf[11] = pres_enc & 0xFF;
+  buf[12] = ch4_enc >> 8;            buf[13] = ch4_enc & 0xFF;
+}
+
+static bool lora_send_reading() {
+  uint8_t payload[14];
+  lora_build_payload(payload);
+  return lora::send_hex(payload, sizeof(payload));
+}
+
+// Flash LED1 (index 0, nearest LoRa chip) for 'ms' milliseconds.
+static void led1_flash(CRGB colour, uint32_t ms = 500) {
+  s_leds[0]    = colour;
+  FastLED.show();
+  s_led_off_ms = millis() + ms;
+}
+
 namespace {
   static inline uint8_t to_u8(hal::Mux::Ch ch) { return static_cast<uint8_t>(ch); }
 }
@@ -489,6 +581,16 @@ void setup() {
   Serial.begin(115200);
   delay(100); // brief USB settle; won't affect binary protocol sync
   ui::proto::write_message(0x02, "Serial open");
+
+  FastLED.addLeds<WS2812B, LED_PIN, GRB>(s_leds, NUM_LEDS);
+  FastLED.setBrightness(50);
+
+  // Startup self-test: all LEDs green for 1 s
+  fill_solid(s_leds, NUM_LEDS, CRGB::Green);
+  FastLED.show();
+  delay(1000);
+  FastLED.clear();
+  FastLED.show();
 
   n2o_uart.begin(Serial1, UART1_RX_PIN, UART1_TX_PIN, UART1_BAUD, SERIAL_8N1);
   ui::proto::write_message(0x02, "N2O UART1 init: RX=GPIO17(pin21), TX=GPIO18(pin22)");
@@ -603,6 +705,11 @@ void setup() {
 
   lora::begin();
 
+  // Attempt LoRaWAN OTAA join (blocks up to 15 s; module retains session across resets).
+  s_lora_joined = lora::join(15000);
+  led1_flash(s_lora_joined ? CRGB::Green : CRGB::Red, 2000);
+  ui::proto::write_message(0x02, s_lora_joined ? "LoRa: joined" : "LoRa: join failed (will retry in loop)");
+
   // SHORT delay to let devices settle
   delay(1000);
 
@@ -625,6 +732,35 @@ void loop() {
   // This ensures the GUI always has a fresh header, even if it connects after startup
   static uint32_t last_header_sent_ms = 0;
   uint32_t now = millis();
+
+  // --- LED1: turn off after flash duration ---
+  if (s_led_off_ms && now >= s_led_off_ms) {
+    s_leds[0]    = CRGB::Black;
+    FastLED.show();
+    s_led_off_ms = 0;
+  }
+
+  // --- LoRa periodic uplink (every 60 s) ---
+  {
+    constexpr uint32_t LORA_SEND_INTERVAL = 60000UL;
+    constexpr uint32_t LORA_JOIN_RETRY    = 30000UL;
+    static uint32_t s_last_lora_join_ms = 0;
+    if (!s_lora_joined) {
+      if (now - s_last_lora_join_ms >= LORA_JOIN_RETRY) {
+        s_lora_joined = lora::join(15000);
+        led1_flash(s_lora_joined ? CRGB::Green : CRGB::Red, 2000);
+        s_last_lora_join_ms = now;
+      }
+    } else if (now - s_last_lora_send_ms >= LORA_SEND_INTERVAL) {
+      bool tx_ok = lora_send_reading();
+      led1_flash(tx_ok ? CRGB::Green : CRGB::Red);
+      if (!tx_ok) s_lora_joined = false;           // failure → re-join next cycle
+      s_last_lora_send_ms = now;
+    }
+  }
+
+  // --- Send CSV header periodically (every ~10 seconds) when live streaming ---
+  // This ensures the GUI always has a fresh header, even if it connects after startup
   if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
     ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true));
     last_header_sent_ms = now;

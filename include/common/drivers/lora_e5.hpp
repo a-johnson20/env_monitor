@@ -44,4 +44,14 @@ String load_app_key();
 // Persist AppEUI and AppKey to ESP32 NVS (namespace "lora").
 void save_keys(const String& eui, const String& key);
 
+// Configure LoRaWAN OTAA mode (EU868, Class A, ADR on) and attempt a network join.
+// Safe to call when already joined — returns true immediately in that case.
+// Blocks for up to timeout_ms milliseconds. Returns true on success.
+bool join(uint32_t timeout_ms = 15000);
+
+// Send a raw binary payload as an unconfirmed LoRaWAN uplink on FPort `port`.
+// Payload is hex-encoded and sent via AT+MSGHEX.
+// Returns true when "+MSGHEX: Done" is received within timeout_ms.
+bool send_hex(const uint8_t* data, size_t len, uint8_t port = 2, uint32_t timeout_ms = 10000);
+
 } // namespace lora

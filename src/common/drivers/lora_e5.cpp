@@ -167,4 +167,42 @@ void save_keys(const String& eui, const String& key) {
     _prefs.end();
 }
 
+bool join(uint32_t timeout_ms) {
+    // Configure region and mode (idempotent — safe to repeat)
+    at_cmd("AT+DR=EU868",    1000, nullptr, "+DR:");
+    at_cmd("AT+CLASS=A",     1000, nullptr, "+CLASS:");
+    at_cmd("AT+ADR=ON",      1000, nullptr, "+ADR:");
+    at_cmd("AT+MODE=LWOTAA", 1000, nullptr, "+MODE:");
+
+    // Send join request and poll for terminal responses.
+    // Note: "+JOIN: Joined already" does NOT produce a trailing "+JOIN: Done",
+    // so we handle all cases with raw polling.
+    while (_uart.available()) _uart.read();
+    _uart.print("AT+JOIN\r\n");
+    String resp;
+    uint32_t t0 = millis();
+    while (millis() - t0 < timeout_ms) {
+        if (_uart.available()) resp += (char)_uart.read();
+        if (resp.indexOf("+JOIN: Network joined") >= 0) return true;
+        if (resp.indexOf("+JOIN: Joined already") >= 0) return true;
+        if (resp.indexOf("+JOIN: Join failed")    >= 0) return false;
+        if (resp.indexOf("+JOIN: Done")            >= 0) return false;
+    }
+    return false;  // timeout
+}
+
+bool send_hex(const uint8_t* data, size_t len, uint8_t port, uint32_t timeout_ms) {
+    at_cmd("AT+PORT=" + String(port), 1000, nullptr, "+PORT:");
+
+    String hex;
+    hex.reserve(len * 2);
+    for (size_t i = 0; i < len; ++i) {
+        char buf[3];
+        snprintf(buf, sizeof(buf), "%02X", data[i]);
+        hex += buf;
+    }
+    String resp = at_cmd("AT+MSGHEX=\"" + hex + "\"", timeout_ms, nullptr, "+MSGHEX: Done");
+    return resp.indexOf("+MSGHEX: Done") >= 0;
+}
+
 } // namespace lora
