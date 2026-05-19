@@ -28,6 +28,7 @@
 #include "ui/serial_protocol.hpp"
 #include "net/wifi_manager.hpp"
 #include "ui/oled_ui.hpp"
+#include "common/drivers/lora_e5.hpp"
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -599,6 +600,8 @@ void setup() {
   pump_prefs.begin("pump", false);
   pump_percent = pump_prefs.getFloat("pct", 0.0f);
   pump_set_percent(pump_percent);
+
+  lora::begin();
 
   // SHORT delay to let devices settle
   delay(1000);

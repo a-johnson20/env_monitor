@@ -2,6 +2,7 @@
 #include "ui/serial_protocol.hpp"
 #include "net/wifi_manager.hpp"
 #include "logging/sd_logger.hpp"
+#include "common/drivers/lora_e5.hpp"
 #include <WiFi.h>
 #include <vector>
 #include <SD_MMC.h>
@@ -527,6 +528,33 @@ void poll() {
       } else {
         proto::write_error(proto::ErrorCode::INVALID_CMD);
       }
+      break;
+    }
+
+    case proto::Cmd::LORA_INFO: {
+      String dev_eui = lora::get_dev_eui();
+      // get_dev_eui() returns the EUI string, or a diagnostic like
+      // "NO_RESP", "PING:...", "PARSE_ERR:..." etc. — pass through as-is.
+      if (dev_eui.length() == 0) dev_eui = "READ_ERROR";
+      String app_eui = lora::load_app_eui();
+      String app_key = lora::load_app_key();
+      String payload = dev_eui + "," + app_eui + "," + app_key;
+      proto::write_message(static_cast<uint8_t>(proto::RespType::LORA_INFO), payload);
+      break;
+    }
+
+    case proto::Cmd::LORA_GEN_KEYS: {
+      String dev_eui = lora::get_dev_eui();
+      if (dev_eui.length() == 0) dev_eui = "READ_ERROR";
+      String app_eui = lora::gen_app_eui();
+      String app_key = lora::gen_app_key();
+      if (!lora::program_keys(app_eui, app_key)) {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+        break;
+      }
+      lora::save_keys(app_eui, app_key);
+      String payload = dev_eui + "," + app_eui + "," + app_key;
+      proto::write_message(static_cast<uint8_t>(proto::RespType::LORA_INFO), payload);
       break;
     }
 

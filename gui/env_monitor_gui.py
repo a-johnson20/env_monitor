@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
 Simple desktop GUI for env_monitor serial menu.
 
@@ -94,6 +94,8 @@ class ProtoCmd:
     PUMP_SET = 0x21
     PUMP_GET = 0x22
     CALIB_R2PPM = 0x23
+    LORA_INFO = 0x24
+    LORA_GEN_KEYS = 0x25
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -115,6 +117,7 @@ class ProtoResp:
     LIVE_DATA = 0xFE  # 0xFE avoids collision with ASCII space (0x20) in timestamps
     RTC_RESPONSE = 0x21
     PUMP_STATUS = 0x22
+    LORA_INFO = 0x23   # DevEUI,AppEUI,AppKey CSV string
     PROMPT_STRING = 0x30
     PROMPT_CONFIRM = 0x31
 
@@ -793,6 +796,54 @@ class SerialMenuClient:
                 return {"success": False, "message": f"Error code {code}"}
             return {"success": False, "message": f"Unexpected response: {resp}"}
 
+    def lora_info(self, timeout_s: float = 10.0) -> dict:
+        """Read DevEUI from module + AppEUI/AppKey from device NVS."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.LORA_INFO)
+            resp = self._read_byte(timeout_s)
+            if resp == ProtoResp.LORA_INFO:
+                length = self._read_byte(timeout_s)
+                payload = self._read_exact(length, timeout_s).decode("utf-8", errors="replace")
+                parts = payload.split(",", 2)
+                return {
+                    "success": True,
+                    "dev_eui": parts[0] if len(parts) > 0 else "",
+                    "app_eui": parts[1] if len(parts) > 1 else "",
+                    "app_key": parts[2] if len(parts) > 2 else "",
+                }
+            elif resp == ProtoResp.ERROR:
+                code = self._read_byte(timeout_s)
+                return {"success": False, "message": f"Error code {code}"}
+            return {"success": False, "message": f"Unexpected response: {resp}"}
+
+    def gen_lora_keys(self, timeout_s: float = 15.0) -> dict:
+        """Generate random AppEUI + AppKey, program LoRa module, store in device NVS."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.LORA_GEN_KEYS)
+            resp = self._read_byte(timeout_s)
+            if resp == ProtoResp.LORA_INFO:
+                length = self._read_byte(timeout_s)
+                payload = self._read_exact(length, timeout_s).decode("utf-8", errors="replace")
+                parts = payload.split(",", 2)
+                return {
+                    "success": True,
+                    "dev_eui": parts[0] if len(parts) > 0 else "",
+                    "app_eui": parts[1] if len(parts) > 1 else "",
+                    "app_key": parts[2] if len(parts) > 2 else "",
+                }
+            elif resp == ProtoResp.ERROR:
+                code = self._read_byte(timeout_s)
+                return {"success": False, "message": f"Error code {code}"}
+            return {"success": False, "message": f"Unexpected response: {resp}"}
+
 
 # ============ GUI APPLICATION ============
 
@@ -858,6 +909,12 @@ class App(tk.Tk):
         self.rtc_poll_timer: int | None = None
         self.rtc_poll_inflight = False
         self.rtc_current_datetime = "0000-00-00 00:00"
+
+        # LoRa settings
+        self.lora_dev_eui_var: tk.StringVar | None = None
+        self.lora_app_eui_var: tk.StringVar | None = None
+        self.lora_app_key_var: tk.StringVar | None = None
+        self.lora_status_var: tk.StringVar | None = None
 
         self.port_var = tk.StringVar()
         self.baud_var = tk.StringVar(value="115200")
@@ -1170,7 +1227,32 @@ class App(tk.Tk):
         ttk.Label(bottom, textvariable=self.preview_info_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
 
     def _build_wifi_tab(self) -> None:
-        btns = ttk.Frame(self.wifi_tab)
+        # ---- Single scrollable canvas for the entire Settings tab ----
+        _tab_canvas = tk.Canvas(self.wifi_tab, highlightthickness=0)
+        _tab_sb = ttk.Scrollbar(self.wifi_tab, orient=tk.VERTICAL, command=_tab_canvas.yview)
+        _scroll_inner = ttk.Frame(_tab_canvas)
+
+        _scroll_inner.bind(
+            "<Configure>",
+            lambda e: _tab_canvas.configure(scrollregion=_tab_canvas.bbox("all")),
+        )
+        _tab_win = _tab_canvas.create_window((0, 0), window=_scroll_inner, anchor="nw")
+        _tab_canvas.bind(
+            "<Configure>",
+            lambda e: _tab_canvas.itemconfig(_tab_win, width=e.width),
+        )
+        _tab_canvas.configure(yscrollcommand=_tab_sb.set)
+        _tab_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        _tab_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        def _scroll_tab(event: tk.Event) -> None:
+            _tab_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        _tab_canvas.bind("<Enter>", lambda _: _tab_canvas.bind_all("<MouseWheel>", _scroll_tab))
+        _tab_canvas.bind("<Leave>", lambda _: _tab_canvas.unbind_all("<MouseWheel>"))
+
+        # ---- Toolbar ----
+        btns = ttk.Frame(_scroll_inner)
         btns.pack(fill=tk.X, pady=(0, 10))
 
         self.wifi_scan_btn = ttk.Button(
@@ -1200,8 +1282,8 @@ class App(tk.Tk):
         )
         self.wifi_reset_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        split = ttk.Panedwindow(self.wifi_tab, orient=tk.HORIZONTAL)
-        split.pack(fill=tk.BOTH, expand=True)
+        split = ttk.Panedwindow(_scroll_inner, orient=tk.HORIZONTAL)
+        split.pack(fill=tk.X)
 
         left = ttk.Frame(split)
         right = ttk.Frame(split)
@@ -1211,7 +1293,7 @@ class App(tk.Tk):
         # Left side: Available Networks (combined list of saved + scanned + "Other")
         ttk.Label(left, text="Networks", style="Section.TLabel").pack(anchor="w")
         net_wrap = ttk.Frame(left)
-        net_wrap.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        net_wrap.pack(fill=tk.X, pady=(4, 0))
         
         self.wifi_network_tree = ttk.Treeview(net_wrap, columns=("SSID", "RSSI", "Security"), show="headings", height=12)
         self.wifi_network_tree.heading("SSID", text="SSID")
@@ -1234,10 +1316,10 @@ class App(tk.Tk):
         # Right side: Dynamic form area
         ttk.Label(right, text="Connect", style="Section.TLabel").pack(anchor="w", padx=(12, 0))
         self.wifi_form_frame = ttk.Frame(right)
-        self.wifi_form_frame.pack(fill=tk.BOTH, expand=True, pady=(12, 0), padx=(12, 0))
+        self.wifi_form_frame.pack(fill=tk.X, pady=(12, 0), padx=(12, 0))
 
         # ---- Pump Control Section ----
-        pump_frame = ttk.LabelFrame(self.wifi_tab, text="Pump Control")
+        pump_frame = ttk.LabelFrame(_scroll_inner, text="Pump Control")
         pump_frame.pack(fill=tk.X, pady=(12, 0))
 
         slider_row = ttk.Frame(pump_frame)
@@ -1273,8 +1355,8 @@ class App(tk.Tk):
         self.pump_full_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         # ---- CH4 Calibration Section ----
-        calib_frame = ttk.LabelFrame(self.wifi_tab, text="TGS2611 Sensor Calibration")
-        calib_frame.pack(fill=tk.X, pady=(12, 0))
+        calib_frame = ttk.LabelFrame(_scroll_inner, text="TGS2611 Sensor Calibration")
+        calib_frame.pack(fill=tk.X, pady=(8, 0))
 
         info_row = ttk.Frame(calib_frame)
         info_row.pack(fill=tk.X, padx=10, pady=(8, 2))
@@ -1307,6 +1389,50 @@ class App(tk.Tk):
         self.calib_r2ppm_btn.pack(side=tk.LEFT)
         self.calib_r2ppm_status_var = tk.StringVar(value="")
         ttk.Label(calib_btn_row, textvariable=self.calib_r2ppm_status_var, foreground="#888888").pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
+
+        # ---- LoRa Section ----
+        lora_frame = ttk.LabelFrame(_scroll_inner, text="LoRa")
+        lora_frame.pack(fill=tk.X, pady=(8, 4))
+
+        self.lora_dev_eui_var = tk.StringVar(value="—")
+        self.lora_app_eui_var = tk.StringVar(value="—")
+        self.lora_app_key_var = tk.StringVar(value="—")
+        self.lora_status_var  = tk.StringVar(value="")
+
+        lora_grid = ttk.Frame(lora_frame)
+        lora_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
+        lora_grid.columnconfigure(1, weight=1)
+
+        ttk.Label(lora_grid, text="Device EUI:", anchor="w").grid(row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(lora_grid, textvariable=self.lora_dev_eui_var, state="readonly", width=26).grid(
+            row=0, column=1, sticky="ew", padx=(8, 0))
+
+        ttk.Label(lora_grid, text="App EUI:", anchor="w").grid(row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(lora_grid, textvariable=self.lora_app_eui_var, state="readonly", width=26).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0))
+
+        ttk.Label(lora_grid, text="App Key:", anchor="w").grid(row=2, column=0, sticky="w", pady=2)
+        ttk.Entry(lora_grid, textvariable=self.lora_app_key_var, state="readonly", width=34).grid(
+            row=2, column=1, sticky="ew", padx=(8, 0))
+
+        lora_btn_row = ttk.Frame(lora_frame)
+        lora_btn_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        self.lora_refresh_btn = ttk.Button(
+            lora_btn_row, text="Refresh", command=self._lora_refresh,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.lora_refresh_btn.pack(side=tk.LEFT)
+
+        self.lora_gen_btn = ttk.Button(
+            lora_btn_row, text="Generate Keys", command=self._lora_gen_keys,
+            state=tk.DISABLED,
+        )
+        self.lora_gen_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        ttk.Label(lora_btn_row, textvariable=self.lora_status_var, foreground="#888888").pack(
             side=tk.LEFT, padx=(12, 0)
         )
 
@@ -1705,6 +1831,17 @@ class App(tk.Tk):
                     self.status_var.set(f"TGS2611 ch{payload} R\u2082ppm calibrated")
                 elif kind == "calib_r2ppm_done":
                     self._update_wifi_controls()
+                elif kind == "lora_info_ok":
+                    info = payload
+                    self.lora_dev_eui_var.set(info.get("dev_eui") or "READ_ERROR")
+                    self.lora_app_eui_var.set(info.get("app_eui") or "Not configured")
+                    self.lora_app_key_var.set(info.get("app_key") or "Not configured")
+                    if info.get("generated"):
+                        self.lora_status_var.set("Keys generated ✓")
+                    else:
+                        self.lora_status_var.set("")
+                elif kind == "lora_done":
+                    self._update_wifi_controls()
                 elif kind == "pump_init":
                     pct = int(payload)
                     self.pump_pct_var.set(pct)
@@ -1783,8 +1920,13 @@ class App(tk.Tk):
                     self.events.put(("pump_init", pump["percent"]))
             except Exception:
                 pass
-            finally:
-                self.events.put(("initial_status_done", None))
+            try:
+                lora = self.client.lora_info(timeout_s=10.0)
+                if lora.get("success"):
+                    self.events.put(("lora_info_ok", lora))
+            except Exception:
+                pass
+            self.events.put(("initial_status_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -2396,6 +2538,10 @@ class App(tk.Tk):
         self.pump_full_btn.configure(state=pump_st)
         # CH4 calibration
         self.calib_r2ppm_btn.configure(state=pump_st)
+        # LoRa
+        lora_st = tk.NORMAL if pump_ok else tk.DISABLED
+        self.lora_refresh_btn.configure(state=lora_st)
+        self.lora_gen_btn.configure(state=lora_st)
 
     def _pump_set(self) -> None:
         """Set pump to slider value."""
@@ -2459,6 +2605,47 @@ class App(tk.Tk):
                 self.events.put(("error", exc))
             finally:
                 self.events.put(("calib_r2ppm_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _lora_refresh(self) -> None:
+        """Read DevEUI from module and AppEUI/AppKey from device NVS."""
+        self.lora_refresh_btn.configure(state=tk.DISABLED)
+        self.lora_gen_btn.configure(state=tk.DISABLED)
+        self.lora_status_var.set("Reading\u2026")
+
+        def worker() -> None:
+            try:
+                result = self.client.lora_info(timeout_s=10.0)
+                if result.get("success"):
+                    self.events.put(("lora_info_ok", result))
+                else:
+                    self.events.put(("error", result.get("message", "LoRa read failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("lora_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _lora_gen_keys(self) -> None:
+        """Generate new AppEUI + AppKey, program module, store in device NVS."""
+        self.lora_refresh_btn.configure(state=tk.DISABLED)
+        self.lora_gen_btn.configure(state=tk.DISABLED)
+        self.lora_status_var.set("Generating\u2026")
+
+        def worker() -> None:
+            try:
+                result = self.client.gen_lora_keys(timeout_s=15.0)
+                if result.get("success"):
+                    result["generated"] = True
+                    self.events.put(("lora_info_ok", result))
+                else:
+                    self.events.put(("error", result.get("message", "Key generation failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("lora_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
 
