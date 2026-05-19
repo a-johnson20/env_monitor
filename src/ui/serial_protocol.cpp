@@ -70,7 +70,7 @@ void write_line(const String& str) {
 void write_message(uint8_t type, const char* str, size_t len) {
   // Clamp to 255 bytes (single byte length field)
   if (len > 255) len = 255;
-  Serial.write(type);           // Message type (0x02 = STATUS, 0x20 = LIVE_DATA, etc)
+  Serial.write(type);           // Message type (0x02 = STATUS, 0xFE = LIVE_DATA, etc)
   Serial.write((uint8_t)len);   // Payload length
   Serial.write((const uint8_t*)str, len);  // Payload data
 }

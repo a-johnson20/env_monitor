@@ -112,7 +112,7 @@ class ProtoResp:
     LOG_BEGIN = 0x14
     LOG_DATA = 0x15
     LOG_END = 0x16
-    LIVE_DATA = 0x20
+    LIVE_DATA = 0xFE  # 0xFE avoids collision with ASCII space (0x20) in timestamps
     RTC_RESPONSE = 0x21
     PUMP_STATUS = 0x22
     PROMPT_STRING = 0x30
@@ -357,8 +357,8 @@ class SerialMenuClient:
         """Live stream loop - reads typed messages from device
         
         Format: [type byte][length byte][message data]
-        Types: 0x02 = STATUS (debug), 0x20 = LIVE_DATA (CSV)
-        Only CSV data (0x20) is passed to on_line callback.
+        Types: 0x02 = STATUS (debug), 0xFE = LIVE_DATA (CSV)
+        Only CSV data (0xFE) is passed to on_line callback.
         """
         ser = self._require_open()
         
@@ -384,8 +384,8 @@ class SerialMenuClient:
                 msg_data = self._read_exact(length, timeout_s=5.0)
                 line = msg_data.decode("utf-8", errors="replace")
                 
-                # Only process LIVE_DATA (0x20) messages
-                if msg_type == 0x20:
+                # Only process LIVE_DATA (0xFE) messages
+                if msg_type == 0xFE:
                     if line:
                         on_line(line)
                 # Ignore STATUS (0x02) debug messages

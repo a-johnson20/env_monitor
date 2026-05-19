@@ -46,7 +46,7 @@ enum class RespType : uint8_t {
   LOG_BEGIN       = 0x14,  // Log file transfer begin (path + size)
   LOG_DATA        = 0x15,  // Log file data chunk
   LOG_END         = 0x16,  // Log file transfer end
-  LIVE_DATA       = 0x20,  // Live sensor data (binary encoded)
+  LIVE_DATA       = 0xFE,  // Live sensor data (binary encoded) — 0xFE avoids collision with ASCII space (0x20) in timestamps
   RTC_RESPONSE    = 0x21,  // RTC time response
   PUMP_STATUS     = 0x22,  // Pump speed response (followed by uint8_t percent)
   
@@ -135,7 +135,7 @@ void write_line(const String& str);
 
 // Write a typed message (for all output: debug, CSV, RTC, etc)
 // Format: [1 byte type][1 byte length][N bytes data]
-// Types: STATUS (0x02), LIVE_DATA (0x20), RTC_RESPONSE (0x21)
+// Types: STATUS (0x02), LIVE_DATA (0xFE), RTC_RESPONSE (0x21)
 void write_message(uint8_t type, const char* str, size_t len);
 void write_message(uint8_t type, const String& str);
 

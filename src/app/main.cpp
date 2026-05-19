@@ -341,7 +341,7 @@ static void commit_and_reset_all_windows() {
 
   // Send live CSV data only when GUI has started live streaming
   if (ui::live_stream_enabled()) {
-    ui::proto::write_message(0x20, line);
+    ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), line);
   }
 
   // Only SD work is gated
@@ -623,7 +623,7 @@ void loop() {
   static uint32_t last_header_sent_ms = 0;
   uint32_t now = millis();
   if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
-    ui::proto::write_message(0x20, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true));
+    ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true));
     last_header_sent_ms = now;
   }
 
