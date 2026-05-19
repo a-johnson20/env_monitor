@@ -1273,21 +1273,19 @@ class App(tk.Tk):
         self.pump_full_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         # ---- CH4 Calibration Section ----
-        calib_frame = ttk.LabelFrame(self.wifi_tab, text="CH\u2084 Sensor Calibration (TGS2611)")
+        calib_frame = ttk.LabelFrame(self.wifi_tab, text="TGS2611 Sensor Calibration")
         calib_frame.pack(fill=tk.X, pady=(12, 0))
 
         info_row = ttk.Frame(calib_frame)
         info_row.pack(fill=tk.X, padx=10, pady=(8, 2))
         ttk.Label(
             info_row,
-            text="Place sensor in clean outdoor air and allow \u226524 h warm-up, then click Calibrate.",
-            wraplength=500,
+            text="Subject sensor to 2ppm CH\u2084, then click Calibrate.",
             justify=tk.LEFT,
         ).pack(anchor="w")
         ttk.Label(
             info_row,
             text="This stores the current Rs as R\u2082ppm in the sensor EEPROM and enables ppm output.",
-            wraplength=500,
             justify=tk.LEFT,
             foreground="#888888",
         ).pack(anchor="w", pady=(2, 0))
@@ -1303,7 +1301,7 @@ class App(tk.Tk):
         calib_btn_row = ttk.Frame(calib_frame)
         calib_btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
         self.calib_r2ppm_btn = ttk.Button(
-            calib_btn_row, text="Store Clean-Air R\u2082ppm",
+            calib_btn_row, text="Calibrate",
             command=self._calib_r2ppm_send, state=tk.DISABLED, style="Accent.TButton",
         )
         self.calib_r2ppm_btn.pack(side=tk.LEFT)
