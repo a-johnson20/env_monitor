@@ -29,7 +29,7 @@
 #include "net/wifi_manager.hpp"
 #include "ui/oled_ui.hpp"
 #include "common/drivers/lora_e5.hpp"
-#include <FastLED.h>
+#include "common/drivers/ws2812_leds.hpp"
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -68,12 +68,6 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define PUMP_LEDC_MODE   LEDC_LOW_SPEED_MODE
 #define PUMP_LEDC_TIMER  LEDC_TIMER_0
 #define PUMP_LEDC_CH     LEDC_CHANNEL_0
-
-// ---------- Status LEDs (WS2812B chain on GPIO40) ----------
-#define LED_PIN     40
-#define NUM_LEDS     9
-static CRGB     s_leds[NUM_LEDS];
-static uint32_t s_led_off_ms = 0;  // non-zero: turn LED1 off at this millis()
 
 // ---------- Error Definition ----------
 #ifdef NO_ERROR
@@ -359,6 +353,33 @@ static void commit_and_reset_all_windows() {
     sd_logger::append_line(path, line);
   }
 
+  // --- LED feedback (green = data present, red = NA this window) ---
+  // MUX channel-to-LED mapping: LED index = MUX channel number + 1
+  // (LED1/index 0 is reserved for LoRa status)
+  { size_t i = 0; for (auto ch : hal::Mux::SCD4x) {
+      const auto& n = scd4x_nodes[i];
+      bool fresh = n.last_ok_ms && (millis() - n.last_ok_ms <= SCD_FRESH_MS);
+      leds::led_flash(static_cast<uint8_t>(ch) + 1, fresh);  // CH2 → LED4
+      ++i;
+  }}
+  { size_t i = 0; for (auto ch : hal::Mux::TRHP) {
+      bool ok = win_trhp_sht45_t[i].count || win_trhp_sht45_rh[i].count ||
+                win_trhp_tmp117_t[i].count || win_trhp_lps_p[i].count;
+      leds::led_flash(static_cast<uint8_t>(ch) + 1, ok);     // CH1 → LED3
+      ++i;
+  }}
+  { size_t i = 0; for (auto ch : hal::Mux::TGS2611) {
+      leds::led_flash(static_cast<uint8_t>(ch) + 1,
+                      win_tgs2611_v[i].count > 0);            // CH4 → LED6
+      ++i;
+  }}
+  { size_t i = 0; for (auto ch : hal::Mux::TGS2616) {
+      leds::led_flash(static_cast<uint8_t>(ch) + 1,
+                      win_tgs2616_v[i].count > 0);
+      ++i;
+  }}
+  leds::led_flash(7, win_n2o_ppm.count > 0);  // UART1 → LED8
+
   // Reset per-window state (your new helper)
   reset_windows_and_flags();
 }
@@ -561,13 +582,6 @@ static bool lora_send_reading() {
   return lora::send_hex(payload, sizeof(payload));
 }
 
-// Flash LED1 (index 0, nearest LoRa chip) for 'ms' milliseconds.
-static void led1_flash(CRGB colour, uint32_t ms = 500) {
-  s_leds[0]    = colour;
-  FastLED.show();
-  s_led_off_ms = millis() + ms;
-}
-
 namespace {
   static inline uint8_t to_u8(hal::Mux::Ch ch) { return static_cast<uint8_t>(ch); }
 }
@@ -582,15 +596,7 @@ void setup() {
   delay(100); // brief USB settle; won't affect binary protocol sync
   ui::proto::write_message(0x02, "Serial open");
 
-  FastLED.addLeds<WS2812B, LED_PIN, GRB>(s_leds, NUM_LEDS);
-  FastLED.setBrightness(50);
-
-  // Startup self-test: all LEDs green for 1 s
-  fill_solid(s_leds, NUM_LEDS, CRGB::Green);
-  FastLED.show();
-  delay(1000);
-  FastLED.clear();
-  FastLED.show();
+  leds::begin();
 
   n2o_uart.begin(Serial1, UART1_RX_PIN, UART1_TX_PIN, UART1_BAUD, SERIAL_8N1);
   ui::proto::write_message(0x02, "N2O UART1 init: RX=GPIO17(pin21), TX=GPIO18(pin22)");
@@ -707,7 +713,7 @@ void setup() {
 
   // Attempt LoRaWAN OTAA join (blocks up to 15 s; module retains session across resets).
   s_lora_joined = lora::join(15000);
-  led1_flash(s_lora_joined ? CRGB::Green : CRGB::Red, 2000);
+  leds::led1_flash(s_lora_joined, 2000);
   ui::proto::write_message(0x02, s_lora_joined ? "LoRa: joined" : "LoRa: join failed (will retry in loop)");
 
   // SHORT delay to let devices settle
@@ -734,11 +740,7 @@ void loop() {
   uint32_t now = millis();
 
   // --- LED1: turn off after flash duration ---
-  if (s_led_off_ms && now >= s_led_off_ms) {
-    s_leds[0]    = CRGB::Black;
-    FastLED.show();
-    s_led_off_ms = 0;
-  }
+  leds::poll(now);
 
   // --- LoRa periodic uplink (every 60 s) ---
   {
@@ -748,12 +750,12 @@ void loop() {
     if (!s_lora_joined) {
       if (now - s_last_lora_join_ms >= LORA_JOIN_RETRY) {
         s_lora_joined = lora::join(15000);
-        led1_flash(s_lora_joined ? CRGB::Green : CRGB::Red, 2000);
+        leds::led1_flash(s_lora_joined, 2000);
         s_last_lora_join_ms = now;
       }
     } else if (now - s_last_lora_send_ms >= LORA_SEND_INTERVAL) {
       bool tx_ok = lora_send_reading();
-      led1_flash(tx_ok ? CRGB::Green : CRGB::Red);
+      leds::led1_flash(tx_ok);
       if (!tx_ok) s_lora_joined = false;           // failure → re-join next cycle
       s_last_lora_send_ms = now;
     }
