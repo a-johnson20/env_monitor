@@ -1186,8 +1186,12 @@ class App(tk.Tk):
             btns, text="Refresh File List", command=self.refresh_files, state=tk.DISABLED, style="Accent.TButton"
         )
         self.refresh_files_btn.pack(side=tk.LEFT)
+        self.select_all_btn = ttk.Button(
+            btns, text="Select All", command=self._select_all_files, state=tk.DISABLED, style="Accent.TButton"
+        )
+        self.select_all_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.download_btn = ttk.Button(
-            btns, text="Download Selected CSV", command=self.download_selected, state=tk.DISABLED, style="Accent.TButton"
+            btns, text="Download Selected CSV(s)", command=self.download_selected, state=tk.DISABLED, style="Accent.TButton"
         )
         self.download_btn.pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1199,7 +1203,7 @@ class App(tk.Tk):
         split.add(top, weight=2)
         split.add(bottom, weight=1)
 
-        self.files_tree = ttk.Treeview(top, columns=("idx", "path", "size"), show="headings")
+        self.files_tree = ttk.Treeview(top, columns=("idx", "path", "size"), show="headings", selectmode="extended")
         self.files_tree.heading("idx", text="#")
         self.files_tree.heading("path", text="Path")
         self.files_tree.heading("size", text="Bytes")
@@ -1602,6 +1606,7 @@ class App(tk.Tk):
         refresh_ok = self.connected and (not self.live_running) and (not self.files_refresh_inflight)
         self.refresh_files_btn.configure(state=tk.NORMAL if refresh_ok else tk.DISABLED)
         download_ok = refresh_ok and bool(self.file_entries)
+        self.select_all_btn.configure(state=tk.NORMAL if download_ok else tk.DISABLED)
         self.download_btn.configure(state=tk.NORMAL if download_ok else tk.DISABLED)
 
     def _schedule_poll(self) -> None:
@@ -1623,6 +1628,7 @@ class App(tk.Tk):
                     self.live_start_btn.configure(state=tk.NORMAL)
                     # Grey out file/WiFi buttons during initialization
                     self.refresh_files_btn.configure(state=tk.DISABLED)
+                    self.select_all_btn.configure(state=tk.DISABLED)
                     self.download_btn.configure(state=tk.DISABLED)
                     self.wifi_scan_btn.configure(state=tk.DISABLED)
                     self.wifi_saved_btn.configure(state=tk.DISABLED)
@@ -1674,6 +1680,15 @@ class App(tk.Tk):
                     path, nbytes = payload
                     self.status_var.set(f"Downloaded: {path}")
                     messagebox.showinfo("Download Complete", f"Saved:\n{path}\n\n{nbytes} bytes")
+                elif kind == "batch_download_ok":
+                    out_dir, saved = payload
+                    total_bytes = sum(nb for _, nb in saved)
+                    file_list = "\n".join(os.path.basename(p) for p, _ in saved)
+                    self.status_var.set(f"Downloaded {len(saved)} files to {out_dir}")
+                    messagebox.showinfo(
+                        "Batch Download Complete",
+                        f"Saved {len(saved)} files to:\n{out_dir}\n\n{file_list}\n\nTotal: {total_bytes:,} bytes",
+                    )
                 elif kind == "preview_ok":
                     if not self.connected:
                         continue
@@ -2143,38 +2158,71 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _select_all_files(self) -> None:
+        children = self.files_tree.get_children()
+        if children:
+            self.files_tree.selection_set(children)
+
     def download_selected(self) -> None:
         sel = self.files_tree.selection()
         if not sel:
             messagebox.showwarning("Select File", "Select a file to download.")
             return
 
-        row = self.files_tree.item(sel[0], "values")
-        index = int(row[0])
-        dev_path = str(row[1])
-        default_name = os.path.basename(dev_path) or f"log_{index}.csv"
-        if not default_name.lower().endswith(".csv"):
-            default_name += ".csv"
+        if len(sel) == 1:
+            row = self.files_tree.item(sel[0], "values")
+            index = int(row[0])
+            dev_path = str(row[1])
+            default_name = os.path.basename(dev_path) or f"log_{index}.csv"
+            if not default_name.lower().endswith(".csv"):
+                default_name += ".csv"
 
-        out = filedialog.asksaveasfilename(
-            title="Save CSV",
-            defaultextension=".csv",
-            initialfile=default_name,
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
-        )
-        if not out:
-            return
-        out_path = Path(out)
+            out = filedialog.asksaveasfilename(
+                title="Save CSV",
+                defaultextension=".csv",
+                initialfile=default_name,
+                filetypes=[("CSV files", "*.csv"), ("All files", "*.*")],
+            )
+            if not out:
+                return
+            out_path = Path(out)
 
-        def worker() -> None:
-            try:
-                self.events.put(("busy", f"Downloading {dev_path} ..."))
-                nbytes = self.client.download_log(index=index, output_path=out_path, timeout_s=20.0)
-                self.events.put(("download_ok", (str(out_path), nbytes)))
-            except Exception as exc:
-                self.events.put(("error", exc))
+            def worker() -> None:
+                try:
+                    self.events.put(("busy", f"Downloading {dev_path} ..."))
+                    nbytes = self.client.download_log(index=index, output_path=out_path, timeout_s=20.0)
+                    self.events.put(("download_ok", (str(out_path), nbytes)))
+                except Exception as exc:
+                    self.events.put(("error", exc))
 
-        threading.Thread(target=worker, daemon=True).start()
+            threading.Thread(target=worker, daemon=True).start()
+
+        else:
+            items = [
+                (int(self.files_tree.item(iid, "values")[0]), str(self.files_tree.item(iid, "values")[1]))
+                for iid in sel
+            ]
+            out_dir = filedialog.askdirectory(title=f"Save {len(items)} CSV Files To Folder")
+            if not out_dir:
+                return
+            out_dir_path = Path(out_dir)
+
+            def batch_worker() -> None:
+                saved: list[tuple[str, int]] = []
+                try:
+                    for index, dev_path in items:
+                        name = os.path.basename(dev_path) or f"log_{index}.csv"
+                        if not name.lower().endswith(".csv"):
+                            name += ".csv"
+                        out_path = out_dir_path / name
+                        self.events.put(("busy", f"Downloading {dev_path} ({len(saved) + 1}/{len(items)}) ..."))
+                        nbytes = self.client.download_log(index=index, output_path=out_path, timeout_s=20.0)
+                        saved.append((str(out_path), nbytes))
+                    self.events.put(("batch_download_ok", (str(out_dir_path), saved)))
+                except Exception as exc:
+                    self.events.put(("error", exc))
+
+            threading.Thread(target=batch_worker, daemon=True).start()
 
     def _refresh_live_graphs(self) -> None:
         if len(self.live_headers) <= 1 and self.live_series:
