@@ -13,6 +13,7 @@ String make_header(size_t n_scd4x,
                    size_t n_trhp,
                    size_t n_tgs2611,
                    size_t n_tgs2616,
-                   bool include_n2o_uart = false);
+                   bool include_n2o_uart = false,
+                   size_t n_sfm3505 = 0);
 
 } // namespace logfmt

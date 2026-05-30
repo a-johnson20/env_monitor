@@ -10,4 +10,5 @@ namespace hal::I2CAddr {
   inline constexpr uint8_t ADS1113 = 0x48;
   inline constexpr uint8_t LPS22DF = 0x5D;
   inline constexpr uint8_t SCD41 = 0x62;
+  inline constexpr uint8_t SFM3505 = 0x2E;
 }

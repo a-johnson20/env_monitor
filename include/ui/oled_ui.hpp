@@ -30,11 +30,14 @@ struct Model {
   float lps22df_p = NAN;
   bool  lps22df_p_fresh = false;
 
+  float tgs2611_ppm = NAN;
+  bool  tgs2611_ppm_fresh = false;
+
   float tgs2611_v = NAN;
   bool  tgs2611_v_fresh = false;
 
-  float tgs2616_v = NAN;
-  bool  tgs2616_v_fresh = false;
+  float n2o_ppm = NAN;
+  bool  n2o_ppm_fresh = false;
 
   // Channel index & count (for titles like “CO2 #2”)
   uint8_t co2_idx = 0,    co2_n = 1;
@@ -42,16 +45,15 @@ struct Model {
   uint8_t t_idx   = 0,    t_n   = 1;
   uint8_t p_idx   = 0,    p_n   = 1;
   uint8_t v2611_idx = 0,  v2611_n = 1;
-  uint8_t v2616_idx = 0,  v2616_n = 1;
 };
 
 // Which sparkline “signal” we store
-enum class Signal : uint8_t { CO2, RH, T, P, V2611, V2616, COUNT };
+enum class Signal : uint8_t { CO2, RH, T, P, V2611, N2O, COUNT };
 
 class OledUi {
  public:
   // Pages we can render
-  enum class Page : uint8_t { CO2, RH, T, P, V2611, V2616, Count };
+  enum class Page : uint8_t { CO2, RH, T, P, V2611, V2611v, N2O, Count };
 
   OledUi();
   ~OledUi() = default;
@@ -82,8 +84,11 @@ class OledUi {
   inline void pushSample2611(uint8_t ch, float v, bool fresh) {
     if (ch < TGS2611_SLOTS_) sparks_2611_[ch].push(v, fresh);
   }
-  inline void pushSample2616(uint8_t ch, float v, bool fresh) {
-    if (ch < TGS2616_SLOTS_) sparks_2616_[ch].push(v, fresh);
+  inline void pushSample2611v(uint8_t ch, float v, bool fresh) {
+    if (ch < TGS2611_SLOTS_) sparks_2611v_[ch].push(v, fresh);
+  }
+  inline void pushSampleN2O(float v, bool fresh) {
+    sparks_n2o_.push(v, fresh);
   }
   inline void pushSampleCO2(uint8_t ch, float v, bool fresh) {
     if (ch < CO2_SLOTS_) sparks_co2_[ch].push(v, fresh);
@@ -99,7 +104,6 @@ class OledUi {
   }
   // Tell the UI which physical slot is currently displayed as #k
   inline void setV2611Phys(uint8_t ch) { v2611_phys_ = (ch < TGS2611_SLOTS_) ? ch : 0; }
-  inline void setV2616Phys(uint8_t ch) { v2616_phys_ = (ch < TGS2616_SLOTS_) ? ch : 0; }
   inline void setCO2Phys(uint8_t ch)  { co2_phys_  = (ch < CO2_SLOTS_)  ? ch : 0; }
   inline void setTRHPPhys(uint8_t ch) { trhp_phys_ = (ch < TRHP_SLOTS_) ? ch : 0; }
 
@@ -162,17 +166,16 @@ class OledUi {
   // Per-physical-slot spark histories for adaptive identical sensors.
   // Use at least size 1 to keep arrays valid when no slots are compiled.
   static constexpr size_t TGS2611_SLOTS_ = hal::Mux::TGS2611.size() ? hal::Mux::TGS2611.size() : 1;
-  static constexpr size_t TGS2616_SLOTS_ = hal::Mux::TGS2616.size() ? hal::Mux::TGS2616.size() : 1;
   static constexpr size_t CO2_SLOTS_  = (hal::Mux::SCD4x.size() > 0 ? hal::Mux::SCD4x.size() : 1);
   static constexpr size_t TRHP_SLOTS_ = (hal::Mux::TRHP.size()  > 0 ? hal::Mux::TRHP.size()  : 1);
   Spark sparks_2611_[TGS2611_SLOTS_];
-  Spark sparks_2616_[TGS2616_SLOTS_];
+  Spark sparks_2611v_[TGS2611_SLOTS_];
+  Spark  sparks_n2o_;
   Spark  sparks_co2_[CO2_SLOTS_];
   Spark  sparks_rh_[TRHP_SLOTS_];
   Spark  sparks_t_[TRHP_SLOTS_];
   Spark  sparks_p_[TRHP_SLOTS_];
   uint8_t v2611_phys_ = 0;
-  uint8_t v2616_phys_ = 0;
   uint8_t co2_phys_  = 0;
   uint8_t trhp_phys_ = 0;
 };

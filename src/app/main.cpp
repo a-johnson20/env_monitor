@@ -3,6 +3,7 @@
 #include <esp_idf_version.h>   // for ESP_IDF_VERSION / ESP_IDF_VERSION_VAL
 #include <Wire.h>
 #include <SensirionI2cScd4x.h>
+#include <SensirionI2cSfm3505.h>
 #include <RV-3028-C7.h>          // constiko / RV-3028_C7-Arduino_Library
 #include <math.h>
 #include <time.h>
@@ -77,6 +78,7 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 
 // ---------- Driver objects ----------
 SensirionI2cScd4x scd4x;
+SensirionI2cSfm3505 sfm3505;
 
 // RTC
 RV3028 rtc;
@@ -91,6 +93,12 @@ struct Scd4xReading {
   float temp = NAN, rh = NAN;
 };
 
+struct Sfm3505Reading {
+  bool present = false, started = false;
+  unsigned long last_ok_ms = 0;
+  float air_slm = NAN, o2_slm = NAN;
+};
+
 struct Sht45Reading { bool valid = false; float temp = NAN, rh = NAN; };
 struct Lps22dfReading {
   bool p_ready = false, t_ready = false, present = false;
@@ -103,6 +111,7 @@ struct Ads1113Reading { bool valid = false; int16_t raw = 0; float volts = NAN; 
 
 struct Readings {
   Scd4xReading scd4x;
+  Sfm3505Reading sfm3505;
   Sht45Reading sht45;
   Lps22dfReading lps22df;
   Tmp117Reading tmp117;
@@ -118,12 +127,14 @@ struct RunningAvg {
 
 // Per-probe running windows (counts match config.hpp channel lists)
 constexpr size_t N_SCD4X =    hal::Mux::SCD4x.size();
+constexpr size_t N_SFM3505 =  hal::Mux::SFM3505.size();
 constexpr size_t N_TRHP  =    hal::Mux::TRHP.size();
 constexpr size_t N_TGS2611 =  hal::Mux::TGS2611.size();
 constexpr size_t N_TGS2616 =  hal::Mux::TGS2616.size();
 
 // Per-SCD4x instance readings (one struct per node)
 std::array<Scd4xReading, N_SCD4X> scd4x_nodes{};
+std::array<Sfm3505Reading, N_SFM3505> sfm3505_nodes{};
 
 // Per-TRHP station averages (one set per mux channel)
 std::array<Lps22dfReading, N_TRHP> lps22df_nodes{};
@@ -140,6 +151,8 @@ std::array<RunningAvg, N_TGS2611> win_tgs2611_rs{};   // sensor resistance (kΩ)
 std::array<RunningAvg, N_TGS2611> win_tgs2611_ppm{};  // CH4 ppm via Shah 2023 Eq.(6)
 std::array<RunningAvg, N_TGS2616> win_tgs2616_raw{};
 std::array<RunningAvg, N_TGS2616> win_tgs2616_v{};
+std::array<RunningAvg, N_SFM3505> win_sfm3505_air{};
+std::array<RunningAvg, N_SFM3505> win_sfm3505_o2{};
 
 // R2ppm reference resistance per TGS2611 channel (kΩ), loaded from EEPROM at boot.
 // NAN until calibrated (calib command writes it; then reboot to reload).
@@ -290,6 +303,8 @@ static void reset_windows_and_flags() {
   for (auto &w : win_tgs2611_ppm) w.reset();
   for (auto &w : win_tgs2616_raw) w.reset();
   for (auto &w : win_tgs2616_v)   w.reset();
+  for (auto &w : win_sfm3505_air) w.reset();
+  for (auto &w : win_sfm3505_o2)  w.reset();
 
   win_n2o_ppm.reset();
 
@@ -337,6 +352,12 @@ static void commit_and_reset_all_windows() {
     line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
   }
 
+  // SFM3505 avgs
+  for (size_t i = 0; i < N_SFM3505; ++i) {
+    line += ','; line += (win_sfm3505_air[i].count ? String(win_sfm3505_air[i].mean(), 3) : "NA");
+    line += ','; line += (win_sfm3505_o2[i].count  ? String(win_sfm3505_o2[i].mean(),  3) : "NA");
+  }
+
   // Platinum N2O UART average over the current commit window.
   line += ',';
   line += (win_n2o_ppm.count ? String(win_n2o_ppm.mean(), 2) : "NA");
@@ -349,7 +370,7 @@ static void commit_and_reset_all_windows() {
   // Only SD work is gated
   if (sd_logger::is_mounted() && !sd_logger::paused()) {
     const String path = logfmt::current_log_path(rtc_present, rtc);
-    sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true));
+    sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true, N_SFM3505));
     sd_logger::append_line(path, line);
   }
 
@@ -378,7 +399,12 @@ static void commit_and_reset_all_windows() {
                       win_tgs2616_v[i].count > 0);
       ++i;
   }}
-  leds::led_flash(7, win_n2o_ppm.count > 0);  // UART1 → LED8
+    { size_t i = 0; for (auto ch : hal::Mux::SFM3505) {
+      bool ok = win_sfm3505_air[i].count > 0 || win_sfm3505_o2[i].count > 0;
+      leds::led_flash(static_cast<uint8_t>(ch) + 1, ok);   // CH0 -> LED2
+      ++i;
+    }}
+  leds::led_flash(7, n2o_reading.last_ok_ms > 0);  // UART1 → LED8: green=valid, red=fault
 
   // Reset per-window state (your new helper)
   reset_windows_and_flags();
@@ -402,6 +428,24 @@ bool scd4x_read_if_ready(Scd4xReading &out) {
   uint16_t co2; float t, rh;
   if (scd4x.readMeasurement(co2, t, rh) != NO_ERROR) { out.started = false; return false; }
   out.co2 = co2; out.temp = t; out.rh = rh; out.ready = true; out.last_ok_ms = millis(); return true;
+}
+
+// ---------- SFM3505 ----------
+bool sfm3505_present() { Wire.beginTransmission(hal::I2CAddr::SFM3505); return Wire.endTransmission() == 0; }
+void sfm3505_ensure_running(Sfm3505Reading &st) {
+  if (st.started) return;
+  st.present = sfm3505_present(); if (!st.present) return;
+  sfm3505.stopContinuousMeasurement();
+  if (sfm3505.startContinuousMeasurement() == NO_ERROR) st.started = true;
+}
+bool sfm3505_read_if_ready(Sfm3505Reading &out) {
+  if (!out.started) return false;
+  float air = NAN, o2 = NAN;
+  if (sfm3505.readAllMeasurementData(air, o2) != NO_ERROR) { out.started = false; return false; }
+  out.air_slm = air;
+  out.o2_slm = o2;
+  out.last_ok_ms = millis();
+  return true;
 }
 
 // ---------- SHT45 ----------
@@ -676,6 +720,9 @@ void setup() {
   // Bind SCD4x driver once
   scd4x.begin(Wire, hal::I2CAddr::SCD41);
 
+  // Bind SFM3505 driver once
+  sfm3505.begin(Wire, hal::I2CAddr::SFM3505);
+
   // Print SCD4x serial numbers
   for (auto ch : hal::Mux::SCD4x) if (select_channel(Wire, ch, muxStateWire)) {
     uint64_t sn = 0;
@@ -683,6 +730,24 @@ void setup() {
       char buf[64];
       snprintf(buf, sizeof(buf), "SCD4x[ch=%u] serial: %08X%08X",
                     to_u8(ch), (uint32_t)(sn >> 32), (uint32_t)(sn & 0xFFFFFFFF));
+      ui::proto::write_message(0x02, buf);
+    }
+  }
+
+  // Probe SFM3505 channels and print product/serial if present
+  for (auto ch : hal::Mux::SFM3505) if (select_channel(Wire, ch, muxStateWire)) {
+    sfm3505.stopContinuousMeasurement();
+    uint32_t product = 0;
+    uint64_t serial = 0;
+    if (sfm3505.readProductIdentifier(product, serial) == NO_ERROR) {
+      char buf[96];
+      snprintf(buf, sizeof(buf), "SFM3505[ch=%u] product=%lu serial=%08X%08X",
+               to_u8(ch), (unsigned long)product,
+               (uint32_t)(serial >> 32), (uint32_t)(serial & 0xFFFFFFFF));
+      ui::proto::write_message(0x02, buf);
+    } else {
+      char buf[64];
+      snprintf(buf, sizeof(buf), "SFM3505 init failed on ch %u", to_u8(ch));
       ui::proto::write_message(0x02, buf);
     }
   }
@@ -764,7 +829,7 @@ void loop() {
   // --- Send CSV header periodically (every ~10 seconds) when live streaming ---
   // This ensures the GUI always has a fresh header, even if it connects after startup
   if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
-    ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true));
+    ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true, N_SFM3505));
     last_header_sent_ms = now;
   }
 
@@ -822,8 +887,9 @@ void loop() {
           case ui::OledUi::Page::RH:     cur = ui::OledUi::Page::T;      break;
           case ui::OledUi::Page::T:      cur = ui::OledUi::Page::P;      break;
           case ui::OledUi::Page::P:      cur = ui::OledUi::Page::V2611;  break;
-          case ui::OledUi::Page::V2611:  cur = ui::OledUi::Page::V2616;  break;
-          case ui::OledUi::Page::V2616:  cur = ui::OledUi::Page::CO2;   break;
+          case ui::OledUi::Page::V2611:  cur = ui::OledUi::Page::V2611v; break;
+          case ui::OledUi::Page::V2611v: cur = ui::OledUi::Page::N2O;    break;
+          case ui::OledUi::Page::N2O:    cur = ui::OledUi::Page::CO2;   break;
           default:                       cur = ui::OledUi::Page::CO2;   break;
         }
         bool ok =
@@ -831,8 +897,9 @@ void loop() {
           (cur == ui::OledUi::Page::RH    && trhpN)  ||
           (cur == ui::OledUi::Page::T     && trhpN)  ||
           (cur == ui::OledUi::Page::P     && trhpN)  ||
-          (cur == ui::OledUi::Page::V2611 && v2611N) ||
-          (cur == ui::OledUi::Page::V2616 && v2616N);
+          (cur == ui::OledUi::Page::V2611  && v2611N) ||
+          (cur == ui::OledUi::Page::V2611v && v2611N) ||
+          (cur == ui::OledUi::Page::N2O);
         if (ok) break;
       }
       oled.setPage(cur);
@@ -857,9 +924,13 @@ void loop() {
         else advance_to_next_page();
         break;
 
-      case ui::OledUi::Page::V2616:
-        if (v2616N) { idx_2616++; if (idx_2616 >= v2616N) { idx_2616 = 0; advance_to_next_page(); } }
+      case ui::OledUi::Page::V2611v:
+        if (v2611N) { idx_2611++; if (idx_2611 >= v2611N) { idx_2611 = 0; advance_to_next_page(); } }
         else advance_to_next_page();
+        break;
+
+      case ui::OledUi::Page::N2O:
+        advance_to_next_page();
         break;
 
       default:
@@ -954,6 +1025,21 @@ void loop() {
         }
       }
 
+      ++i;
+    }
+  }
+
+  // --------- SFM3505 ---------
+  {
+    size_t i = 0;
+    for (auto ch : hal::Mux::SFM3505) {
+      if (!select_channel(Wire, ch, muxStateWire)) { ++i; continue; }
+
+      sfm3505_ensure_running(sfm3505_nodes[i]);
+      if (sfm3505_read_if_ready(sfm3505_nodes[i])) {
+        win_sfm3505_air[i].add(sfm3505_nodes[i].air_slm);
+        win_sfm3505_o2[i].add(sfm3505_nodes[i].o2_slm);
+      }
       ++i;
     }
   }
@@ -1091,29 +1177,21 @@ void loop() {
   if (v2611N) {
     uint8_t ord = 0, ch = 0;
     for (; ch < N_TGS2611; ++ch)
-      if (win_tgs2611_v[ch].count > 0 && ord++ == idx_2611) break;
+      if (win_tgs2611_ppm[ch].count > 0 && ord++ == idx_2611) break;
     size_t k = (ch < N_TGS2611) ? ch : 0;
     oled.setV2611Phys(k);
 
-    m.tgs2611_v       = win_tgs2611_v[k].mean();
-    m.tgs2611_v_fresh = (win_tgs2611_v[k].count > 0);
+    m.tgs2611_ppm       = win_tgs2611_ppm[k].mean();
+    m.tgs2611_ppm_fresh = (win_tgs2611_ppm[k].count > 0);
+    m.tgs2611_v         = win_tgs2611_raw[k].mean();
+    m.tgs2611_v_fresh   = (win_tgs2611_raw[k].count > 0);
     m.v2611_idx = idx_2611;
     m.v2611_n   = v2611N;
   }
 
-  // --- TGS2616
-  if (v2616N) {
-    uint8_t ord = 0, ch = 0;
-    for (; ch < N_TGS2616; ++ch)
-      if (win_tgs2616_v[ch].count > 0 && ord++ == idx_2616) break;
-    size_t k = (ch < N_TGS2616) ? ch : 0;
-    oled.setV2616Phys(k);
-
-    m.tgs2616_v       = win_tgs2616_v[k].mean();
-    m.tgs2616_v_fresh = (win_tgs2616_v[k].count > 0);
-    m.v2616_idx = idx_2616;
-    m.v2616_n   = v2616N;
-  }
+  // --- N2O
+  m.n2o_ppm       = win_n2o_ppm.count ? win_n2o_ppm.mean() : NAN;
+  m.n2o_ppm_fresh = (win_n2o_ppm.count > 0);
 
   // --- Adaptive per-channel sparkline sampling (match UI cadence) ---
   {
@@ -1153,15 +1231,20 @@ void loop() {
       }
       // TGS2611 channels
       for (uint8_t ch = 0; ch < N_TGS2611; ++ch) {
-        const bool fresh = (win_tgs2611_v[ch].count > 0);
-        const float mean = fresh ? (float)win_tgs2611_v[ch].mean() : 0.0f;
+        const bool fresh = (win_tgs2611_ppm[ch].count > 0);
+        const float mean = fresh ? (float)win_tgs2611_ppm[ch].mean() : 0.0f;
         oled.pushSample2611(ch, mean, fresh);
       }
-      // TGS2616 channels
-      for (uint8_t ch = 0; ch < N_TGS2616; ++ch) {
-        const bool fresh = (win_tgs2616_v[ch].count > 0);
-        const float mean = fresh ? (float)win_tgs2616_v[ch].mean() : 0.0f;
-        oled.pushSample2616(ch, mean, fresh);
+      for (uint8_t ch = 0; ch < N_TGS2611; ++ch) {
+        const bool fresh = (win_tgs2611_raw[ch].count > 0);
+        const float mean = fresh ? (float)win_tgs2611_raw[ch].mean() : 0.0f;
+        oled.pushSample2611v(ch, mean, fresh);
+      }
+      // N2O
+      {
+        const bool fresh = (win_n2o_ppm.count > 0);
+        const float mean = fresh ? (float)win_n2o_ppm.mean() : 0.0f;
+        oled.pushSampleN2O(mean, fresh);
       }
     }
   }

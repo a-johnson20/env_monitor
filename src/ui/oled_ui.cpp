@@ -19,7 +19,8 @@ bool OledUi::begin(TwoWire& wire, uint8_t i2c_addr, uint16_t width, uint16_t hei
   GRAPH_SAMPLE_MS_ = (15UL * 60UL * 1000UL) / (unsigned long)W_;
   for (auto& s : sparks_) s.configure(W_);
   for (auto& s : sparks_2611_) s.configure(W_);
-  for (auto& s : sparks_2616_) s.configure(W_);
+  for (auto& s : sparks_2611v_) s.configure(W_);
+  sparks_n2o_.configure(W_);
   for (auto& s : sparks_co2_)   s.configure(W_);
   for (auto& s : sparks_rh_)    s.configure(W_);
   for (auto& s : sparks_t_)     s.configure(W_);
@@ -146,8 +147,9 @@ void OledUi::drawGraph_(float value, bool fresh, const char* label) {
     case Page::RH:    s_ptr = (trhp_phys_ < TRHP_SLOTS_) ? &sparks_rh_[trhp_phys_]    : nullptr; break;
     case Page::T:     s_ptr = (trhp_phys_ < TRHP_SLOTS_) ? &sparks_t_[trhp_phys_]     : nullptr; break;
     case Page::P:     s_ptr = (trhp_phys_ < TRHP_SLOTS_) ? &sparks_p_[trhp_phys_]     : nullptr; break;
-    case Page::V2611: s_ptr = (v2611_phys_ < TGS2611_SLOTS_) ? &sparks_2611_[v2611_phys_] : nullptr; break;
-    case Page::V2616: s_ptr = (v2616_phys_ < TGS2616_SLOTS_) ? &sparks_2616_[v2616_phys_] : nullptr; break;
+    case Page::V2611:  s_ptr = (v2611_phys_ < TGS2611_SLOTS_) ? &sparks_2611_[v2611_phys_]  : nullptr; break;
+    case Page::V2611v: s_ptr = (v2611_phys_ < TGS2611_SLOTS_) ? &sparks_2611v_[v2611_phys_] : nullptr; break;
+    case Page::N2O:    s_ptr = &sparks_n2o_; break;
     default: break;
   }
   if (!s_ptr) return;
@@ -211,16 +213,20 @@ void OledUi::renderPage_(const ui::Model& m) {
     }
     case Page::V2611: {
       char lab[24];
-      if (m.v2611_n > 1) snprintf(lab, sizeof(lab), "TGS2611 #%u (V)", unsigned(m.v2611_idx + 1));
-      else               snprintf(lab, sizeof(lab), "TGS2611 (V)");
+      if (m.v2611_n > 1) snprintf(lab, sizeof(lab), "TGS2611 #%u (ppm)", unsigned(m.v2611_idx + 1));
+      else               snprintf(lab, sizeof(lab), "TGS2611 (ppm)");
+      drawGraph_(m.tgs2611_ppm, m.tgs2611_ppm_fresh, lab);
+      break;
+    }
+    case Page::V2611v: {
+      char lab[24];
+      if (m.v2611_n > 1) snprintf(lab, sizeof(lab), "TGS2611 #%u (raw)", unsigned(m.v2611_idx + 1));
+      else               snprintf(lab, sizeof(lab), "TGS2611 (raw)");
       drawGraph_(m.tgs2611_v, m.tgs2611_v_fresh, lab);
       break;
     }
-    case Page::V2616: {
-      char lab[24];
-      if (m.v2616_n > 1) snprintf(lab, sizeof(lab), "TGS2616 #%u (V)", unsigned(m.v2616_idx + 1));
-      else               snprintf(lab, sizeof(lab), "TGS2616 (V)");
-      drawGraph_(m.tgs2616_v, m.tgs2616_v_fresh, lab);
+    case Page::N2O: {
+      drawGraph_(m.n2o_ppm, m.n2o_ppm_fresh, "N2O (ppm)");
       break;
     }
     default: break;
