@@ -548,6 +548,19 @@ bool tgs2611_save_r2ppm(uint8_t ch) {
   return true;
 }
 
+// Variant: store R2ppm computed from a caller-supplied raw ADC value (int16_t).
+// Allows the GUI to send a specific raw reading as the calibration reference.
+bool tgs2611_save_r2ppm_from_raw(uint8_t ch, int16_t raw) {
+  if (ch >= N_TGS2611) return false;
+  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
+  float v_rl = raw * ADS1113_LSB_V;
+  float rs = tgs2611::calc_rs_kohm(v_rl);
+  if (isnan(rs) || rs <= 0.0f) return false;
+  if (!tgs_write_r2ppm_on_selected(rs)) return false;
+  tgs2611_r2ppm_kohm[ch] = rs;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // LoRa uplink helpers
 // ---------------------------------------------------------------------------
