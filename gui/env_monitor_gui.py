@@ -1170,6 +1170,8 @@ class App(tk.Tk):
         self.graphs_content_id = self.graphs_canvas.create_window((0, 0), window=self.graphs_content, anchor="nw")
         self.graphs_content.bind("<Configure>", self._on_graphs_content_configure)
         self.graphs_canvas.bind("<Configure>", self._on_graphs_canvas_configure)
+        self.graphs_canvas.bind("<Enter>", lambda _: self.graphs_canvas.bind_all("<MouseWheel>", self._on_graphs_mousewheel))
+        self.graphs_canvas.bind("<Leave>", lambda _: self.graphs_canvas.unbind_all("<MouseWheel>"))
         
         self.graph_names: list[str] = []
         self.graph_canvases: list[tk.Canvas] = []
@@ -1180,6 +1182,9 @@ class App(tk.Tk):
 
     def _on_graphs_canvas_configure(self, event) -> None:
         self.graphs_canvas.itemconfigure(self.graphs_content_id, width=event.width)
+
+    def _on_graphs_mousewheel(self, event) -> None:
+        self.graphs_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _build_files_tab(self) -> None:
         btns = ttk.Frame(self.files_tab)
