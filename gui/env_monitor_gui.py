@@ -853,6 +853,21 @@ class SerialMenuClient:
 
 
 class App(tk.Tk):
+
+    GAS_COLS: dict = {
+        "scd4x_1_co2":       ("CO\u2082",    "ppm"),
+        "tgs2611_1_ppm_avg": ("CH\u2084",      "ppm"),
+        "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
+        "sht45_1_t_avg":     ("Temperature", "\u00b0C"),
+        "sht45_1_rh_avg":    ("Humidity",    "%RH"),
+    }
+
+    C_CARD_NA             = "#6b7280"
+    C_CARD_NEUTRAL        = "#2563eb"
+    C_CARD_BG             = "#ffffff"
+    C_CARD_BORDER_NA      = "#e5e7eb"
+    C_CARD_BORDER_NEUTRAL = "#bfdbfe"
+
     def __init__(self) -> None:
         super().__init__()
         self.title("GEM GUI")
@@ -887,6 +902,7 @@ class App(tk.Tk):
         self.live_series: list[deque[float | None]] = []
         self.live_last_values: dict[str, tuple[float, float]] = {}
         self.live_hold_timeout_s = 15.0
+        self.gas_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
 
         # WiFi settings
         self.wifi_scan_cache: list[dict] = []
@@ -1121,6 +1137,62 @@ class App(tk.Tk):
         self.live_start_btn.pack(side=tk.LEFT)
         self.live_stop_btn = ttk.Button(btns, text="Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Gas reading cards
+        cards_outer = tk.Frame(self.live_tab, bg=self.c_bg)
+        cards_outer.pack(fill=tk.X, pady=(0, 12))
+
+        tk.Label(
+            cards_outer,
+            text="Current Readings",
+            font=("Segoe UI Semibold", 11),
+            bg=self.c_bg,
+            fg=self.c_text,
+        ).pack(anchor="w", padx=4, pady=(0, 6))
+
+        cards_row = tk.Frame(cards_outer, bg=self.c_bg)
+        cards_row.pack(fill=tk.X)
+
+        for col_name, (label, unit) in self.GAS_COLS.items():
+            card = tk.Frame(
+                cards_row,
+                bg=self.C_CARD_BG,
+                highlightbackground=self.C_CARD_BORDER_NA,
+                highlightthickness=1,
+                relief="flat",
+            )
+            card.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 10), ipady=10, ipadx=14)
+
+            tk.Label(
+                card,
+                text=label,
+                font=("Segoe UI", 9),
+                bg=self.C_CARD_BG,
+                fg="#6b7280").pack(anchor="w")
+            
+            val_frame = tk.Frame(card, bg=self.C_CARD_BG)
+            val_frame.pack(anchor="w")
+
+            val_label = tk.Label(
+                val_frame,
+                text="N/A",
+                font=("Segoe UI", 28, "bold"),
+                bg=self.C_CARD_BG,
+                fg=self.C_CARD_NA,
+            )
+
+            val_label.pack(side=tk.LEFT, anchor="s")
+
+            unit_label = tk.Label(
+                val_frame,
+                text=f" {unit}",
+                font=("Segoe UI", 12),
+                bg=self.C_CARD_BG,
+                fg="#9ca3af",
+            )
+            unit_label.pack(side=tk.LEFT, anchor="s", pady=(0, 4))
+
+            self.gas_card_widgets[col_name] = (val_label, unit_label, card)
 
         # Create split pane: table on top, graphs on bottom
         split = ttk.Panedwindow(self.live_tab, orient=tk.VERTICAL)
@@ -2371,7 +2443,41 @@ class App(tk.Tk):
         self.live_time_labels.clear()
         self.live_series = []
         self.live_last_values.clear()
+
+        for col_name, (val_lbl, unit_lbl, card) in self.gas_card_widgets.items():
+            val_lbl.configure(text="N/A", fg=self.C_CARD_NA)
+            unit_lbl.configure(fg="#9ca3af")
+            card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+        
         self._refresh_live_graphs()
+
+    def _update_gas_cards(self, fields: list[str]) -> None:
+        if not self.live_headers or len(self.live_headers) < 2:
+            return
+        row = {self.live_headers[i]: fields[i] for i in range(min(len(self.live_headers), len(fields)))}
+
+        for col_name, (label, unit) in self.GAS_COLS.items():
+            if col_name not in self.gas_card_widgets:
+                continue
+            val_lbl, unit_lbl, card = self.gas_card_widgets[col_name]
+            raw = row.get(col_name, "NA").strip()
+            parsed = self._parse_float_or_none(raw)
+
+            if parsed is None:
+                val_lbl.configure(text="NA", fg=self.C_CARD_NA)
+                unit_lbl.configure(fg="#9ca3af")
+                card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+            else:
+                if unit in ("\u00b0C", "%RH"):
+                    display = f"{parsed:.1f}"
+                elif parsed == int(parsed) and parsed >= 10:
+                    display = str(int(parsed))
+                else:
+                    display = f"{parsed:.2f}"
+
+                val_lbl.configure(text=display, fg=self.C_CARD_NEUTRAL)
+                unit_lbl.configure(fg=self.C_CARD_NEUTRAL)
+                card.configure(highlightbackground=self.C_CARD_BORDER_NEUTRAL)
 
     def _ensure_live_series_shape(self, n_vars: int) -> None:
         if n_vars <= 0:
@@ -2539,6 +2645,7 @@ class App(tk.Tk):
             self._update_rtc_from_timestamp(fields[0])
 
         self._update_live_history(fields)
+        self._update_gas_cards(fields)
         self._refresh_live_graphs()
 
     def wifi_scan(self) -> None:
