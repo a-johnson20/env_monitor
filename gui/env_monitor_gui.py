@@ -1058,7 +1058,9 @@ class App(tk.Tk):
         ttk.Button(top, text="Refresh Ports", command=self.refresh_ports, style="Accent.TButton").pack(side=tk.LEFT)
 
         ttk.Label(top, text="Baud:", style="Section.TLabel").pack(side=tk.LEFT, padx=(14, 0))
-        ttk.Entry(top, textvariable=self.baud_var, width=10).pack(side=tk.LEFT, padx=(6, 10))
+        _baud_rates = ["9600", "19200", "38400", "57600", "115200"]
+        self.baud_combo = ttk.Combobox(top, textvariable=self.baud_var, values=_baud_rates, width=10, state="readonly")
+        self.baud_combo.pack(side=tk.LEFT, padx=(6, 10))
 
         self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection, style="Accent.TButton")
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
