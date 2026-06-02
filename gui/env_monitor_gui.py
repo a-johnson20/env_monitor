@@ -2439,7 +2439,7 @@ class App(tk.Tk):
             except ValueError:
                 continue
 
-            if data_idx >= len(self.live_series):
+            if data_idx - 1 >= len(self.live_series):
                 continue
 
             y_vals = list(self.live_series[data_idx - 1])  # -1 because live_headers includes timestamp at index 0
