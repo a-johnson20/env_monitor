@@ -2325,8 +2325,8 @@ class App(tk.Tk):
         graph_cols = list(self.GAS_COLS.keys())
 
         var_names = [
-            col for col in self.live_headers[1:]
-            if col in graph_cols
+            col for col in graph_cols
+            if col in self.live_headers[1:]
         ]
 
         if var_names != self.graph_names:
