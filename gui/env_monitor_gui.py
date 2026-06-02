@@ -2354,7 +2354,13 @@ class App(tk.Tk):
         self.graph_canvases = []
 
         for name in var_names:
-            pane = ttk.LabelFrame(self.graphs_content, text=name)
+
+            graph_title = self.GAS_COLS.get(name, name)
+            graph_title, unit = self.GAS_COLS.get(name, (name, ""))
+            
+            title = f"{graph_title} ({unit})" if unit else graph_title
+
+            pane = ttk.LabelFrame(self.graphs_content, text=title)
             pane.pack(fill=tk.X, padx=8, pady=6)
             canvas = tk.Canvas(
                 pane,
