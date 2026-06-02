@@ -2444,12 +2444,15 @@ class App(tk.Tk):
 
         y_valid = [ys[i] for i in valid if ys[i] is not None]
         y_min, y_max = min(y_valid), max(y_valid)
-        if y_max <= y_min:
-            span = abs(y_min) * 0.05
-            if span < 0.5:
-                span = 0.5
-            y_min -= span
-            y_max += span
+        mid = (y_min + y_max) / 2
+        span = y_max - y_min
+        min_span = max(abs(mid) * 0.1, 1.0) # Ensure some minimum vertical scale for better visibility
+        if span < min_span:
+            y_min = mid - min_span / 2
+            y_max = mid + min_span / 2
+        padding = (y_max - y_min) * 0.05
+        y_min -= padding
+        y_max += padding
 
         def map_x(xv: float) -> float:
             return x0 + (xv - x_min) * (x1 - x0) / (x_max - x_min)
