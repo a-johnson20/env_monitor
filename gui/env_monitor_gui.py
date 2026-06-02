@@ -858,8 +858,9 @@ class App(tk.Tk):
         "scd4x_1_co2":       ("CO\u2082",    "ppm"),
         "tgs2611_1_ppm_avg": ("CH\u2084",      "ppm"),
         "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
-        "sht45_1_t_avg":     ("Temperature", "\u00b0C"),
+        "tmp117_1_t_avg":     ("Temperature", "\u00b0C"),
         "sht45_1_rh_avg":    ("Humidity",    "%RH"),
+        "lps22df_1_p_avg":    ("Pressure",    "hPa"),
     }
 
     C_CARD_NA             = "#6b7280"
