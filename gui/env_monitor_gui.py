@@ -22,7 +22,7 @@ import threading
 import time
 import tkinter as tk
 from collections import deque
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
@@ -854,6 +854,17 @@ class SerialMenuClient:
 
 class App(tk.Tk):
 
+    # Choose which readings to hide from the raw data log table
+    HIDDEN_LOG_COLS: frozenset[str] = frozenset({
+        "scd4x_1_t",
+        "scd4x_1_rh",
+        "sht45_1_t_avg", 
+        "lps22df_1_t_avg",
+        "tgs2611_1_raw_avg", 
+        "tgs2611_1_v_avg", 
+        "tgs2611_1_rs_avg",
+    })
+
     GAS_COLS: dict = {
         "scd4x_1_co2":       ("CO\u2082",    "ppm"),
         "tgs2611_1_ppm_avg": ("CH\u2084",      "ppm"),
@@ -1255,6 +1266,7 @@ class App(tk.Tk):
         self.live_table.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
         
         self.live_table_columns = []
+        self.live_table_col_indices: list[int] = []
 
     def _set_live_indicator(self, active: bool) -> None:
         self.live_indicator.itemconfig(
@@ -1745,6 +1757,7 @@ class App(tk.Tk):
                     # Clear live table and graphs
                     self.live_table.delete(*self.live_table.get_children())
                     self.live_table_columns = []
+                    self.live_table_col_indices: list[int] = []
                     self.live_table["columns"] = ()
                     self._reset_live_history()
                     self._update_wifi_controls()
@@ -1811,6 +1824,7 @@ class App(tk.Tk):
                     # Clear table and graphs
                     self.live_table.delete(*self.live_table.get_children())
                     self.live_table_columns = []
+                    self.live_table_col_indices: list[int] = []
                     self.live_table["columns"] = ()
                     self._reset_live_history()
                     self._update_wifi_controls()
@@ -2683,22 +2697,20 @@ class App(tk.Tk):
                 return
             self.live_headers = hdr
             self.live_last_values.clear()
-            # Only reconfigure columns when the column list has actually changed.
-            # Calling configure(columns=...) on a Treeview destroys all existing
-            # rows even when the list is identical, which caused the table to clear
-            # every 10 seconds when the firmware re-sends the periodic header.
-            if hdr != self.live_table_columns:
-                self.live_table_columns = hdr
-                self.live_table.configure(columns=hdr)
-                for col in hdr:
+            display_hdr = [col for col in hdr if col not in self.HIDDEN_LOG_COLS]
+            display_indices = [i for i, col in enumerate(hdr) if col not in self.HIDDEN_LOG_COLS]
+            if display_hdr != self.live_table_columns:
+                self.live_table_col_indices = display_indices
+                self.live_table_columns = display_hdr
+                self.live_table.configure(columns=display_hdr)
+                for col in display_hdr:
                     self.live_table.heading(col, text=col)
-                    # Make timestamp column wider, others narrower
                     if col == "timestamp":
                         self.live_table.column(col, width=120, anchor="w")
                     else:
                         self.live_table.column(col, width=80, anchor="w")
             return
-        
+
         # Skip data rows if columns not yet set up
         if not self.live_table_columns:
             return
@@ -2706,22 +2718,18 @@ class App(tk.Tk):
         # Add data row to table
         fields = line.split(",")
 
-        # If the timestamp looks like a framing-slip partial row, mark every
-        # missing or empty field as "NA" so the row is still visible but clearly
-        # flagged rather than showing misleadingly blank cells.
         if not self._is_valid_timestamp(fields[0] if fields else ""):
-            while len(fields) < len(self.live_table_columns):
+            while len(fields) < len(self.live_headers):
                 fields.append("NA")
             fields = ["NA" if f.strip() == "" else f for f in fields]
         else:
-            # Pad with empty strings if needed
-            while len(fields) < len(self.live_table_columns):
+            while len(fields) < len(self.live_headers):
                 fields.append("")
         fields = self._apply_live_value_hold(fields)
-        
-        # Insert row
-        row_id = self.live_table.insert("", tk.END, values=fields)
-        
+
+        display_fields = [fields[i] for i in self.live_table_col_indices if i < len(fields)]
+        row_id = self.live_table.insert("", tk.END, values=display_fields)
+
         # Keep table size reasonable (max 2000 rows)
         all_items = self.live_table.get_children()
         if len(all_items) > 2000:
