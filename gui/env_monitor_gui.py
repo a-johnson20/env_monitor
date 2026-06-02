@@ -2352,15 +2352,14 @@ class App(tk.Tk):
 
         self.graph_names = list(var_names)
         self.graph_canvases = []
+        self.graph_index_map = []
 
         for name in var_names:
 
-            graph_title = self.GAS_COLS.get(name, name)
+            # Graphs have user-friendly titles
             graph_title, unit = self.GAS_COLS.get(name, (name, ""))
-            
-            title = f"{graph_title} ({unit})" if unit else graph_title
 
-            pane = ttk.LabelFrame(self.graphs_content, text=title)
+            pane = ttk.LabelFrame(self.graphs_content, text=f"{graph_title} ({unit})" if unit else graph_title)
             pane.pack(fill=tk.X, padx=8, pady=6)
             canvas = tk.Canvas(
                 pane,
@@ -2371,6 +2370,7 @@ class App(tk.Tk):
             )
             canvas.pack(fill=tk.X, expand=True, padx=6, pady=6)
             self.graph_canvases.append(canvas)
+            self.graph_index_map.append(name)
 
     def _redraw_graphs(self) -> None:
         """Redraw all graphs with current data."""
@@ -2378,7 +2378,7 @@ class App(tk.Tk):
             return
 
         for graph_idx, canvas in enumerate(self.graph_canvases):
-            col_name = self.graph_names[graph_idx]
+            col_name = self.graph_index_map[graph_idx]
 
             try:
                 data_idx = self.live_headers.index(col_name)
@@ -2388,7 +2388,7 @@ class App(tk.Tk):
             if data_idx >= len(self.live_series):
                 continue
 
-            y_vals = list(self.live_series[data_idx])
+            y_vals = list(self.live_series[data_idx - 1])  # -1 because live_headers includes timestamp at index 0
 
             self._draw_series(
                 canvas,
