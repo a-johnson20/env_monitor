@@ -2321,7 +2321,13 @@ class App(tk.Tk):
         if len(self.live_headers) <= 1 and self.live_series:
             self.live_headers = ["timestamp"] + [f"col_{i}" for i in range(1, len(self.live_series) + 1)]
         
-        var_names = self.live_headers[1:] if len(self.live_headers) > 1 else []
+        graph_cols = list(self.GAS_COLS.keys())
+
+        var_names = [
+            col for col in self.live_headers[1:]
+            if col in graph_cols
+        ]
+
         if var_names != self.graph_names:
             self._rebuild_graph_widgets(var_names)
         
@@ -2364,10 +2370,26 @@ class App(tk.Tk):
         """Redraw all graphs with current data."""
         if not self.graph_canvases or not self.live_x_values:
             return
-            
-        for i, canvas in enumerate(self.graph_canvases):
-            y_vals = list(self.live_series[i]) if i < len(self.live_series) else []
-            self._draw_series(canvas, list(self.live_x_values), list(self.live_time_labels), y_vals)
+
+        for graph_idx, canvas in enumerate(self.graph_canvases):
+            col_name = self.graph_names[graph_idx]
+
+            try:
+                data_idx = self.live_headers.index(col_name)
+            except ValueError:
+                continue
+
+            if data_idx >= len(self.live_series):
+                continue
+
+            y_vals = list(self.live_series[data_idx])
+
+            self._draw_series(
+                canvas,
+                list(self.live_x_values),
+                list(self.live_time_labels),
+                y_vals,
+            )
 
     @staticmethod
     def _draw_series(
