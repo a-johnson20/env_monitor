@@ -1227,6 +1227,7 @@ class App(tk.Tk):
         
         self.graph_names: list[str] = []
         self.graph_canvases: list[tk.Canvas] = []
+        self.graph_hover_data: dict = {}
         self._graph_redraw_pending = False
 
         # Bottom: Table
@@ -2366,8 +2367,49 @@ class App(tk.Tk):
 
             canvas = tk.Canvas(pane, bg=self.c_surface, highlightthickness=1, highlightbackground=self.c_border)
             canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+            canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
+            canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
             self.graph_canvases.append(canvas)
             self.graph_index_map.append(name)
+
+    def _on_graph_hover(self, event: tk.Event, canvas: tk.Canvas) -> None:
+        """Show tooltip with data values at the hovered point."""
+
+        canvas.delete("hover")
+        data = self.graph_hover_data.get(canvas)
+        if not data:
+            return
+        x0, y0, x1, y1 = data["x0"], data["y0"], data["x1"], data["y1"]
+        mx = event.x
+        if mx < x0 or mx > x1:
+            return
+        
+        xs, ys, ts = data["xs"], data["ys"], data["ts"]
+        x_min, x_max = data["x_min"], data["x_max"]
+        y_min, y_max = data["y_min"], data["y_max"]
+
+        frac = (mx - x0) / (x1 - x0)
+        target_x = x_min + frac * (x_max - x_min)
+        closest_idx = min(range(len(xs)), key=lambda i: abs(xs[i] - target_x))
+        yv = ys[closest_idx]
+        if yv is None:
+            return
+
+        px = x0 + (xs[closest_idx] - x_min) * (x1 - x0) / (x_max - x_min)
+        py = y1 - (yv - y_min) * (y1 - y0) / (y_max - y_min)
+
+        canvas.create_line(px, y0, px, y1, fill="#aaaaaa", dash=(4, 2), tags="hover")
+        r = 4
+        canvas.create_oval(px - r, py - r, px + r, py + r, fill="#1f77b4", outline="", tags="hover")
+
+        label = f"{yv:.4g} at {ts[closest_idx]}"
+        tx = px + 8 if px + 8 + 120 < x1 else px - 8
+        anchor = "sw" if tx > px else "se"
+        ty = max(py - 6, y0 + 10)
+        t = canvas.create_text(tx, ty, text=label, anchor=anchor, fill="#333333", tags="hover")
+        bx0, by0, bx1, by1 = canvas.bbox(t)
+        canvas.create_rectangle(bx0 - 4, by0 - 2, bx1 + 4, by1 + 2, fill="#f8f8f8", outline="#cccccc", tags="hover")
+        canvas.tag_raise(t)
 
     def _redraw_graphs(self) -> None:
         """Redraw all graphs with current data."""
@@ -2394,8 +2436,8 @@ class App(tk.Tk):
                 y_vals,
             )
 
-    @staticmethod
     def _draw_series(
+        self,
         canvas: tk.Canvas,
         x_values: list[float],
         time_labels: list[str],
@@ -2477,6 +2519,13 @@ class App(tk.Tk):
         canvas.create_text(x0 - 4, y1, text=f"{y_min:.4g}", anchor="se", fill="#555555")
         canvas.create_text(x0, y1 + 14, text=ts[0], anchor="w", fill="#555555")
         canvas.create_text(x1, y1 + 14, text=ts[-1], anchor="e", fill="#555555")
+
+        self.graph_hover_data[canvas] ={
+            "xs": xs, "ys": ys, "ts": ts, 
+            "x0": x0, "y0": y0, "x1": x1, "y1": y1,
+            "x_min": x_min, "x_max": x_max, 
+            "y_min": y_min, "y_max": y_max,
+        }
 
     def _reset_live_history(self) -> None:
         self.live_sample_counter = 0
