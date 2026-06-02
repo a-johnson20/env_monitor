@@ -1069,6 +1069,7 @@ class App(tk.Tk):
         ttk.Label(top, text="Port:", style="Section.TLabel").pack(side=tk.LEFT)
         self.port_combo = ttk.Combobox(top, textvariable=self.port_var, width=20, state="readonly")
         self.port_combo.pack(side=tk.LEFT, padx=(6, 10))
+
         self.port_combo.bind("<<ComboboxSelected>>", self._on_port_selected)
         self.port_combo.bind("<FocusIn>", self._on_port_focus_in)
         ttk.Button(top, text="Refresh Ports", command=self.refresh_ports, style="Accent.TButton").pack(side=tk.LEFT)
@@ -1138,6 +1139,11 @@ class App(tk.Tk):
         self.live_stop_btn = ttk.Button(btns, text="Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
 
+        # Live indicator
+        self.live_indicator = tk.Canvas(btns, width=16, height=16, highlightthickness=0, bg=self.c_bg)
+        self.live_circle = self.live_indicator.create_oval(2, 2, 14, 14, fill="#9ca3af")
+        self.live_indicator.pack(side=tk.LEFT, padx=(12, 0))
+
         # Gas reading cards
         cards_outer = tk.Frame(self.live_tab, bg=self.c_bg)
         cards_outer.pack(fill=tk.X, pady=(0, 12))
@@ -1194,39 +1200,13 @@ class App(tk.Tk):
 
             self.gas_card_widgets[col_name] = (val_label, unit_label, card)
 
-        # Create split pane: table on top, graphs on bottom
+        # Create split pane: graphs on top, table on bottom
         split = ttk.Panedwindow(self.live_tab, orient=tk.VERTICAL)
         split.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        # Top: Table
-        table_frame = ttk.Frame(split)
-        split.add(table_frame, weight=2)
-        
-        ttk.Label(table_frame, text="Live Data Table", style="Section.TLabel").pack(anchor="w")
-        
-        # Create frame to hold table and scrollbars using grid layout
-        table_inner = ttk.Frame(table_frame)
-        table_inner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
-        table_inner.rowconfigure(0, weight=1)
-        table_inner.columnconfigure(0, weight=1)
-        
-        # Create Treeview for live data table
-        self.live_table = ttk.Treeview(table_inner, show="headings")
-        self.live_table.grid(row=0, column=0, sticky="nsew")
-        
-        # Add scrollbars
-        scroll_y = ttk.Scrollbar(table_inner, orient=tk.VERTICAL, command=self.live_table.yview)
-        scroll_y.grid(row=0, column=1, sticky="ns")
-        scroll_x = ttk.Scrollbar(table_inner, orient=tk.HORIZONTAL, command=self.live_table.xview)
-        scroll_x.grid(row=1, column=0, sticky="ew")
-        self.live_table.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        
-        # Will populate columns when header arrives
-        self.live_table_columns = []
-
-        # Bottom: Graphs
+        # Top: Graphs
         graphs_frame = ttk.Frame(split)
-        split.add(graphs_frame, weight=1)
+        split.add(graphs_frame, weight=3)
         
         ttk.Label(graphs_frame, text="Live Graphs", style="Section.TLabel").pack(anchor="w")
         
@@ -1248,6 +1228,37 @@ class App(tk.Tk):
         self.graph_names: list[str] = []
         self.graph_canvases: list[tk.Canvas] = []
         self._graph_redraw_pending = False
+
+        # Bottom: Table
+        table_frame = ttk.Frame(split)
+        split.add(table_frame, weight=1)
+
+        ttk.Label(table_frame, text="Raw Data Log", style="Section.TLabel").pack(anchor="w")
+
+        # Create frame to hold table and scrollbars using grid layout
+        table_inner = ttk.Frame(table_frame)
+        table_inner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        table_inner.rowconfigure(0, weight=1)
+        table_inner.columnconfigure(0, weight=1)
+        
+        # Create Treeview for live data table
+        self.live_table = ttk.Treeview(table_inner, show="headings")
+        self.live_table.grid(row=0, column=0, sticky="nsew")
+        
+        # Add scrollbars
+        scroll_y = ttk.Scrollbar(table_inner, orient=tk.VERTICAL, command=self.live_table.yview)
+        scroll_y.grid(row=0, column=1, sticky="ns")
+        scroll_x = ttk.Scrollbar(table_inner, orient=tk.HORIZONTAL, command=self.live_table.xview)
+        scroll_x.grid(row=1, column=0, sticky="ew")
+        self.live_table.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
+        
+        self.live_table_columns = []
+
+    def _set_live_indicator(self, active: bool) -> None:
+        self.live_indicator.itemconfig(
+            self.live_circle,
+            fill="#22c55e" if active else "#9ca3af"
+        )
 
     def _on_graphs_content_configure(self, _event=None) -> None:
         self.graphs_canvas.configure(scrollregion=self.graphs_canvas.bbox("all"))
@@ -1718,6 +1729,7 @@ class App(tk.Tk):
                     # Fetch initial WiFi status
                     self._initial_status_fetch()
                 elif kind == "disconnected":
+                    self._set_live_indicator(False)
                     self.connected = False
                     self.connected_port = None
                     self.live_running = False
@@ -1781,6 +1793,7 @@ class App(tk.Tk):
                         self.preview_loading_index = None
                 elif kind == "live_started":
                     self.live_running = True
+                    self._set_live_indicator(True)
                     self._reset_live_history()
                     self.status_var.set("Live stream running")
                     self.live_start_btn.configure(state=tk.DISABLED)
@@ -1789,6 +1802,7 @@ class App(tk.Tk):
                     self._update_files_controls()
                 elif kind == "live_stopped":
                     self.live_running = False
+                    self._set_live_indicator(False)
                     self.status_var.set("Connected")
                     self.live_start_btn.configure(state=tk.NORMAL)
                     self.live_stop_btn.configure(state=tk.DISABLED)
