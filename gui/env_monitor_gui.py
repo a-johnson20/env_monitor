@@ -2346,29 +2346,26 @@ class App(tk.Tk):
         """Rebuild graph canvases for the given variable names."""
         if not hasattr(self, 'graphs_content'):
             return
-            
+
         for child in self.graphs_content.winfo_children():
             child.destroy()
-
         self.graph_names = list(var_names)
         self.graph_canvases = []
         self.graph_index_map = []
+            
+        self.graphs_content.columnconfigure(0, weight=1)
+        self.graphs_content.columnconfigure(1, weight=1)
 
-        for name in var_names:
+        for i, name in enumerate(var_names):
+            row, col = divmod(i, 2)
+            self.graphs_content.rowconfigure(row, weight=1)
 
-            # Graphs have user-friendly titles
             graph_title, unit = self.GAS_COLS.get(name, (name, ""))
-
             pane = ttk.LabelFrame(self.graphs_content, text=f"{graph_title} ({unit})" if unit else graph_title)
-            pane.pack(fill=tk.X, padx=8, pady=6)
-            canvas = tk.Canvas(
-                pane,
-                height=170,
-                bg=self.c_surface,
-                highlightthickness=1,
-                highlightbackground=self.c_border,
-            )
-            canvas.pack(fill=tk.X, expand=True, padx=6, pady=6)
+            pane.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
+
+            canvas = tk.Canvas(pane, bg=self.c_surface, highlightthickness=1, highlightbackground=self.c_border)
+            canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
             self.graph_canvases.append(canvas)
             self.graph_index_map.append(name)
 
