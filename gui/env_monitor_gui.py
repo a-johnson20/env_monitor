@@ -1140,9 +1140,9 @@ class App(tk.Tk):
         self.live_tab = ttk.Frame(notebook, padding=10)
         self.files_tab = ttk.Frame(notebook, padding=10)
         self.wifi_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(self.live_tab, text="Live Data")
-        notebook.add(self.files_tab, text="Files")
-        notebook.add(self.wifi_tab, text="Settings")
+        notebook.add(self.live_tab,   text="▶  Live Data")
+        notebook.add(self.files_tab,  text="🗂  Files")
+        notebook.add(self.wifi_tab,   text="⚙  Settings")
 
         self._build_live_tab()
         self._build_files_tab()
@@ -2595,9 +2595,18 @@ class App(tk.Tk):
                 else:
                     display = f"{parsed:.2f}"
 
-                val_lbl.configure(text=display, fg=self.C_CARD_NEUTRAL)
-                unit_lbl.configure(fg=self.C_CARD_NEUTRAL)
-                card.configure(highlightbackground=self.C_CARD_BORDER_NEUTRAL)
+                thresholds = self.GAS_THRESHOLDS.get(col_name, [])
+                text_col = self.C_CARD_NEUTRAL
+                border_col = self.C_CARD_BORDER_NEUTRAL
+                for thresh, tc, bc in thresholds:
+                    if parsed >= thresh:
+                        text_col = tc
+                        border_col = bc
+                        break
+
+                val_lbl.configure(text=display, fg=text_col)
+                unit_lbl.configure(fg=text_col)
+                card.configure(highlightbackground=border_col)
 
     def _ensure_live_series_shape(self, n_vars: int) -> None:
         if n_vars <= 0:
