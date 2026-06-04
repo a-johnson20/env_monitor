@@ -1108,6 +1108,11 @@ class App(tk.Tk):
         self.connect_btn = ttk.Button(top, text="🔗  Connect", command=self.toggle_connection, style="Accent.TButton")
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
+        # Connection circle indicator
+        self.conn_indicator = tk.Canvas(top, width=14, height=14, highlightthickness=0, bg=self.c_bg)
+        self.conn_circle = self.conn_indicator.create_oval(1, 1, 13, 13, fill="#9ca3af")
+        self.conn_indicator.pack(side=tk.LEFT, padx=(4, 8))
+
         ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
 
         # Right side: RTC time and WiFi status
@@ -1164,11 +1169,6 @@ class App(tk.Tk):
         self.live_start_btn.pack(side=tk.LEFT)
         self.live_stop_btn = ttk.Button(btns, text="⏹  Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
-
-        # Live indicator
-        self.live_indicator = tk.Canvas(btns, width=16, height=16, highlightthickness=0, bg=self.c_bg)
-        self.live_circle = self.live_indicator.create_oval(2, 2, 14, 14, fill="#9ca3af")
-        self.live_indicator.pack(side=tk.LEFT, padx=(12, 0))
 
         # Gas reading cards
         cards_outer = tk.Frame(self.live_tab, bg=self.c_bg)
@@ -1283,9 +1283,9 @@ class App(tk.Tk):
         self.live_table_col_indices: list[int] = []
 
     def _set_live_indicator(self, active: bool) -> None:
-        self.live_indicator.itemconfig(
-            self.live_circle,
-            fill="#22c55e" if active else "#9ca3af"
+        self.conn_indicator.itemconfig(
+            self.conn_circle,
+            fill="#22c55e" if active else "#3b82fb"
         )
 
     def _on_graphs_content_configure(self, _event=None) -> None:
@@ -1739,6 +1739,7 @@ class App(tk.Tk):
                     messagebox.showerror("Error", str(payload))
                 elif kind == "connected":
                     self.connected = True
+                    self.conn_indicator.itemconfig(self.conn_circle, fill="#3b82f6") # blue = connected to port
                     self.connected_port = str(payload)
                     self.status_var.set(f"Connected: {payload}")
                     self.connect_btn.configure(text="✖  Disconnect")
@@ -1759,6 +1760,7 @@ class App(tk.Tk):
                 elif kind == "disconnected":
                     self._set_live_indicator(False)
                     self.connected = False
+                    self.conn_indicator.itemconfig(self.conn_circle, fill="#9ca3af")
                     self.connected_port = None
                     self.live_running = False
                     self.files_refresh_inflight = False
