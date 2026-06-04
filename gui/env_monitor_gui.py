@@ -1098,14 +1098,14 @@ class App(tk.Tk):
 
         self.port_combo.bind("<<ComboboxSelected>>", self._on_port_selected)
         self.port_combo.bind("<FocusIn>", self._on_port_focus_in)
-        ttk.Button(top, text="Refresh Ports", command=self.refresh_ports, style="Accent.TButton").pack(side=tk.LEFT)
+        ttk.Button(top, text="↻  Refresh Ports", command=self.refresh_ports, style="Accent.TButton").pack(side=tk.LEFT)
 
         ttk.Label(top, text="Baud:", style="Section.TLabel").pack(side=tk.LEFT, padx=(14, 0))
         _baud_rates = ["9600", "19200", "38400", "57600", "115200"]
         self.baud_combo = ttk.Combobox(top, textvariable=self.baud_var, values=_baud_rates, width=10, state="readonly")
         self.baud_combo.pack(side=tk.LEFT, padx=(6, 10))
 
-        self.connect_btn = ttk.Button(top, text="Connect", command=self.toggle_connection, style="Accent.TButton")
+        self.connect_btn = ttk.Button(top, text="🔗  Connect", command=self.toggle_connection, style="Accent.TButton")
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
         ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
@@ -1156,13 +1156,13 @@ class App(tk.Tk):
         btns.pack(fill=tk.X)
         self.live_start_btn = ttk.Button(
             btns,
-            text="Start Live",
+            text="▶  Start Live",
             command=self.start_live,
             state=tk.DISABLED,
             style="Accent.TButton",
         )
         self.live_start_btn.pack(side=tk.LEFT)
-        self.live_stop_btn = ttk.Button(btns, text="Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
+        self.live_stop_btn = ttk.Button(btns, text="⏹  Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         # Live indicator
@@ -1741,7 +1741,7 @@ class App(tk.Tk):
                     self.connected = True
                     self.connected_port = str(payload)
                     self.status_var.set(f"Connected: {payload}")
-                    self.connect_btn.configure(text="Disconnect")
+                    self.connect_btn.configure(text="✖  Disconnect")
                     self._set_port_combo_state()
                     self.live_start_btn.configure(state=tk.NORMAL)
                     # Grey out file/WiFi buttons during initialization
@@ -1764,7 +1764,7 @@ class App(tk.Tk):
                     self.files_refresh_inflight = False
                     self.preview_loading_index = None
                     self.status_var.set("Disconnected")
-                    self.connect_btn.configure(text="Connect")
+                    self.connect_btn.configure(text="🔗  Connect")
                     self._set_port_combo_state()
                     self.live_start_btn.configure(state=tk.DISABLED)
                     self.live_stop_btn.configure(state=tk.DISABLED)
