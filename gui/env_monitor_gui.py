@@ -2556,7 +2556,7 @@ class App(tk.Tk):
         r = 4
         canvas.create_oval(px - r, py - r, px + r, py + r, fill="#1f77b4", outline="", tags="hover")
 
-        label = f"{yv:.4g} at {ts[closest_idx]}"
+        label = f"{self._fmt_y(yv)} at {ts[closest_idx]}"
         tx = px + 8 if px + 8 + 120 < x1 else px - 8
         anchor = "sw" if tx > px else "se"
         ty = max(py - 6, y0 + 10)
@@ -2589,6 +2589,18 @@ class App(tk.Tk):
                 list(self.live_time_labels),
                 y_vals,
             )
+
+    @staticmethod
+    def _fmt_y(v: float) -> str:
+        av = abs(v)
+        if av >= 1000:
+            return f"{v:,.0f}"
+        elif av >= 10:
+            return f"{v:.1f}"
+        elif av >= 1:
+            return f"{v:.2f}"
+        else:
+            return f"{v:.3f}"
 
     def _draw_series(
         self,
@@ -2669,8 +2681,8 @@ class App(tk.Tk):
         if len(segment) >= 4:
             canvas.create_line(*segment, fill="#1f77b4", width=2)
 
-        canvas.create_text(x0 - 4, y0, text=f"{y_max:.4g}", anchor="ne", fill="#555555")
-        canvas.create_text(x0 - 4, y1, text=f"{y_min:.4g}", anchor="se", fill="#555555")
+        canvas.create_text(x0 - 4, y0, text=self._fmt_y(y_max), anchor="ne", fill="#555555")
+        canvas.create_text(x0 - 4, y1, text=self._fmt_y(y_min), anchor="se", fill="#555555")
         canvas.create_text(x0, y1 + 14, text=ts[0], anchor="w", fill="#555555")
         canvas.create_text(x1, y1 + 14, text=ts[-1], anchor="e", fill="#555555")
 
