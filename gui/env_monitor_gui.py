@@ -1318,8 +1318,8 @@ class App(tk.Tk):
 
         top = ttk.Frame(split)
         bottom = ttk.Frame(split)
-        split.add(top, weight=2)
-        split.add(bottom, weight=1)
+        split.add(top, weight=1)
+        split.add(bottom, weight=2)
 
         self.files_tree = ttk.Treeview(top, columns=("idx", "path", "size"), show="headings", selectmode="extended")
         self.files_tree.heading("idx", text="#")
@@ -1332,13 +1332,56 @@ class App(tk.Tk):
         self.files_tree.bind("<<TreeviewSelect>>", self.on_file_selected)
 
         ttk.Label(bottom, textvariable=self.preview_title_var, style="Section.TLabel").pack(anchor="w")
-        preview_wrap = ttk.Frame(bottom)
+
+        inner_split = ttk.Panedwindow(bottom, orient=tk.VERTICAL)
+        inner_split.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        graphs_frame = ttk.Frame(inner_split)
+        inner_split.add(graphs_frame, weight=3)
+
+        self.log_graphs_canvas = tk.Canvas(graphs_frame, highlightthickness=0, bg=self.c_bg)
+        self.log_graphs_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        log_graphs_vsb = ttk.Scrollbar(graphs_frame, orient=tk.VERTICAL, command=self.log_graphs_canvas.yview)
+        log_graphs_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.log_graphs_canvas.configure(yscrollcommand=log_graphs_vsb.set)
+
+        self.log_graphs_content = ttk.Frame(self.log_graphs_canvas)
+        self.log_graphs_content_id = self.log_graphs_canvas.create_window(
+            (0, 0), window=self.log_graphs_content, anchor="nw"
+        )
+        self.log_graphs_content.bind(
+            "<Configure>",
+            lambda e: self.log_graphs_canvas.configure(scrollregion=self.log_graphs_canvas.bbox("all")),
+        )
+        self.log_graphs_canvas.bind(
+            "<Configure>",
+            lambda e: self.log_graphs_canvas.itemconfigure(self.log_graphs_content_id, width=e.width),
+        )
+        self.log_graphs_canvas.bind(
+            "<Enter>",
+            lambda _: self.log_graphs_canvas.bind_all(
+                "<MouseWheel>",
+                lambda e: self.log_graphs_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
+            ),
+        )
+        self.log_graphs_canvas.bind("<Leave>", lambda _: self.log_graphs_canvas.unbind_all("<MouseWheel>"))
+
+        self.log_graph_canvases: list[tk.Canvas] = []
+        self.log_graph_series: dict = {}
+
+        table_frame = ttk.Frame(inner_split)
+        inner_split.add(table_frame, weight=1)
+
+        ttk.Label(table_frame, text="Raw Data Log", style="Section.TLabel").pack(anchor="w")
+
+        preview_wrap = ttk.Frame(table_frame)
         preview_wrap.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        preview_wrap.rowconfigure(0, weight=1)
+        preview_wrap.columnconfigure(0, weight=1)
 
         self.preview_tree = ttk.Treeview(preview_wrap, show="headings", height=12)
         self.preview_tree.grid(row=0, column=0, sticky="nsew")
-        preview_wrap.rowconfigure(0, weight=1)
-        preview_wrap.columnconfigure(0, weight=1)
 
         pv_y = ttk.Scrollbar(preview_wrap, orient=tk.VERTICAL, command=self.preview_tree.yview)
         pv_y.grid(row=0, column=1, sticky="ns")
@@ -1346,7 +1389,63 @@ class App(tk.Tk):
         pv_x.grid(row=1, column=0, sticky="ew")
         self.preview_tree.configure(yscrollcommand=pv_y.set, xscrollcommand=pv_x.set)
 
-        ttk.Label(bottom, textvariable=self.preview_info_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+        ttk.Label(table_frame, textvariable=self.preview_info_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
+
+    def _render_log_graphs(self, graph_headers: list[str], graph_all_rows: list[list[str]]) -> None:
+        for child in self.log_graphs_content.winfo_children():
+            child.destroy()
+        self.log_graph_canvases = []
+        self.log_graph_series = {}
+
+        if not graph_headers or not graph_all_rows:
+            return
+
+        present_cols = [col for col in self.GAS_COLS if col in graph_headers]
+        if not present_cols:
+            return
+
+        ts_col = graph_headers.index("timestamp") if "timestamp" in graph_headers else None
+        n = len(graph_all_rows)
+        x_values = list(range(n))
+        time_labels = [
+            (row[ts_col] if ts_col < len(row) else str(i)) if ts_col is not None else str(i)
+            for i, row in enumerate(graph_all_rows)
+        ]
+
+        self.log_graphs_content.columnconfigure(0, weight=1)
+        self.log_graphs_content.columnconfigure(1, weight=1)
+
+        for i, col_name in enumerate(present_cols):
+            row_i, col_i = divmod(i, 2)
+            self.log_graphs_content.rowconfigure(row_i, weight=1)
+
+            graph_title, unit = self.GAS_COLS.get(col_name, (col_name, ""))
+            pane = ttk.LabelFrame(
+                self.log_graphs_content,
+                text=f"{graph_title} ({unit})" if unit else graph_title,
+            )
+            pane.grid(row=row_i, column=col_i, sticky="nsew", padx=4, pady=4)
+
+            canvas = tk.Canvas(
+                pane, bg=self.c_surface, highlightthickness=1,
+                highlightbackground=self.c_border, height=200,
+            )
+            canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+            canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
+            canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
+            self.log_graph_canvases.append(canvas)
+
+            col_idx = graph_headers.index(col_name)
+            y_values: list[float | None] = [
+                self._parse_float_or_none(row[col_idx].strip()) if col_idx < len(row) else None
+                for row in graph_all_rows
+            ]
+            self.log_graph_series[canvas] = (x_values, time_labels, y_values)
+            canvas.bind(
+                "<Configure>",
+                lambda e, c=canvas: self._draw_series(c, *self.log_graph_series[c])
+                if e.width > 1 and e.height > 1 else None,
+            )
 
     def _build_wifi_tab(self) -> None:
         # ---- Single scrollable canvas for the entire Settings tab ----
@@ -1814,10 +1913,11 @@ class App(tk.Tk):
                 elif kind == "preview_ok":
                     if not self.connected:
                         continue
-                    index, path, headers, rows, nbytes, info = payload
-                    self.preview_cache[index] = (path, headers, rows, nbytes, info)
+                    index, path, headers, rows, nbytes, info, graph_headers, graph_all_rows = payload
+                    self.preview_cache[index] = (path, headers, rows, nbytes, info, graph_headers, graph_all_rows)
                     if self._current_selected_index() == index:
                         self._set_preview_table(path, headers, rows, nbytes, info)
+                        self._render_log_graphs(graph_headers, graph_all_rows)
                     self.status_var.set(f"Preview loaded: {path}")
                 elif kind == "preview_done":
                     if self.preview_loading_index == payload:
@@ -2207,6 +2307,16 @@ class App(tk.Tk):
         info = " | ".join(info_parts)
         return headers, rows, info
 
+    @staticmethod
+    def _parse_all_for_graphs(payload: bytes) -> tuple[list[str], list[list[str]]]:
+        text = payload.decode("utf-8", errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        parsed = list(reader)
+        if len(parsed) < 2:
+            return [], []
+        header = [h.strip() for h in parsed[0]]
+        return header, parsed[1:]
+
     def _set_preview_message(self, path: str, message: str, nbytes: int) -> None:
         if path:
             self.preview_title_var.set(f"Preview: {path} ({nbytes} bytes)")
@@ -2258,8 +2368,9 @@ class App(tk.Tk):
 
         cached = self.preview_cache.get(idx)
         if cached is not None:
-            path, headers, rows, nbytes, info = cached
+            path, headers, rows, nbytes, info, graph_headers, graph_all_rows = cached
             self._set_preview_table(path, headers, rows, nbytes, info)
+            self._render_log_graphs(graph_headers, graph_all_rows)
             return
 
         self._set_preview_message(dev_path, "Loading preview...", 0)
@@ -2275,7 +2386,8 @@ class App(tk.Tk):
                     tail_rows=10000,
                     max_cols=18,
                 )
-                self.events.put(("preview_ok", (idx, path, headers, rows, len(payload), info)))
+                graph_headers, graph_all_rows = self._parse_all_for_graphs(payload)
+                self.events.put(("preview_ok", (idx, path, headers, rows, len(payload), info, graph_headers, graph_all_rows)))
             except Exception as exc:
                 self.events.put(("error", exc))
             finally:
