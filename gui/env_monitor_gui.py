@@ -2271,8 +2271,8 @@ class App(tk.Tk):
                 path, payload = self.client.download_log_bytes(index=idx, timeout_s=20.0)
                 headers, rows, info = self._render_preview_table(
                     payload,
-                    head_rows=40,
-                    tail_rows=40,
+                    head_rows=10000,
+                    tail_rows=10000,
                     max_cols=18,
                 )
                 self.events.put(("preview_ok", (idx, path, headers, rows, len(payload), info)))
