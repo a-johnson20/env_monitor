@@ -2353,15 +2353,23 @@ class App(tk.Tk):
         self.preview_title_var.set(f"Preview: {path} ({nbytes} bytes)")
         self.preview_tree.delete(*self.preview_tree.get_children())
 
-        col_ids = tuple(f"c{i}" for i in range(len(headers)))
+        # Filter to only show timestamp + gas columns
+        gas_col_names = set(self.GAS_COLS.keys()) | {"timestamp"}
+        keep_indices = [i for i, h in enumerate(headers) if h in gas_col_names]
+        display_headers = [headers[i] for i in keep_indices]
+        display_rows = [[row[i] if i < len(row) else "" for i in keep_indices] for row in rows]
+
+        col_ids = tuple(f"c{i}" for i in range(len(display_headers)))
         self.preview_tree["columns"] = col_ids
-        uniform_width = 120
-        for i, name in enumerate(headers):
+        for i, name in enumerate(display_headers):
             cid = col_ids[i]
             self.preview_tree.heading(cid, text=name)
-            self.preview_tree.column(cid, width=uniform_width, anchor="w", stretch=False)
+            if name == "timestamp":
+                self.preview_tree.column(cid, width=120, anchor="w")
+            else:
+                self.preview_tree.column(cid, width=80, anchor="w")
 
-        striped_rows = [tuple(row) for row in rows]
+        striped_rows = [tuple(row) for row in display_rows]
         self._apply_tree_stripes(self.preview_tree, striped_rows)
 
         self.preview_info_var.set(info)
