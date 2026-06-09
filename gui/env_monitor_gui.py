@@ -994,7 +994,7 @@ class App(tk.Tk):
 
     def _configure_theme(self) -> None:
         if HAS_TTKBOOTSTRAP and tb is not None:
-            self.style = tb.Style(theme="flatly")
+            self.style = tb.Style(theme="united")
             colors = getattr(self.style, "colors", None)
             if colors is not None:
                 self.c_bg = getattr(colors, "bg", self.c_bg)
