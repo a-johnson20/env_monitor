@@ -863,6 +863,8 @@ class App(tk.Tk):
         "tgs2611_1_raw_avg", 
         "tgs2611_1_v_avg", 
         "tgs2611_1_rs_avg",
+        "sfm3505_1_air_slm_avg",
+        "sfm3505_1_o2_slm_avg",
     })
 
     GAS_COLS: dict = {
