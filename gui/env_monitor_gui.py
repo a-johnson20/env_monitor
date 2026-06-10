@@ -2259,6 +2259,28 @@ class App(tk.Tk):
         return int(row[0])
 
     @staticmethod
+    def _make_csv_excel_safe(raw_bytes: bytes) -> bytes:
+        import re
+        text = raw_bytes.decode("utf-8", errors="replace").lstrip("\ufeff")
+        reader = csv.reader(io.StringIO(text))
+        rows = list(reader)
+        if not rows:
+            return raw_bytes
+        header = rows[0]
+        try:
+            ts_col = header.index("timestamp")
+        except ValueError:
+            return raw_bytes
+        ts_pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+        for row in rows[1:]:
+            if ts_col < len(row) and ts_pattern.match(row[ts_col].strip()):
+                row[ts_col] = " " + row[ts_col].strip()
+        out = io.StringIO()
+        writer = csv.writer(out, lineterminator="\r\n")
+        writer.writerows(rows)
+        return ("\ufeff" + out.getvalue()).encode("utf-8")
+
+    @staticmethod
     def _render_preview_table(
         payload: bytes,
         head_rows: int = 40,
@@ -2448,7 +2470,11 @@ class App(tk.Tk):
             def worker() -> None:
                 try:
                     self.events.put(("busy", f"Downloading {dev_path} ..."))
-                    nbytes = self.client.download_log(index=index, output_path=out_path, timeout_s=20.0)
+                    _, payload = self.client.download_log_bytes(index=index, timeout_s=20.0)
+                    safe = App._make_csv_excel_safe(payload)
+                    out_path.write_bytes(safe)
+                    nbytes = len(safe)
+
                     self.events.put(("download_ok", (str(out_path), nbytes)))
                 except Exception as exc:
                     self.events.put(("error", exc))
@@ -2474,7 +2500,11 @@ class App(tk.Tk):
                             name += ".csv"
                         out_path = out_dir_path / name
                         self.events.put(("busy", f"Downloading {dev_path} ({len(saved) + 1}/{len(items)}) ..."))
-                        nbytes = self.client.download_log(index=index, output_path=out_path, timeout_s=20.0)
+                        _, payload = self.client.download_log_bytes(index=index, timeout_s=20.0)
+                        safe = App._make_csv_excel_safe(payload)
+                        out_path.write_bytes(safe)
+                        nbytes = len(safe)
+
                         saved.append((str(out_path), nbytes))
                     self.events.put(("batch_download_ok", (str(out_dir_path), saved)))
                 except Exception as exc:
