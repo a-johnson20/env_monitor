@@ -778,15 +778,17 @@ class SerialMenuClient:
                 return {"success": False, "message": f"Error code {code}"}
             return {"success": False, "message": f"Unexpected response: {resp}"}
 
-    def calib_r2ppm(self, channel: int = 0, timeout_s: float = 5.0) -> dict:
-        """Send CALIB_R2PPM (0x23) to store current Rs as R2ppm for TGS2611 channel."""
+    def calib_r2ppm(self, channel: int = 0, raw_value: int = 0, timeout_s: float = 5.0) -> dict:
+        """Send CALIB_R2PPM (0x23) with a raw ADC value to store as R2ppm for TGS2611 channel."""
         if not self.is_open:
             raise RuntimeError("Serial port not open")
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
             self._send_cmd(ProtoCmd.CALIB_R2PPM)
-            ser.write(bytes([channel & 0xFF]))
+            raw_clamped = max(-32768, min(32767, int(raw_value)))
+            raw_u16 = raw_clamped & 0xFFFF
+            ser.write(bytes([channel & 0xFF, (raw_u16 >> 8) & 0xFF, raw_u16 & 0xFF]))
             ser.flush()
             resp = self._read_byte(timeout_s)
             if resp == ProtoResp.OK:
@@ -1596,12 +1598,12 @@ class App(tk.Tk):
         info_row.pack(fill=tk.X, padx=10, pady=(8, 2))
         ttk.Label(
             info_row,
-            text="Subject sensor to 2ppm CH\u2084, then click Calibrate.",
+            text="Enter the TGS2611 raw ADC value observed at 2 ppm CH\u2084, then click Calibrate.",
             justify=tk.LEFT,
         ).pack(anchor="w")
         ttk.Label(
             info_row,
-            text="This stores the current Rs as R\u2082ppm in the sensor EEPROM and enables ppm output.",
+            text="This converts the raw value to Rs and stores it as R\u2082ppm in the sensor EEPROM.",
             justify=tk.LEFT,
             foreground="#888888",
         ).pack(anchor="w", pady=(2, 0))
@@ -1613,6 +1615,14 @@ class App(tk.Tk):
         calib_ch_entry = ttk.Entry(entry_row, textvariable=self.calib_ch_var, width=5)
         calib_ch_entry.pack(side=tk.LEFT, padx=(6, 0))
         ttk.Label(entry_row, text="  (1 for first/only TGS2611, matches CSV column)", foreground="#888888").pack(side=tk.LEFT)
+
+        raw_row = ttk.Frame(calib_frame)
+        raw_row.pack(fill=tk.X, padx=10, pady=(0, 4))
+        ttk.Label(raw_row, text="Raw ADC value:").pack(side=tk.LEFT)
+        self.calib_raw_var = tk.StringVar(value="")
+        calib_raw_entry = ttk.Entry(raw_row, textvariable=self.calib_raw_var, width=8)
+        calib_raw_entry.pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(raw_row, text="  (integer, 0\u201332767; read from OLED raw page or CSV)", foreground="#888888").pack(side=tk.LEFT)
 
         calib_btn_row = ttk.Frame(calib_frame)
         calib_btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
@@ -3054,7 +3064,7 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _calib_r2ppm_send(self) -> None:
-        """Send CALIB_R2PPM command to store current Rs as R2ppm in sensor EEPROM."""
+        """Send CALIB_R2PPM command with the entered raw ADC value."""
         try:
             ch_display = int(self.calib_ch_var.get())
             if ch_display < 1:
@@ -3063,12 +3073,19 @@ class App(tk.Tk):
         except ValueError:
             self.calib_r2ppm_status_var.set("Invalid channel (must be \u2265 1)")
             return
+        try:
+            raw_val = int(self.calib_raw_var.get())
+            if not (0 <= raw_val <= 32767):
+                raise ValueError
+        except ValueError:
+            self.calib_r2ppm_status_var.set("Invalid raw value (must be 0\u201332767)")
+            return
         self.calib_r2ppm_btn.configure(state=tk.DISABLED)
         self.calib_r2ppm_status_var.set("Sending\u2026")
 
         def worker() -> None:
             try:
-                result = self.client.calib_r2ppm(channel=ch, timeout_s=5.0)
+                result = self.client.calib_r2ppm(channel=ch, raw_value=raw_val, timeout_s=5.0)
                 if result.get("success"):
                     self.events.put(("calib_r2ppm_ok", ch_display))
                 else:

@@ -18,6 +18,8 @@ void pump_save_percent(float pct);
 // External TGS2611 R2ppm calibration from main.cpp
 // Measures current Rs and writes it as R2ppm to the sensor EEPROM on channel ch.
 extern bool tgs2611_save_r2ppm(uint8_t ch);
+// Stores R2ppm computed from a caller-supplied raw ADC value.
+extern bool tgs2611_save_r2ppm_from_raw(uint8_t ch, int16_t raw);
 
 namespace ui {
 
@@ -515,15 +517,14 @@ void poll() {
     }
 
     case proto::Cmd::CALIB_R2PPM: {
-      // Payload: 1 byte channel index (0-based).
-      // Reads current sensor Rs and writes it as R2ppm to EEPROM.
-      // The sensor must be sampling ambient ~2 ppm CH4 air for >=24 h before issuing this command.
-      uint8_t ch;
-      if (!read_byte_timeout(ch)) {
+      // Payload: 1 byte channel index (0-based) + 2 bytes raw ADC value (int16, big-endian).
+      uint8_t ch, raw_hi, raw_lo;
+      if (!read_byte_timeout(ch) || !read_byte_timeout(raw_hi) || !read_byte_timeout(raw_lo)) {
         proto::write_error(proto::ErrorCode::TIMEOUT);
         break;
       }
-      if (tgs2611_save_r2ppm(ch)) {
+      int16_t raw = static_cast<int16_t>((static_cast<uint16_t>(raw_hi) << 8) | raw_lo);
+      if (tgs2611_save_r2ppm_from_raw(ch, raw)) {
         proto::write_response(proto::RespType::OK);
       } else {
         proto::write_error(proto::ErrorCode::INVALID_CMD);
