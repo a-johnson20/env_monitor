@@ -931,6 +931,7 @@ class App(tk.Tk):
         self.live_series: list[deque[float | None]] = []
         self.live_last_values: dict[str, tuple[float, float]] = {}
         self.live_hold_timeout_s = 15.0
+        self.gas_card_stats: dict[str, list[float]] = {}
         self.gas_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
 
         # WiFi settings
@@ -1227,7 +1228,16 @@ class App(tk.Tk):
             )
             unit_label.pack(side=tk.LEFT, anchor="s", pady=(0, 4))
 
-            self.gas_card_widgets[col_name] = (val_label, unit_label, card)
+            stats_label = tk.Label(
+                card,
+                text="",
+                font=("Segoe UI", 10),
+                bg=self.C_CARD_BG,
+                fg="#9ca3af",
+            )
+            stats_label.pack(anchor="w", pady=(2, 0))
+
+            self.gas_card_widgets[col_name] = (val_label, unit_label, card, stats_label)
 
         # Create split pane: graphs on top, table on bottom
         split = ttk.Panedwindow(self.live_tab, orient=tk.VERTICAL)
@@ -2749,11 +2759,13 @@ class App(tk.Tk):
         self.live_time_labels.clear()
         self.live_series = []
         self.live_last_values.clear()
+        self.gas_card_stats.clear()
 
-        for col_name, (val_lbl, unit_lbl, card) in self.gas_card_widgets.items():
+        for col_name, (val_lbl, unit_lbl, card, stats_lbl) in self.gas_card_widgets.items():
             val_lbl.configure(text="N/A", fg=self.C_CARD_NA)
             unit_lbl.configure(fg="#9ca3af")
             card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+            stats_lbl.configure(text="")
         
         self._refresh_live_graphs()
 
@@ -2765,7 +2777,7 @@ class App(tk.Tk):
         for col_name, (label, unit) in self.GAS_COLS.items():
             if col_name not in self.gas_card_widgets:
                 continue
-            val_lbl, unit_lbl, card = self.gas_card_widgets[col_name]
+            val_lbl, unit_lbl, card, stats_lbl = self.gas_card_widgets[col_name]
             raw = row.get(col_name, "NA").strip()
             parsed = self._parse_float_or_none(raw)
 
@@ -2780,6 +2792,13 @@ class App(tk.Tk):
                     display = str(int(parsed))
                 else:
                     display = f"{parsed:.2f}"
+                if col_name not in self.gas_card_stats:
+                    self.gas_card_stats[col_name] = []
+                self.gas_card_stats[col_name].append(parsed)
+                s = self.gas_card_stats[col_name]
+                stats_lbl.configure(
+                    text=f"min: {min(s):.1f} | avg: {sum(s)/len(s):.1f} | max: {max(s):.1f}"
+                )
 
                 thresholds = self.GAS_THRESHOLDS.get(col_name, [])
                 text_col = self.C_CARD_NEUTRAL
