@@ -931,6 +931,7 @@ class App(tk.Tk):
         self.live_series: list[deque[float | None]] = []
         self.live_last_values: dict[str, tuple[float, float]] = {}
         self.live_hold_timeout_s = 15.0
+        self.live_autoscroll = tk.BooleanVar(value=True)
         self.gas_card_stats: dict[str, list[float]] = {}
         self.gas_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
 
@@ -1273,7 +1274,14 @@ class App(tk.Tk):
         table_frame = ttk.Frame(split)
         split.add(table_frame, weight=1)
 
-        ttk.Label(table_frame, text="Raw Data Log", style="Section.TLabel").pack(anchor="w")
+        table_header = ttk.Frame(table_frame)
+        table_header.pack(fill=tk.X)
+        ttk.Label(table_header, text="Raw Data Log", style="Section.TLabel").pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            table_header,
+            text="Auto-scroll",
+            variable=self.live_autoscroll,
+        ).pack(side=tk.LEFT, padx=(12,0))
 
         # Create frame to hold table and scrollbars using grid layout
         table_inner = ttk.Frame(table_frame)
@@ -2966,7 +2974,8 @@ class App(tk.Tk):
                 self.live_table.delete(item)
         
         # Auto-scroll to bottom
-        self.live_table.see(row_id)
+        if self.live_autoscroll.get():
+            self.live_table.see(row_id)
 
         # Try to extract and update RTC time from first field (timestamp)
         if fields and len(fields) > 0:
