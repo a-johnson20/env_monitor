@@ -2470,19 +2470,67 @@ class App(tk.Tk):
         if children:
             self.files_tree.selection_set(children)
 
+    def _ask_sensor_number(self) -> None:
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Sensor Number")
+        dialog.resizable(False, False)
+        dialog.grab_set()
+
+        result: list[str | None] = [None]
+
+        ttk.Label(dialog, text="Enter sensor number:").pack(padx=20, pady=(16, 4))
+        var = tk.StringVar()
+
+        vcmd = dialog.register(lambda P: P == "" or (P.isdigit() and len(P) <= 3))
+        entry = ttk.Entry(dialog, textvariable=var, width=10, validate="key", validatecommand=(vcmd, "%P"))
+        entry.pack(padx=20)
+        entry.focus_set()
+
+        def on_ok() -> None:
+            val = var.get().strip()
+            if not val.isdigit() or not val:
+                messagebox.showwarning("Invalid", "Please enter a valid whole number.", parent=dialog)
+                return
+            result[0] = f"{int(val):03d}"
+            dialog.destroy()
+
+        def on_cancel() -> None:
+            dialog.destroy()
+
+        btn_frame = ttk.Frame(dialog)
+        btn_frame.pack(pady=(8, 16))
+        ttk.Button(btn_frame, text="OK", command=on_ok, style="Accent.TButton").pack(side=tk.LEFT)
+        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=(8, 0))
+
+        entry.bind("<Return>", lambda _: on_ok())
+        dialog.bind("<Escape>", lambda _: on_cancel())
+
+        self.update_idletasks()
+        x = self.winfo_x() + (self.winfo_width() - dialog.winfo_reqwidth()) // 2
+        y = self.winfo_y() + (self.winfo_height() - dialog.winfo_reqheight()) // 2
+        dialog.geometry(f"+{x}+{y}")
+
+        self.wait_window(dialog)
+        return result[0]
+
     def download_selected(self) -> None:
         sel = self.files_tree.selection()
         if not sel:
             messagebox.showwarning("Select File", "Select a file to download.")
             return
 
+        sensor_num = self._ask_sensor_number()
+        if sensor_num is None:
+            return
+
+        date_str = datetime.now().strftime("%Y%m%d")
+
         if len(sel) == 1:
             row = self.files_tree.item(sel[0], "values")
             index = int(row[0])
             dev_path = str(row[1])
-            default_name = os.path.basename(dev_path) or f"log_{index}.csv"
-            if not default_name.lower().endswith(".csv"):
-                default_name += ".csv"
+            default_name = f"{sensor_num}_{date_str}.csv"
 
             out = filedialog.asksaveasfilename(
                 title="Save CSV",
@@ -2521,10 +2569,8 @@ class App(tk.Tk):
             def batch_worker() -> None:
                 saved: list[tuple[str, int]] = []
                 try:
-                    for index, dev_path in items:
-                        name = os.path.basename(dev_path) or f"log_{index}.csv"
-                        if not name.lower().endswith(".csv"):
-                            name += ".csv"
+                    for i, (index, dev_path) in enumerate(items):
+                        name = f"{sensor_num}_{date_str}_{i + 1:02d}.csv"
                         out_path = out_dir_path / name
                         self.events.put(("busy", f"Downloading {dev_path} ({len(saved) + 1}/{len(items)}) ..."))
                         _, payload = self.client.download_log_bytes(index=index, timeout_s=20.0)
