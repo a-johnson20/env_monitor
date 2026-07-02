@@ -70,6 +70,21 @@ def get_font_path() -> Path | None:
 WIFI_FONT_PATH = get_font_path()
 WIFI_FONT_NAME = "DejaVu Sans Mono wifi ramp"
 
+def get_icon_path() -> Path | None:
+    """Find the app icon, checking bundled and development locations."""
+    if getattr(sys, 'frozen', False):
+        icon_path = Path(sys._MEIPASS) / "assets" / "GEM_icon_256.ico"
+        if icon_path.exists():
+            return icon_path
+
+    repo_icon = Path(__file__).parent.parent / "assets" / "GEM_icon_256.ico"
+    if repo_icon.exists():
+        return repo_icon
+
+    return None
+
+APP_ICON_PATH = get_icon_path()
+
 # Try to register the WiFi font on Windows
 if WIFI_FONT_PATH and hasattr(ctypes, 'windll'):
     try:
@@ -904,6 +919,8 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("GEM GUI")
+        if APP_ICON_PATH:
+            self.iconbitmap(str(APP_ICON_PATH))
         # Reduce initial size to account for DPI scaling and prevent blurriness
         self.geometry("900x680")
         self.minsize(850, 620)

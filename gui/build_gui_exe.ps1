@@ -9,8 +9,10 @@ python -m PyInstaller `
   --noconfirm `
   --onefile `
   --windowed `
+  --icon "assets/GEM_icon_256.ico" `
   --collect-data ttkbootstrap `
   --add-data "fonts/DejaVuSansMono-wifi-ramp.ttf:fonts" `
+  --add-data "assets/GEM_icon_256.ico:assets" `
   --name "GEM GUI" `
   gui/env_monitor_gui.py
 
