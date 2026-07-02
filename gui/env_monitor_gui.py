@@ -243,6 +243,30 @@ class SerialMenuClient:
         data = self._read_exact(length, timeout_s)
         return data.decode('utf-8', errors='replace')
 
+    def _drain_and_read_response(self, valid_types: set[int], timeout_s: float = 5.0) -> int:
+        """Drain stale bytes and read the first valid response type.
+        
+        After reset_input_buffer(), bytes that were already in transit over USB
+        (e.g. LIVE_DATA frames from commit_and_reset_all_windows()) can still arrive.
+        This method discards any bytes that don't match valid response types,
+        returning the first valid one found.
+        
+        Returns the response type byte.
+        Raises RuntimeError on timeout.
+        """
+        ser = self._require_open()
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            b = ser.read(1)
+            if not b:
+                time.sleep(0.001)
+                continue
+            resp = b[0]
+            if resp in valid_types:
+                return resp
+            # Discard this byte — it's stale data from a previous operation
+        raise RuntimeError(f"Timeout waiting for valid response (expected one of {valid_types})")
+
     # ============ COMMAND METHODS ============
 
     def list_logs(self, timeout_s: float = 20.0) -> list[FileEntry]:
@@ -256,15 +280,16 @@ class SerialMenuClient:
             
             self._send_cmd(ProtoCmd.LOG_LIST)
             
-            # Read response
-            resp_type = self._read_byte(timeout_s)
+            # Read response — drain stale bytes (e.g. in-transit LIVE_DATA frames)
+            # until we see LOG_LIST, ERROR, or timeout.
+            valid = {ProtoResp.LOG_LIST, ProtoResp.ERROR}
+            resp_type = self._drain_and_read_response(valid, timeout_s)
             
             if resp_type == ProtoResp.ERROR:
                 error_code = self._read_byte(timeout_s)
                 raise RuntimeError(f"Device error {error_code}")
             
-            if resp_type != ProtoResp.LOG_LIST:
-                raise RuntimeError(f"Unexpected response: {resp_type}")
+            # resp_type is guaranteed to be LOG_LIST here
             
             # Read file list
             num_files = self._read_byte(timeout_s)
@@ -293,15 +318,16 @@ class SerialMenuClient:
             
             self._send_cmd_with_byte(ProtoCmd.LOG_GET, index)
             
-            # Read response
-            resp_type = self._read_byte(timeout_s)
+            # Read response — drain stale bytes (e.g. in-transit LIVE_DATA frames)
+            # until we see LOG_BEGIN, ERROR, or timeout.
+            valid = {ProtoResp.LOG_BEGIN, ProtoResp.ERROR}
+            resp_type = self._drain_and_read_response(valid, timeout_s)
             
             if resp_type == ProtoResp.ERROR:
                 error_code = self._read_byte(timeout_s)
                 raise RuntimeError(f"Device error {error_code}")
             
-            if resp_type != ProtoResp.LOG_BEGIN:
-                raise RuntimeError(f"Expected LOG_BEGIN, got {resp_type}")
+            # resp_type is guaranteed to be LOG_BEGIN here
             
             # Read file entry header
             size_bytes = self._read_exact(4, timeout_s)

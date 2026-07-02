@@ -366,7 +366,9 @@ static void commit_and_reset_all_windows() {
   line += (win_n2o_ppm.count ? String(win_n2o_ppm.mean(), 2) : "NA");
 
   // Send live CSV data only when GUI has started live streaming
-  if (ui::live_stream_enabled()) {
+  // AND the serial menu is not currently processing a command (to avoid
+  // corrupting the binary protocol response with interleaved LIVE_DATA frames).
+  if (ui::live_stream_enabled() && !ui::is_busy()) {
     ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), line);
   }
 
@@ -839,7 +841,8 @@ void loop() {
 
   // --- Send CSV header periodically (every ~10 seconds) when live streaming ---
   // This ensures the GUI always has a fresh header, even if it connects after startup
-  if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
+  // Skip if serial menu is busy processing a command (avoids interleaving).
+  if (ui::live_stream_enabled() && !ui::is_busy() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
     ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true, N_SFM3505));
     last_header_sent_ms = now;
   }

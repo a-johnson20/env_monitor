@@ -25,6 +25,7 @@ namespace ui {
 static bool g_live_stream = false;
 static bool g_live_just_started = false;
 static bool seen_connection = false;
+static bool g_busy = false;  // true while processing a command, prevents LIVE_DATA interleaving
 
 struct LogFileEntry {
   String path;
@@ -80,6 +81,7 @@ bool serial_connected() {
 
 bool live_stream_enabled() { return g_live_stream; }
 bool live_just_started()   { bool v = g_live_just_started; g_live_just_started = false; return v; }
+bool is_busy()             { return g_busy; }
 
 void begin() {
   // Binary protocol doesn't need initialization
@@ -430,6 +432,11 @@ void poll() {
   uint8_t cmd_byte = Serial.read();
   proto::Cmd cmd = (proto::Cmd)cmd_byte;
 
+  // Set busy flag for the duration of command processing.
+  // This prevents main.cpp's commit_and_reset_all_windows() and header-send
+  // from writing LIVE_DATA frames to Serial while we are sending a response.
+  g_busy = true;
+
   switch (cmd) {
     case proto::Cmd::LIVE_START:
       g_live_stream = true;
@@ -568,8 +575,8 @@ void poll() {
       proto::write_error(proto::ErrorCode::INVALID_CMD);
       break;
   }
+
+  g_busy = false;
 }
-
-
 
 } // namespace ui
