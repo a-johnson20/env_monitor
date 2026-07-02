@@ -6,6 +6,7 @@
 #include <WiFi.h>
 #include <vector>
 #include <SD_MMC.h>
+#include <string.h>  // memcpy
 
 // External function from main.cpp to get RTC time as string
 extern void get_rtc_time_string(char* out, size_t n);
@@ -15,11 +16,9 @@ extern float pump_percent;
 extern void pump_set_percent(float pct);
 void pump_save_percent(float pct);
 
-// External TGS2611 R2ppm calibration from main.cpp
-// Measures current Rs and writes it as R2ppm to the sensor EEPROM on channel ch.
-extern bool tgs2611_save_r2ppm(uint8_t ch);
-// Stores R2ppm computed from a caller-supplied raw ADC value.
-extern bool tgs2611_save_r2ppm_from_raw(uint8_t ch, int16_t raw);
+// External TGS2611 multipoint calibration from main.cpp
+// Stores pre-fitted R2ppm (kΩ) and alpha parameters into the sensor EEPROM on channel ch.
+extern bool tgs2611_save_calib_params(uint8_t ch, float r2ppm_kohm, float alpha);
 
 namespace ui {
 
@@ -516,15 +515,21 @@ void poll() {
       break;
     }
 
-    case proto::Cmd::CALIB_R2PPM: {
-      // Payload: 1 byte channel index (0-based) + 2 bytes raw ADC value (int16, big-endian).
-      uint8_t ch, raw_hi, raw_lo;
-      if (!read_byte_timeout(ch) || !read_byte_timeout(raw_hi) || !read_byte_timeout(raw_lo)) {
+    case proto::Cmd::CALIB_MULTIPOINT: {
+      // Payload: [ch: u8][r2ppm: 4-byte LE float][alpha: 4-byte LE float]
+      // Fitting is done on the GUI side; firmware only stores the coefficients.
+      uint8_t ch;
+      uint8_t r2ppm_bytes[4], alpha_bytes[4];
+      if (!read_byte_timeout(ch) ||
+          !read_bytes_timeout(r2ppm_bytes, 4) ||
+          !read_bytes_timeout(alpha_bytes, 4)) {
         proto::write_error(proto::ErrorCode::TIMEOUT);
         break;
       }
-      int16_t raw = static_cast<int16_t>((static_cast<uint16_t>(raw_hi) << 8) | raw_lo);
-      if (tgs2611_save_r2ppm_from_raw(ch, raw)) {
+      float r2ppm, alpha;
+      memcpy(&r2ppm, r2ppm_bytes, 4);
+      memcpy(&alpha, alpha_bytes, 4);
+      if (tgs2611_save_calib_params(ch, r2ppm, alpha)) {
         proto::write_response(proto::RespType::OK);
       } else {
         proto::write_error(proto::ErrorCode::INVALID_CMD);

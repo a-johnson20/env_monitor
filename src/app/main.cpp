@@ -157,6 +157,9 @@ std::array<RunningAvg, N_SFM3505> win_sfm3505_o2{};
 // R2ppm reference resistance per TGS2611 channel (kΩ), loaded from EEPROM at boot.
 // NAN until calibrated (calib command writes it; then reboot to reload).
 static float tgs2611_r2ppm_kohm[N_TGS2611 > 0 ? N_TGS2611 : 1];
+// Fitted Shah alpha exponent per TGS2611 channel, loaded from EEPROM at boot.
+// Falls back to SHAH_ALPHA_DEFAULT if not yet calibrated.
+static float tgs2611_alpha[N_TGS2611 > 0 ? N_TGS2611 : 1];
 RunningAvg win_n2o_ppm{};
 
 sensors::PlatinumN2oUart n2o_uart;
@@ -532,32 +535,17 @@ bool ads1113_single_shot(int16_t &raw) {
   raw = (int16_t)((Wire.read()<<8)|Wire.read()); return true;
 }
 
-// Called by serial_menu to store the current Rs as R2ppm for TGS2611 channel ch (0-based).
-// The sensor must be sampling ambient ~2 ppm CH4 air for >=24 h before issuing this command.
-// Returns true on success.
-bool tgs2611_save_r2ppm(uint8_t ch) {
+// Store pre-fitted calibration parameters (R2ppm and alpha) into the sensor EEPROM
+// on TGS2611 channel ch (0-based). Called by serial_menu after GUI-side fitting.
+bool tgs2611_save_calib_params(uint8_t ch, float r2ppm_kohm, float alpha) {
   if (ch >= N_TGS2611) return false;
   if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
-  int16_t raw;
-  if (!ads1113_single_shot(raw)) return false;
-  float v_rl = raw * ADS1113_LSB_V;
-  float rs = tgs2611::calc_rs_kohm(v_rl);
-  if (isnan(rs) || rs <= 0.0f) return false;
-  if (!tgs_write_r2ppm_on_selected(rs)) return false;
-  tgs2611_r2ppm_kohm[ch] = rs;
-  return true;
-}
-
-// Variant: store R2ppm computed from a caller-supplied raw ADC value (int16_t).
-// Allows the GUI to send a specific raw reading as the calibration reference.
-bool tgs2611_save_r2ppm_from_raw(uint8_t ch, int16_t raw) {
-  if (ch >= N_TGS2611) return false;
-  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
-  float v_rl = raw * ADS1113_LSB_V;
-  float rs = tgs2611::calc_rs_kohm(v_rl);
-  if (isnan(rs) || rs <= 0.0f) return false;
-  if (!tgs_write_r2ppm_on_selected(rs)) return false;
-  tgs2611_r2ppm_kohm[ch] = rs;
+  if (isnan(r2ppm_kohm) || r2ppm_kohm <= 0.0f) return false;
+  if (isnan(alpha) || alpha <= 0.0f) return false;
+  if (!tgs_write_r2ppm_on_selected(r2ppm_kohm)) return false;
+  if (!tgs_write_alpha_on_selected(alpha)) return false;
+  tgs2611_r2ppm_kohm[ch] = r2ppm_kohm;
+  tgs2611_alpha[ch] = alpha;
   return true;
 }
 
@@ -707,8 +695,11 @@ void setup() {
   // Calibrate TGS2611 channels
   app::calibrate_all_tgs2611(muxStateWire);
 
-  // Load R2ppm reference resistances from TGS2611 EEPROMs (calibrated in ambient ~2 ppm CH4 air).
-  for (size_t i = 0; i < N_TGS2611; ++i) tgs2611_r2ppm_kohm[i] = NAN;
+  // Load R2ppm and alpha calibration params from TGS2611 EEPROMs.
+  for (size_t i = 0; i < N_TGS2611; ++i) {
+    tgs2611_r2ppm_kohm[i] = NAN;
+    tgs2611_alpha[i] = tgs2611::SHAH_ALPHA_DEFAULT;
+  }
   {
     size_t i = 0;
     for (auto ch : hal::Mux::TGS2611) {
@@ -721,6 +712,13 @@ void setup() {
           ui::proto::write_message(0x02, buf);
         } else {
           ui::proto::write_message(0x02, "TGS2611[1] R2ppm: not calibrated — ppm output will be NA");
+        }
+        float alpha = NAN; bool alpha_ok = false;
+        if (tgs_read_alpha_on_selected(alpha, alpha_ok) && alpha_ok && alpha > 0.0f) {
+          tgs2611_alpha[i] = alpha;
+          char buf[64];
+          snprintf(buf, sizeof(buf), "TGS2611[%u] alpha=%.4f", (unsigned)(i+1), alpha);
+          ui::proto::write_message(0x02, buf);
         }
       }
       ++i;
@@ -1075,7 +1073,8 @@ void loop() {
         float rs = tgs2611::calc_rs_kohm(readings.ads.volts);
         if (!isnan(rs)) {
           win_tgs2611_rs[i].add(rs);
-          float ppm = tgs2611::calc_ppm_ch4_shah(rs, tgs2611_r2ppm_kohm[i]);
+          float ppm = tgs2611::calc_ppm_ch4_shah(rs, tgs2611_r2ppm_kohm[i],
+                                                  tgs2611::SHAH_A_DEFAULT, tgs2611_alpha[i]);
           if (!isnan(ppm)) win_tgs2611_ppm[i].add(ppm);
         }
       }
