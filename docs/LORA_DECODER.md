@@ -1,6 +1,6 @@
 # LoRaWAN Uplink Payload Decoder
 
-## Payload Layout (18 bytes)
+## Payload Layout (20 bytes)
 
 | Bytes | Type    | Scaling | Parameter           | N/A Sentinel |
 |-------|---------|---------|---------------------|--------------|
@@ -12,6 +12,7 @@
 | 12–13 | uint16  | ×100    | CH₄ ppm             | 0xFFFF       |
 | 14–15 | uint16  | 1:1     | TGS2611 raw ADC     | 0xFFFF       |
 | 16–17 | uint16  | ×100    | SFM3505 air flow SLM| 0xFFFF       |
+| 18–19 | uint16  | ×100    | N₂O ppm             | 0xFFFF       |
 
 ## Decoder Function (TTN / ChirpStack)
 
@@ -20,7 +21,7 @@ Paste this into your LoRaWAN network server's payload formatter:
 ```javascript
 function decodeUplink(input) {
   var b = input.bytes;
-  if (b.length < 18) return { errors: ["payload too short"] };
+  if (b.length < 20) return { errors: ["payload too short"] };
 
   // Use multiplication for MSB to avoid JS signed 32-bit overflow with <<
   var epoch = b[0] * 16777216 + b[1] * 65536 + b[2] * 256 + b[3];
@@ -31,6 +32,7 @@ function decodeUplink(input) {
   var ch4   = (b[12] << 8) | b[13];
   var raw   = (b[14] << 8) | b[15];
   var air   = (b[16] << 8) | b[17];
+  var n2o   = (b[18] << 8) | b[19];
 
   return { data: {
     utc_epoch   : epoch,
@@ -40,7 +42,8 @@ function decodeUplink(input) {
     pres_hpa    : pres === 0xFFFF  ? null : pres  / 10,
     ch4_ppm     : ch4  === 0xFFFF  ? null : ch4   / 100,
     tgs2611_raw : raw  === 0xFFFF  ? null : raw,
-    air_slm     : air  === 0xFFFF  ? null : air   / 100
+    air_slm     : air  === 0xFFFF  ? null : air   / 100,
+    n2o_ppm     : n2o  === 0xFFFF  ? null : n2o   / 100
   }};
 }
 ```
@@ -53,3 +56,4 @@ function decodeUplink(input) {
 - Temperature example: `2500` → 25.00 °C, `-500` → -5.00 °C.
 - Air flow example: `1500` → 15.00 SLM (standard litres per minute).
 - Raw ADC is the 12-bit value from the ADS1113 (range 0–2047 typically, fits in uint16).
+- N₂O example: `4423` → 44.23 ppm.

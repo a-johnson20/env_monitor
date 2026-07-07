@@ -578,7 +578,7 @@ static uint32_t get_utc_epoch() {
   return (e > 0) ? (uint32_t)e : 0;
 }
 
-// Build the 18-byte LoRa uplink payload (big-endian):
+// Build the 20-byte LoRa uplink payload (big-endian):
 //   [0..3]   uint32  Unix UTC epoch         (0 = unavailable)
 //   [4..5]   uint16  CO2 ppm                (0xFFFF = N/A)
 //   [6..7]   uint16  SHT45 RH × 100 %       (0xFFFF = N/A;  5500 = 55.00 %)
@@ -587,6 +587,7 @@ static uint32_t get_utc_epoch() {
 //   [12..13] uint16  TGS2611 CH4 × 100 ppm  (0xFFFF = N/A;   200 = 2.00 ppm)
 //   [14..15] uint16  TGS2611 raw ADC         (0xFFFF = N/A)
 //   [16..17] uint16  SFM3505 air × 100 SLM  (0xFFFF = N/A;  1500 = 15.00 SLM)
+//   [18..19] uint16  N2O × 100 ppm          (0xFFFF = N/A;  5000 = 50.00 ppm)
 static void lora_build_payload(uint8_t* buf) {
   uint32_t epoch = get_utc_epoch();
   buf[0] = (epoch >> 24) & 0xFF;
@@ -639,10 +640,15 @@ static void lora_build_payload(uint8_t* buf) {
   float air = (N_SFM3505 > 0 && win_sfm3505_air[0].count) ? win_sfm3505_air[0].mean() : NAN;
   uint16_t air_enc = enc_u16(air, 100.0f);
   buf[16] = air_enc >> 8;   buf[17] = air_enc & 0xFF;
+
+  // Platinum N2O (×100 ppm, e.g. 4423 = 44.23 ppm)
+  float n2o = win_n2o_ppm.count ? win_n2o_ppm.mean() : NAN;
+  uint16_t n2o_enc = enc_u16(n2o, 100.0f);
+  buf[18] = n2o_enc >> 8;   buf[19] = n2o_enc & 0xFF;
 }
 
 static bool lora_send_reading() {
-  uint8_t payload[18];
+  uint8_t payload[20];
   lora_build_payload(payload);
   return lora::send_hex(payload, sizeof(payload));
 }
