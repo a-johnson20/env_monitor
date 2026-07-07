@@ -168,8 +168,9 @@ void save_keys(const String& eui, const String& key) {
 }
 
 bool join(uint32_t timeout_ms) {
-    // Configure region and mode (idempotent — safe to repeat)
+    // Configure region, power, and mode (idempotent — safe to repeat)
     at_cmd("AT+DR=EU868",    1000, nullptr, "+DR:");
+    at_cmd("AT+TXP=14",      1000, nullptr, "+TXP:"); // +14 dBm max (EU868 limit)
     at_cmd("AT+CLASS=A",     1000, nullptr, "+CLASS:");
     at_cmd("AT+ADR=ON",      1000, nullptr, "+ADR:");
     at_cmd("AT+MODE=LWOTAA", 1000, nullptr, "+MODE:");
