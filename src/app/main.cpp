@@ -578,13 +578,15 @@ static uint32_t get_utc_epoch() {
   return (e > 0) ? (uint32_t)e : 0;
 }
 
-// Build the 14-byte LoRa uplink payload (big-endian):
-//   [0..3]   uint32  Unix UTC epoch       (0 = unavailable)
-//   [4..5]   uint16  CO2 ppm              (0xFFFF = N/A)
-//   [6..7]   uint16  SHT45 RH × 100 %    (0xFFFF = N/A;  5500 = 55.00 %)
-//   [8..9]   int16   TMP117 temp × 100 °C (0x8000 = N/A;  2500 = 25.00 °C)
-//   [10..11] uint16  LPS22DF pres × 10 hPa(0xFFFF = N/A; 10132 = 1013.2 hPa)
-//   [12..13] uint16  TGS2611 CH4 × 100 ppm(0xFFFF = N/A;   200 = 2.00 ppm)
+// Build the 18-byte LoRa uplink payload (big-endian):
+//   [0..3]   uint32  Unix UTC epoch         (0 = unavailable)
+//   [4..5]   uint16  CO2 ppm                (0xFFFF = N/A)
+//   [6..7]   uint16  SHT45 RH × 100 %       (0xFFFF = N/A;  5500 = 55.00 %)
+//   [8..9]   int16   TMP117 temp × 100 °C   (0x8000 = N/A;  2500 = 25.00 °C)
+//   [10..11] uint16  LPS22DF pres × 10 hPa  (0xFFFF = N/A; 10132 = 1013.2 hPa)
+//   [12..13] uint16  TGS2611 CH4 × 100 ppm  (0xFFFF = N/A;   200 = 2.00 ppm)
+//   [14..15] uint16  TGS2611 raw ADC         (0xFFFF = N/A)
+//   [16..17] uint16  SFM3505 air × 100 SLM  (0xFFFF = N/A;  1500 = 15.00 SLM)
 static void lora_build_payload(uint8_t* buf) {
   uint32_t epoch = get_utc_epoch();
   buf[0] = (epoch >> 24) & 0xFF;
@@ -624,10 +626,23 @@ static void lora_build_payload(uint8_t* buf) {
   buf[8]  = (uint16_t)temp_enc >> 8; buf[9]  = (uint16_t)temp_enc & 0xFF;
   buf[10] = pres_enc >> 8;           buf[11] = pres_enc & 0xFF;
   buf[12] = ch4_enc >> 8;            buf[13] = ch4_enc & 0xFF;
+
+  // TGS2611 raw ADC (raw 12-bit reading from ADS1113)
+  uint16_t raw_adc = 0xFFFF;
+  if (N_TGS2611 > 0 && win_tgs2611_raw[0].count) {
+    long r = lroundf(win_tgs2611_raw[0].mean());
+    raw_adc = (uint16_t)(r < 0 ? 0 : r > 65534 ? 65534 : r);
+  }
+  buf[14] = raw_adc >> 8;   buf[15] = raw_adc & 0xFF;
+
+  // SFM3505 air flow (×100 SLM, e.g. 1500 = 15.00 SLM)
+  float air = (N_SFM3505 > 0 && win_sfm3505_air[0].count) ? win_sfm3505_air[0].mean() : NAN;
+  uint16_t air_enc = enc_u16(air, 100.0f);
+  buf[16] = air_enc >> 8;   buf[17] = air_enc & 0xFF;
 }
 
 static bool lora_send_reading() {
-  uint8_t payload[14];
+  uint8_t payload[18];
   lora_build_payload(payload);
   return lora::send_hex(payload, sizeof(payload));
 }
