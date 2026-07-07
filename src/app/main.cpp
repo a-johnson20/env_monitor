@@ -162,6 +162,16 @@ static float tgs2611_r2ppm_kohm[N_TGS2611 > 0 ? N_TGS2611 : 1];
 static float tgs2611_alpha[N_TGS2611 > 0 ? N_TGS2611 : 1];
 RunningAvg win_n2o_ppm{};
 
+// LoRa-specific accumulators — averaged over the full period between LoRa sends
+// (fed from the 10s commit means, ~6 samples per LoRa send at 60s interval).
+static RunningAvg lora_rh;
+static RunningAvg lora_temp;
+static RunningAvg lora_pres;
+static RunningAvg lora_ch4;
+static RunningAvg lora_raw_adc;
+static RunningAvg lora_air;
+static RunningAvg lora_n2o;
+
 sensors::PlatinumN2oUart n2o_uart;
 sensors::PlatinumN2oReading n2o_reading;
 
@@ -411,6 +421,17 @@ static void commit_and_reset_all_windows() {
     }}
   leds::led_flash(7, n2o_reading.last_ok_ms > 0);  // UART1 → LED8: green=valid, red=fault
 
+  // Feed the 10s commit means into the LoRa accumulators (averaged over ~60s)
+  if (N_TRHP > 0) {
+    if (win_trhp_sht45_rh[0].count) lora_rh.add(win_trhp_sht45_rh[0].mean());
+    if (win_trhp_tmp117_t[0].count) lora_temp.add(win_trhp_tmp117_t[0].mean());
+    if (win_trhp_lps_p[0].count)    lora_pres.add(win_trhp_lps_p[0].mean());
+  }
+  if (N_TGS2611 > 0 && win_tgs2611_ppm[0].count) lora_ch4.add(win_tgs2611_ppm[0].mean());
+  if (N_TGS2611 > 0 && win_tgs2611_raw[0].count) lora_raw_adc.add(win_tgs2611_raw[0].mean());
+  if (N_SFM3505 > 0 && win_sfm3505_air[0].count) lora_air.add(win_sfm3505_air[0].mean());
+  if (win_n2o_ppm.count) lora_n2o.add(win_n2o_ppm.mean());
+
   // Reset per-window state (your new helper)
   reset_windows_and_flags();
 }
@@ -613,10 +634,11 @@ static void lora_build_payload(uint8_t* buf) {
   }
   buf[4] = co2 >> 8;  buf[5] = co2 & 0xFF;
 
-  float rh   = (N_TRHP > 0 && win_trhp_sht45_rh[0].count) ? win_trhp_sht45_rh[0].mean() : NAN;
-  float temp = (N_TRHP > 0 && win_trhp_tmp117_t[0].count) ? win_trhp_tmp117_t[0].mean() : NAN;
-  float pres = (N_TRHP > 0 && win_trhp_lps_p[0].count)    ? win_trhp_lps_p[0].mean()    : NAN;
-  float ch4  = (N_TGS2611 > 0 && win_tgs2611_ppm[0].count) ? win_tgs2611_ppm[0].mean()  : NAN;
+  // Use LoRa accumulators (~60s average from 6× 10s commits)
+  float rh   = lora_rh.mean();
+  float temp = lora_temp.mean();
+  float pres = lora_pres.mean();
+  float ch4  = lora_ch4.mean();
 
   uint16_t rh_enc   = enc_u16(rh,   100.0f);
   int16_t  temp_enc = enc_i16(temp, 100.0f);
@@ -629,20 +651,21 @@ static void lora_build_payload(uint8_t* buf) {
   buf[12] = ch4_enc >> 8;            buf[13] = ch4_enc & 0xFF;
 
   // TGS2611 raw ADC (raw 12-bit reading from ADS1113)
+  float raw_avg = lora_raw_adc.mean();
   uint16_t raw_adc = 0xFFFF;
-  if (N_TGS2611 > 0 && win_tgs2611_raw[0].count) {
-    long r = lroundf(win_tgs2611_raw[0].mean());
+  if (!isnan(raw_avg)) {
+    long r = lroundf(raw_avg);
     raw_adc = (uint16_t)(r < 0 ? 0 : r > 65534 ? 65534 : r);
   }
   buf[14] = raw_adc >> 8;   buf[15] = raw_adc & 0xFF;
 
   // SFM3505 air flow (×100 SLM, e.g. 1500 = 15.00 SLM)
-  float air = (N_SFM3505 > 0 && win_sfm3505_air[0].count) ? win_sfm3505_air[0].mean() : NAN;
+  float air = lora_air.mean();
   uint16_t air_enc = enc_u16(air, 100.0f);
   buf[16] = air_enc >> 8;   buf[17] = air_enc & 0xFF;
 
   // Platinum N2O (×100 ppm, e.g. 4423 = 44.23 ppm)
-  float n2o = win_n2o_ppm.count ? win_n2o_ppm.mean() : NAN;
+  float n2o = lora_n2o.mean();
   uint16_t n2o_enc = enc_u16(n2o, 100.0f);
   buf[18] = n2o_enc >> 8;   buf[19] = n2o_enc & 0xFF;
 }
@@ -650,6 +673,16 @@ static void lora_build_payload(uint8_t* buf) {
 static bool lora_send_reading() {
   uint8_t payload[20];
   lora_build_payload(payload);
+
+  // Reset LoRa accumulators after reading
+  lora_rh.reset();
+  lora_temp.reset();
+  lora_pres.reset();
+  lora_ch4.reset();
+  lora_raw_adc.reset();
+  lora_air.reset();
+  lora_n2o.reset();
+
   return lora::send_hex(payload, sizeof(payload));
 }
 
