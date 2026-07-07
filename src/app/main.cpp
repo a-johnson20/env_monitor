@@ -851,6 +851,10 @@ void setup() {
   leds::led1_flash(s_lora_joined, 2000);
   ui::proto::write_message(0x02, s_lora_joined ? "LoRa: joined" : "LoRa: join failed (will retry in loop)");
 
+  // Deterministic stagger offset so co-located units don't transmit simultaneously.
+  // First send happens 'offset' ms after boot; subsequent sends maintain the 60s period.
+  s_last_lora_send_ms = millis() - lora::stagger_offset_ms(60000UL);
+
   // SHORT delay to let devices settle
   delay(1000);
 
@@ -892,7 +896,7 @@ void loop() {
       bool tx_ok = lora_send_reading();
       leds::led1_flash(tx_ok);
       if (!tx_ok) s_lora_joined = false;           // failure → re-join next cycle
-      s_last_lora_send_ms = now;
+      s_last_lora_send_ms += LORA_SEND_INTERVAL;   // maintain fixed 60s period
     }
   }
 
