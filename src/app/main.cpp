@@ -421,6 +421,9 @@ bool scd4x_present() { Wire.beginTransmission(hal::I2CAddr::SCD41); return Wire.
 void scd4x_ensure_running(Scd4xReading &st) {
   if (st.started) return;
   st.present = scd4x_present(); if (!st.present) return;
+  // Must stop periodic measurement first — wakeUp/reinit are ignored while measuring
+  scd4x.stopPeriodicMeasurement();
+  delay(500);  // per SCD4x datasheet: 500ms needed after stop command
   scd4x.wakeUp(); scd4x.reinit();
   if (scd4x.startPeriodicMeasurement() == NO_ERROR) { st.started = true; st.started_at_ms = millis(); }
 }
