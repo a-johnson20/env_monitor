@@ -39,15 +39,28 @@ except Exception:
     tb = None
     HAS_TTKBOOTSTRAP = False
 
-# Try to disable DPI scaling awareness on Windows to fix blurriness
+# Configure DPI awareness.
+#
+# We use SYSTEM_DPI_AWARE (value 1). This pins the process to a single DPI for
+# its whole lifetime — the DPI of the monitor the window was launched on. That
+# has two benefits for this GUI:
+#   * The UI keeps a comfortable, constant physical size when dragged onto a
+#     different monitor (it does NOT auto-rescale and blow up).
+#   * The window is rendered at the true system DPI on the launch monitor, so
+#     it stays crisp there. On a secondary monitor with a different DPI, Windows
+#     does a light DWM bitmap stretch (the only tradeoff for a constant size).
+#     This is an inherent limitation of Tk 8.6.x, which cannot natively support
+#     per-monitor DPI rendering.
 try:
     import ctypes
-    # Try per-monitor DPI awareness (most aggressive)
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-    except Exception:
-        # Fall back to system DPI awareness
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "shcore"):
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
 except Exception:
     pass  # Non-Windows or older Windows version
 
@@ -951,6 +964,17 @@ class App(tk.Tk):
         self.geometry("900x680")
         self.minsize(850, 620)
 
+        # Capture Tk's natural (system) scaling factor at startup before we
+        # subclass the window procedure. Under per-monitor DPI awareness, Tk
+        # auto-computes this from the monitor DPI; we save it so the
+        # WM_DPICHANGED handler can re-apply the same constant and prevent Tk
+        # 8.6.10+ from auto-rescaling on a monitor change.
+        try:
+            self._tk_natural_scaling = float(self.tk.call("tk", "scaling"))
+        except Exception:
+            self._tk_natural_scaling = 1.0
+        self._bind_dpi_change()
+
         self.c_bg = "#eef2f8"
         self.c_surface = "#ffffff"
         self.c_text = "#1f2937"
@@ -1037,6 +1061,49 @@ class App(tk.Tk):
     def _on_port_focus_in(self, _event=None) -> None:
         try:
             self.port_combo.selection_clear()
+        except Exception:
+            pass
+
+    def _bind_dpi_change(self) -> None:
+        """Keep Tk's natural scaling factor across monitor DPI changes.
+
+        Under per-monitor DPI awareness, Windows sends WM_DPICHANGED when the
+        window moves to a different-DPI monitor. Tk 8.6.x then automatically
+        re-scales every font and widget, which is exactly the "blows up" behaviour
+        we want to avoid. We subclass this window's WNDPROC and, on every
+        WM_DPICHANGED, re-assert our saved natural tk scaling so the UI keeps its
+        size while Windows itself keeps the text rendered at the monitor's native
+        DPI (crisp, not blurry).
+        """
+        if not (sys.platform.startswith("win") and ctypes.windll is not None):
+            return
+        try:
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            WM_DPICHANGED = 0x02E0
+            GWL_WNDPROC = -4
+            WNDPROC = ctypes.WINFUNCTYPE(
+                wintypes.LRESULT,
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            )
+
+            hwnd = self.winfo_id()
+
+            def new_wndproc(hwnd_, msg, wparam, lparam):
+                if msg == WM_DPICHANGED:
+                    try:
+                        self.tk.call("tk", "scaling", self._tk_natural_scaling)
+                    except Exception:
+                        pass
+                return ctypes.cast(self._old_wndproc, WNDPROC)(hwnd_, msg, wparam, lparam)
+
+            self._new_wndproc = WNDPROC(new_wndproc)
+            prev = user32.SetWindowLongPtrW(hwnd, GWL_WNDPROC, self._new_wndproc)
+            self._old_wndproc = prev
         except Exception:
             pass
 
