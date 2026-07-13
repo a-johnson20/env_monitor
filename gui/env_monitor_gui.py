@@ -17,6 +17,7 @@ from __future__ import annotations
 import csv
 import io
 import os
+import re
 import sys
 import threading
 import time
@@ -2284,6 +2285,16 @@ class App(tk.Tk):
         if not row:
             return None
         return int(row[0])
+    
+    _LOG_DATE_RE = re.compile(r"(\d{8})")
+
+    @staticmethod
+    def _date_str_from_dev_path(dev_path: str) -> str:
+        stem = os.path.splitext(os.path.basename(dev_path))[0]
+        m = App._LOG_DATE_RE.search(stem)
+        if m:
+            return m.group(1)
+        return datetime.now().strftime("%Y%m%d")
 
     @staticmethod
     def _make_csv_excel_safe(raw_bytes: bytes) -> bytes:
@@ -2403,7 +2414,7 @@ class App(tk.Tk):
         self.preview_tree.delete(*self.preview_tree.get_children())
 
         # Filter to only show timestamp + gas columns
-        gas_col_names = set(self.GAS_COLS.keys()) | {"timestamp"}
+        gas_col_names = set(self.GAS_COLS.keys()) | {"timestamp", "tgs2611_1_raw_avg"}
         keep_indices = [i for i, h in enumerate(headers) if h in gas_col_names]
         display_headers = [headers[i] for i in keep_indices]
         display_rows = [[row[i] if i < len(row) else "" for i in keep_indices] for row in rows]
@@ -2524,12 +2535,11 @@ class App(tk.Tk):
         if sensor_num is None:
             return
 
-        date_str = datetime.now().strftime("%Y%m%d")
-
         if len(sel) == 1:
             row = self.files_tree.item(sel[0], "values")
             index = int(row[0])
             dev_path = str(row[1])
+            date_str = App._date_str_from_dev_path(dev_path)
             default_name = f"{sensor_num}_{date_str}.csv"
 
             out = filedialog.asksaveasfilename(
@@ -2570,6 +2580,7 @@ class App(tk.Tk):
                 saved: list[tuple[str, int]] = []
                 try:
                     for i, (index, dev_path) in enumerate(items):
+                        date_str = App._date_str_from_dev_path(dev_path)
                         name = f"{sensor_num}_{date_str}_{i + 1:02d}.csv"
                         out_path = out_dir_path / name
                         self.events.put(("busy", f"Downloading {dev_path} ({len(saved) + 1}/{len(items)}) ..."))
