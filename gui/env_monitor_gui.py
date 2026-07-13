@@ -919,7 +919,6 @@ class App(tk.Tk):
         "scd4x_1_rh",
         "sht45_1_t_avg", 
         "lps22df_1_t_avg",
-        "tgs2611_1_raw_avg", 
         "tgs2611_1_v_avg", 
         "tgs2611_1_rs_avg",
         "sfm3505_1_air_slm_avg",
@@ -931,6 +930,7 @@ class App(tk.Tk):
         "sht45_1_rh_avg":    ("Humidity",    "%RH"),
         "tmp117_1_t_avg":     ("Temperature", "\u00b0C"),
         "lps22df_1_p_avg":    ("Pressure",    "hPa"),
+        "tgs2611_1_raw_avg": ("TGS2611 Raw", ""),
         "tgs2611_1_ppm_avg": ("CH\u2084",      "ppm"),
         "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
     }
