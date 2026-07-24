@@ -30,13 +30,11 @@ namespace sd_logger {
 
     SD_MMC.setPins(SD_CLK, SD_CMD, SD_D0, SD_D1, SD_D2, SD_D3);
     if (!SD_MMC.begin("/sdcard", /*mode1bit=*/false, /*formatOnFail=*/false)) {
-      Serial.println("SD_MMC mount failed (check wiring/pins).");
       g_sd_mounted = false;
       return false;
     }
     g_sd_mounted = true;
     (void)ensure_dir("/logs");
-    Serial.printf("SD card OK: %llu MB\n", SD_MMC.cardSize() / (1024ULL*1024ULL));
     return true;
   }
 
@@ -101,7 +99,6 @@ namespace sd_logger {
     if (!g_sd_mounted) return false;
     File f = SD_MMC.open(path, FILE_APPEND);
     if (!f) {
-      Serial.println("SD open for append failed");
       unmount();
       g_next_retry_ms = millis() + RETRY_MS;
       return false;

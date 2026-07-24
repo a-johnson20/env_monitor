@@ -41,3 +41,19 @@ bool tgs_write_r2ppm_on_selected(float r2ppm_kohm) {
   payload[4] = crc8_xor(payload, 4);
   return at24_write(hal::I2CAddr::AT24, 0x03, payload, 5);
 }
+
+// Alpha exponent stored at EEPROM 0x08..0x0C (float + XOR CRC)
+bool tgs_read_alpha_on_selected(float &out_alpha, bool &crc_ok) {
+  uint8_t buf[5] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, 0x08, buf, 5)) return false;
+  crc_ok = (crc8_xor(buf, 4) == buf[4]);
+  memcpy(&out_alpha, buf, 4);
+  return true;
+}
+
+bool tgs_write_alpha_on_selected(float alpha) {
+  uint8_t payload[5] = {0};
+  memcpy(payload, &alpha, 4);
+  payload[4] = crc8_xor(payload, 4);
+  return at24_write(hal::I2CAddr::AT24, 0x08, payload, 5);
+}

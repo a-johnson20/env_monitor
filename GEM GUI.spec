@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 from PyInstaller.utils.hooks import collect_data_files
 
-datas = [('fonts/DejaVuSansMono-wifi-ramp.ttf', 'fonts')]
+datas = [('fonts/DejaVuSansMono-wifi-ramp.ttf', 'fonts'), ('assets/GEM_icon_256.ico', 'assets')]
 datas += collect_data_files('ttkbootstrap')
 
 
@@ -39,4 +39,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=['assets\\GEM_icon_256.ico'],
 )

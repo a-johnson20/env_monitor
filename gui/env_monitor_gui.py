@@ -16,8 +16,13 @@ from __future__ import annotations
 
 import csv
 import io
+import math
 import os
+<<<<<<< HEAD
 import re
+=======
+import struct
+>>>>>>> origin/develop
 import sys
 import threading
 import time
@@ -38,15 +43,28 @@ except Exception:
     tb = None
     HAS_TTKBOOTSTRAP = False
 
-# Try to disable DPI scaling awareness on Windows to fix blurriness
+# Configure DPI awareness.
+#
+# We use SYSTEM_DPI_AWARE (value 1). This pins the process to a single DPI for
+# its whole lifetime — the DPI of the monitor the window was launched on. That
+# has two benefits for this GUI:
+#   * The UI keeps a comfortable, constant physical size when dragged onto a
+#     different monitor (it does NOT auto-rescale and blow up).
+#   * The window is rendered at the true system DPI on the launch monitor, so
+#     it stays crisp there. On a secondary monitor with a different DPI, Windows
+#     does a light DWM bitmap stretch (the only tradeoff for a constant size).
+#     This is an inherent limitation of Tk 8.6.x, which cannot natively support
+#     per-monitor DPI rendering.
 try:
     import ctypes
-    # Try per-monitor DPI awareness (most aggressive)
-    try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-    except Exception:
-        # Fall back to system DPI awareness
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+    if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "shcore"):
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
 except Exception:
     pass  # Non-Windows or older Windows version
 
@@ -68,6 +86,21 @@ def get_font_path() -> Path | None:
 
 WIFI_FONT_PATH = get_font_path()
 WIFI_FONT_NAME = "DejaVu Sans Mono wifi ramp"
+
+def get_icon_path() -> Path | None:
+    """Find the app icon, checking bundled and development locations."""
+    if getattr(sys, 'frozen', False):
+        icon_path = Path(sys._MEIPASS) / "assets" / "GEM_icon_256.ico"
+        if icon_path.exists():
+            return icon_path
+
+    repo_icon = Path(__file__).parent.parent / "assets" / "GEM_icon_256.ico"
+    if repo_icon.exists():
+        return repo_icon
+
+    return None
+
+APP_ICON_PATH = get_icon_path()
 
 # Try to register the WiFi font on Windows
 if WIFI_FONT_PATH and hasattr(ctypes, 'windll'):
@@ -94,7 +127,7 @@ class ProtoCmd:
     WIFI_CONNECT_SAVED = 0x20
     PUMP_SET = 0x21
     PUMP_GET = 0x22
-    CALIB_R2PPM = 0x23
+    CALIB_MULTIPOINT = 0x23  # [ch: u8][r2ppm: 4-byte LE float][alpha: 4-byte LE float]
     LORA_INFO = 0x24
     LORA_GEN_KEYS = 0x25
     LOG_MENU = 0x1B
@@ -227,6 +260,30 @@ class SerialMenuClient:
         data = self._read_exact(length, timeout_s)
         return data.decode('utf-8', errors='replace')
 
+    def _drain_and_read_response(self, valid_types: set[int], timeout_s: float = 5.0) -> int:
+        """Drain stale bytes and read the first valid response type.
+        
+        After reset_input_buffer(), bytes that were already in transit over USB
+        (e.g. LIVE_DATA frames from commit_and_reset_all_windows()) can still arrive.
+        This method discards any bytes that don't match valid response types,
+        returning the first valid one found.
+        
+        Returns the response type byte.
+        Raises RuntimeError on timeout.
+        """
+        ser = self._require_open()
+        deadline = time.time() + timeout_s
+        while time.time() < deadline:
+            b = ser.read(1)
+            if not b:
+                time.sleep(0.001)
+                continue
+            resp = b[0]
+            if resp in valid_types:
+                return resp
+            # Discard this byte — it's stale data from a previous operation
+        raise RuntimeError(f"Timeout waiting for valid response (expected one of {valid_types})")
+
     # ============ COMMAND METHODS ============
 
     def list_logs(self, timeout_s: float = 20.0) -> list[FileEntry]:
@@ -240,15 +297,16 @@ class SerialMenuClient:
             
             self._send_cmd(ProtoCmd.LOG_LIST)
             
-            # Read response
-            resp_type = self._read_byte(timeout_s)
+            # Read response — drain stale bytes (e.g. in-transit LIVE_DATA frames)
+            # until we see LOG_LIST, ERROR, or timeout.
+            valid = {ProtoResp.LOG_LIST, ProtoResp.ERROR}
+            resp_type = self._drain_and_read_response(valid, timeout_s)
             
             if resp_type == ProtoResp.ERROR:
                 error_code = self._read_byte(timeout_s)
                 raise RuntimeError(f"Device error {error_code}")
             
-            if resp_type != ProtoResp.LOG_LIST:
-                raise RuntimeError(f"Unexpected response: {resp_type}")
+            # resp_type is guaranteed to be LOG_LIST here
             
             # Read file list
             num_files = self._read_byte(timeout_s)
@@ -277,15 +335,16 @@ class SerialMenuClient:
             
             self._send_cmd_with_byte(ProtoCmd.LOG_GET, index)
             
-            # Read response
-            resp_type = self._read_byte(timeout_s)
+            # Read response — drain stale bytes (e.g. in-transit LIVE_DATA frames)
+            # until we see LOG_BEGIN, ERROR, or timeout.
+            valid = {ProtoResp.LOG_BEGIN, ProtoResp.ERROR}
+            resp_type = self._drain_and_read_response(valid, timeout_s)
             
             if resp_type == ProtoResp.ERROR:
                 error_code = self._read_byte(timeout_s)
                 raise RuntimeError(f"Device error {error_code}")
             
-            if resp_type != ProtoResp.LOG_BEGIN:
-                raise RuntimeError(f"Expected LOG_BEGIN, got {resp_type}")
+            # resp_type is guaranteed to be LOG_BEGIN here
             
             # Read file entry header
             size_bytes = self._read_exact(4, timeout_s)
@@ -779,17 +838,18 @@ class SerialMenuClient:
                 return {"success": False, "message": f"Error code {code}"}
             return {"success": False, "message": f"Unexpected response: {resp}"}
 
-    def calib_r2ppm(self, channel: int = 0, raw_value: int = 0, timeout_s: float = 5.0) -> dict:
-        """Send CALIB_R2PPM (0x23) with a raw ADC value to store as R2ppm for TGS2611 channel."""
+    def calib_multipoint(self, channel: int, r2ppm_kohm: float, alpha: float,
+                          timeout_s: float = 5.0) -> dict:
+        """Send CALIB_MULTIPOINT (0x23): store pre-fitted R2ppm and alpha in sensor EEPROM."""
         if not self.is_open:
             raise RuntimeError("Serial port not open")
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
-            self._send_cmd(ProtoCmd.CALIB_R2PPM)
-            raw_clamped = max(-32768, min(32767, int(raw_value)))
-            raw_u16 = raw_clamped & 0xFFFF
-            ser.write(bytes([channel & 0xFF, (raw_u16 >> 8) & 0xFF, raw_u16 & 0xFF]))
+            self._send_cmd(ProtoCmd.CALIB_MULTIPOINT)
+            ser.write(bytes([channel & 0xFF]))
+            ser.write(struct.pack('<f', r2ppm_kohm))
+            ser.write(struct.pack('<f', alpha))
             ser.flush()
             resp = self._read_byte(timeout_s)
             if resp == ProtoResp.OK:
@@ -862,7 +922,11 @@ class App(tk.Tk):
         "scd4x_1_t",
         "scd4x_1_rh",
         "sht45_1_t_avg", 
+<<<<<<< HEAD
         "lps22df_1_t_avg", 
+=======
+        "lps22df_1_t_avg",
+>>>>>>> origin/develop
         "tgs2611_1_v_avg", 
         "tgs2611_1_rs_avg",
         "sfm3505_1_o2_slm_avg",
@@ -873,6 +937,7 @@ class App(tk.Tk):
         "sht45_1_rh_avg":    ("Humidity",    "%RH"),
         "tmp117_1_t_avg":     ("Temperature", "\u00b0C"),
         "lps22df_1_p_avg":    ("Pressure",    "hPa"),
+        "tgs2611_1_raw_avg": ("TGS2611 Raw", ""),
         "tgs2611_1_ppm_avg": ("CH\u2084",      "ppm"),
         "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
     }
@@ -900,9 +965,22 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("GEM GUI")
+        if APP_ICON_PATH:
+            self.iconbitmap(str(APP_ICON_PATH))
         # Reduce initial size to account for DPI scaling and prevent blurriness
         self.geometry("900x680")
         self.minsize(850, 620)
+
+        # Capture Tk's natural (system) scaling factor at startup before we
+        # subclass the window procedure. Under per-monitor DPI awareness, Tk
+        # auto-computes this from the monitor DPI; we save it so the
+        # WM_DPICHANGED handler can re-apply the same constant and prevent Tk
+        # 8.6.10+ from auto-rescaling on a monitor change.
+        try:
+            self._tk_natural_scaling = float(self.tk.call("tk", "scaling"))
+        except Exception:
+            self._tk_natural_scaling = 1.0
+        self._bind_dpi_change()
 
         self.c_bg = "#eef2f8"
         self.c_surface = "#ffffff"
@@ -992,6 +1070,49 @@ class App(tk.Tk):
     def _on_port_focus_in(self, _event=None) -> None:
         try:
             self.port_combo.selection_clear()
+        except Exception:
+            pass
+
+    def _bind_dpi_change(self) -> None:
+        """Keep Tk's natural scaling factor across monitor DPI changes.
+
+        Under per-monitor DPI awareness, Windows sends WM_DPICHANGED when the
+        window moves to a different-DPI monitor. Tk 8.6.x then automatically
+        re-scales every font and widget, which is exactly the "blows up" behaviour
+        we want to avoid. We subclass this window's WNDPROC and, on every
+        WM_DPICHANGED, re-assert our saved natural tk scaling so the UI keeps its
+        size while Windows itself keeps the text rendered at the monitor's native
+        DPI (crisp, not blurry).
+        """
+        if not (sys.platform.startswith("win") and ctypes.windll is not None):
+            return
+        try:
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            WM_DPICHANGED = 0x02E0
+            GWL_WNDPROC = -4
+            WNDPROC = ctypes.WINFUNCTYPE(
+                wintypes.LRESULT,
+                wintypes.HWND,
+                wintypes.UINT,
+                wintypes.WPARAM,
+                wintypes.LPARAM,
+            )
+
+            hwnd = self.winfo_id()
+
+            def new_wndproc(hwnd_, msg, wparam, lparam):
+                if msg == WM_DPICHANGED:
+                    try:
+                        self.tk.call("tk", "scaling", self._tk_natural_scaling)
+                    except Exception:
+                        pass
+                return ctypes.cast(self._old_wndproc, WNDPROC)(hwnd_, msg, wparam, lparam)
+
+            self._new_wndproc = WNDPROC(new_wndproc)
+            prev = user32.SetWindowLongPtrW(hwnd, GWL_WNDPROC, self._new_wndproc)
+            self._old_wndproc = prev
         except Exception:
             pass
 
@@ -1615,43 +1736,49 @@ class App(tk.Tk):
         info_row.pack(fill=tk.X, padx=10, pady=(8, 2))
         ttk.Label(
             info_row,
-            text="Enter the TGS2611 raw ADC value observed at 2 ppm CH\u2084, then click Calibrate.",
+            text="Enter 1\u20135 calibration points. The GUI fits the Shah model and uploads R\u2082ppm and \u03b1 to the sensor EEPROM.",
             justify=tk.LEFT,
         ).pack(anchor="w")
         ttk.Label(
             info_row,
-            text="This converts the raw value to Rs and stores it as R\u2082ppm in the sensor EEPROM.",
+            text="1 point: fixes \u03b1 at Shah default (0.502), solves for R\u2082ppm.  2\u20135 points: fits both.",
             justify=tk.LEFT,
             foreground="#888888",
         ).pack(anchor="w", pady=(2, 0))
 
-        entry_row = ttk.Frame(calib_frame)
-        entry_row.pack(fill=tk.X, padx=10, pady=(6, 4))
-        ttk.Label(entry_row, text="Channel index:").pack(side=tk.LEFT)
+        ch_row = ttk.Frame(calib_frame)
+        ch_row.pack(fill=tk.X, padx=10, pady=(6, 4))
+        ttk.Label(ch_row, text="Channel index:").pack(side=tk.LEFT)
         self.calib_ch_var = tk.StringVar(value="1")
-        calib_ch_entry = ttk.Entry(entry_row, textvariable=self.calib_ch_var, width=5)
-        calib_ch_entry.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(entry_row, text="  (1 for first/only TGS2611, matches CSV column)", foreground="#888888").pack(side=tk.LEFT)
+        ttk.Entry(ch_row, textvariable=self.calib_ch_var, width=5).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(ch_row, text="  (1 for first/only TGS2611)", foreground="#888888").pack(side=tk.LEFT)
 
-        raw_row = ttk.Frame(calib_frame)
-        raw_row.pack(fill=tk.X, padx=10, pady=(0, 4))
-        ttk.Label(raw_row, text="Raw ADC value:").pack(side=tk.LEFT)
-        self.calib_raw_var = tk.StringVar(value="")
-        calib_raw_entry = ttk.Entry(raw_row, textvariable=self.calib_raw_var, width=8)
-        calib_raw_entry.pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(raw_row, text="  (integer, 0\u201332767; read from OLED raw page or CSV)", foreground="#888888").pack(side=tk.LEFT)
+        # Dynamic data-point rows
+        MAX_CALIB_POINTS = 5
+        self.calib_raw_vars: list[tk.StringVar] = []
+        self.calib_ppm_vars: list[tk.StringVar] = []
+        self._calib_rows_frame = ttk.Frame(calib_frame)
+        self._calib_rows_frame.pack(fill=tk.X, padx=10, pady=(2, 0))
 
         calib_btn_row = ttk.Frame(calib_frame)
-        calib_btn_row.pack(fill=tk.X, padx=10, pady=(0, 10))
-        self.calib_r2ppm_btn = ttk.Button(
-            calib_btn_row, text="Calibrate",
-            command=self._calib_r2ppm_send, state=tk.DISABLED, style="Accent.TButton",
+        calib_btn_row.pack(fill=tk.X, padx=10, pady=(6, 10))
+        self._calib_add_btn = ttk.Button(
+            calib_btn_row, text="Add row",
+            command=self._calib_add_row, state=tk.DISABLED, style="Accent.TButton",
         )
-        self.calib_r2ppm_btn.pack(side=tk.LEFT)
+        self._calib_add_btn.pack(side=tk.LEFT)
+        self.calib_r2ppm_btn = ttk.Button(
+            calib_btn_row, text="Calculate & Send",
+            command=self._calib_multipoint_send, state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.calib_r2ppm_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.calib_r2ppm_status_var = tk.StringVar(value="")
         ttk.Label(calib_btn_row, textvariable=self.calib_r2ppm_status_var, foreground="#888888").pack(
             side=tk.LEFT, padx=(12, 0)
         )
+
+        # Start with one row
+        self._calib_add_row()
 
         # ---- LoRa Section ----
         lora_frame = ttk.LabelFrame(_scroll_inner, text="LoRa")
@@ -2115,8 +2242,10 @@ class App(tk.Tk):
                 elif kind == "pump_done":
                     self._update_wifi_controls()
                 elif kind == "calib_r2ppm_ok":
-                    self.calib_r2ppm_status_var.set(f"R\u2082ppm stored for channel {payload} \u2713")
-                    self.status_var.set(f"TGS2611 ch{payload} R\u2082ppm calibrated")
+                    ch_disp, r2ppm, alpha = payload
+                    self.calib_r2ppm_status_var.set(
+                        f"ch{ch_disp}: R\u2082ppm={r2ppm:.4f} k\u03a9, \u03b1={alpha:.4f} \u2713")
+                    self.status_var.set(f"TGS2611 ch{ch_disp} calibrated")
                 elif kind == "calib_r2ppm_done":
                     self._update_wifi_controls()
                 elif kind == "lora_info_ok":
@@ -3103,6 +3232,9 @@ class App(tk.Tk):
         self.pump_full_btn.configure(state=pump_st)
         # CH4 calibration
         self.calib_r2ppm_btn.configure(state=pump_st)
+        MAX_CALIB_POINTS = 5
+        add_ok = pump_ok and len(self.calib_raw_vars) < MAX_CALIB_POINTS
+        self._calib_add_btn.configure(state=tk.NORMAL if add_ok else tk.DISABLED)
         # LoRa
         lora_st = tk.NORMAL if pump_ok else tk.DISABLED
         self.lora_refresh_btn.configure(state=lora_st)
@@ -3131,6 +3263,7 @@ class App(tk.Tk):
         self.pump_off_btn.configure(state=tk.DISABLED)
         self.pump_full_btn.configure(state=tk.DISABLED)
         self.calib_r2ppm_btn.configure(state=tk.DISABLED)
+        self._calib_add_btn.configure(state=tk.DISABLED)
 
         def worker() -> None:
             try:
@@ -3146,8 +3279,31 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _calib_r2ppm_send(self) -> None:
-        """Send CALIB_R2PPM command with the entered raw ADC value."""
+    def _calib_add_row(self) -> None:
+        """Append a new (ppm, raw ADC) entry row to the calibration panel."""
+        MAX_CALIB_POINTS = 5
+        if len(self.calib_raw_vars) >= MAX_CALIB_POINTS:
+            return
+        idx = len(self.calib_raw_vars)
+        ppm_var = tk.StringVar(value="")
+        raw_var = tk.StringVar(value="")
+        self.calib_ppm_vars.append(ppm_var)
+        self.calib_raw_vars.append(raw_var)
+
+        row = ttk.Frame(self._calib_rows_frame)
+        row.pack(fill=tk.X, pady=2)
+        ttk.Label(row, text="CH\u2084 standard (ppm):").pack(side=tk.LEFT)
+        ttk.Entry(row, textvariable=ppm_var, width=8).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Label(row, text="  Measured value (raw):").pack(side=tk.LEFT, padx=(10, 0))
+        ttk.Entry(row, textvariable=raw_var, width=8).pack(side=tk.LEFT, padx=(6, 0))
+
+        # Disable Add row when at max
+        if len(self.calib_raw_vars) >= MAX_CALIB_POINTS:
+            self._calib_add_btn.configure(state=tk.DISABLED)
+
+    def _calib_multipoint_send(self) -> None:
+        """Fit Shah model from entered data points, then upload R2ppm and alpha to device."""
+        # --- Parse channel ---
         try:
             ch_display = int(self.calib_ch_var.get())
             if ch_display < 1:
@@ -3156,21 +3312,96 @@ class App(tk.Tk):
         except ValueError:
             self.calib_r2ppm_status_var.set("Invalid channel (must be \u2265 1)")
             return
-        try:
-            raw_val = int(self.calib_raw_var.get())
-            if not (0 <= raw_val <= 32767):
-                raise ValueError
-        except ValueError:
-            self.calib_r2ppm_status_var.set("Invalid raw value (must be 0\u201332767)")
+
+        # --- Parse data points (skip empty rows) ---
+        ADS1113_LSB_V = 62.5e-6
+        VS_V = 5.0
+        R_L_KOHM = 1.0
+        SHAH_A = 24.7
+        SHAH_ALPHA_DEFAULT = 0.502
+
+        points: list[tuple[float, float]] = []  # (Rs_kohm, ppm)
+        for i in range(len(self.calib_raw_vars)):
+            raw_str = self.calib_raw_vars[i].get().strip()
+            ppm_str = self.calib_ppm_vars[i].get().strip()
+            if not raw_str and not ppm_str:
+                continue  # empty row, skip
+            if not raw_str or not ppm_str:
+                self.calib_r2ppm_status_var.set(f"Row {i+1}: fill both ADC and ppm, or leave both empty")
+                return
+            try:
+                raw = int(raw_str)
+                ppm = float(ppm_str)
+            except ValueError:
+                self.calib_r2ppm_status_var.set(f"Row {i+1}: invalid number")
+                return
+            if not (0 <= raw <= 32767):
+                self.calib_r2ppm_status_var.set(f"Row {i+1}: ADC must be 0\u201332767")
+                return
+            if ppm < 2.0:
+                self.calib_r2ppm_status_var.set(f"Row {i+1}: ppm must be \u2265 2.0")
+                return
+            v_rl = raw * ADS1113_LSB_V
+            if v_rl <= 0 or v_rl >= VS_V:
+                self.calib_r2ppm_status_var.set(f"Row {i+1}: ADC out of valid voltage range")
+                return
+            rs = R_L_KOHM * (VS_V - v_rl) / v_rl
+            points.append((rs, ppm))
+
+        if len(points) == 0:
+            self.calib_r2ppm_status_var.set("Enter at least 1 data point")
             return
+        if len(points) > 5:
+            self.calib_r2ppm_status_var.set("Maximum 5 data points")
+            return
+
+        # --- Fit Shah model in log-space ---
+        try:
+            if len(points) == 1:
+                rs, ppm = points[0]
+                alpha = SHAH_ALPHA_DEFAULT
+                # Invert: R2ppm = Rs * (1 + (ppm-2)/a)^alpha
+                r2ppm = rs * ((1.0 + (ppm - 2.0) / SHAH_A) ** alpha)
+            else:
+                # Linear regression: y_i = b + m*x_i
+                # x_i = ln(1 + (ppm_i - 2) / a),  y_i = ln(Rs_i)
+                # m = -alpha,  b = ln(R2ppm)
+                xs = [math.log(1.0 + (ppm - 2.0) / SHAH_A) for _, ppm in points]
+                ys = [math.log(rs) for rs, _ in points]
+                n = len(points)
+                sum_x  = sum(xs)
+                sum_y  = sum(ys)
+                sum_xx = sum(x * x for x in xs)
+                sum_xy = sum(x * y for x, y in zip(xs, ys))
+                denom = n * sum_xx - sum_x * sum_x
+                if abs(denom) < 1e-12:
+                    raise ValueError("All points have the same ppm \u2014 need variation to fit \u03b1")
+                m = (n * sum_xy - sum_x * sum_y) / denom
+                b = (sum_y - m * sum_x) / n
+                alpha = -m
+                r2ppm = math.exp(b)
+                if alpha <= 0:
+                    raise ValueError(f"Fitted \u03b1 \u2264 0 ({alpha:.4f}) \u2014 check that Rs decreases with ppm")
+                if r2ppm <= 0:
+                    raise ValueError("Fitted R\u2082ppm \u2264 0 \u2014 check input data")
+        except ValueError as exc:
+            self.calib_r2ppm_status_var.set(str(exc))
+            return
+
+        preview = f"R\u2082ppm={r2ppm:.4f} k\u03a9, \u03b1={alpha:.4f} \u2014 sending\u2026"
+        self.calib_r2ppm_status_var.set(preview)
         self.calib_r2ppm_btn.configure(state=tk.DISABLED)
-        self.calib_r2ppm_status_var.set("Sending\u2026")
+        self._calib_add_btn.configure(state=tk.DISABLED)
+
+        r2ppm_final = r2ppm
+        alpha_final = alpha
 
         def worker() -> None:
             try:
-                result = self.client.calib_r2ppm(channel=ch, raw_value=raw_val, timeout_s=5.0)
+                result = self.client.calib_multipoint(
+                    channel=ch, r2ppm_kohm=r2ppm_final, alpha=alpha_final, timeout_s=5.0)
                 if result.get("success"):
-                    self.events.put(("calib_r2ppm_ok", ch_display))
+                    self.events.put(("calib_r2ppm_ok", (ch_display, r2ppm_final, alpha_final)))
                 else:
                     self.events.put(("error", result.get("message", "Calibration failed")))
             except Exception as exc:

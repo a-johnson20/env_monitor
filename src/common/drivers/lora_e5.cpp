@@ -113,6 +113,22 @@ String get_dev_eui() {
     return (eui.length() == 23) ? eui : "LEN_ERR";
 }
 
+// Deterministic per-device stagger offset derived from the DevEUI string.
+// Uses an xorshift32 hash over the colon-stripped hex bytes so co-located
+// units with similar EUIs still spread out across the interval.
+uint32_t stagger_offset_ms(uint32_t max_offset_ms) {
+    String eui = get_dev_eui();
+    uint32_t h = 0x811C9DC5;             // FNV-1a offset basis
+    for (int i = 0; i < (int)eui.length(); ++i) {
+        char c = eui[i];
+        if (c == ':') continue;
+        h ^= (uint8_t)c;
+        // xorshift-ish mixing
+        h ^= h << 13; h ^= h >> 17; h ^= h << 5;
+    }
+    return h % max_offset_ms;
+}
+
 bool program_keys(const String& eui, const String& key) {
     // Setting AppEui returns "+ID: AppEui, ..." with no +OK.
     bool ok1 = false;
@@ -168,8 +184,9 @@ void save_keys(const String& eui, const String& key) {
 }
 
 bool join(uint32_t timeout_ms) {
-    // Configure region and mode (idempotent — safe to repeat)
+    // Configure region, power, and mode (idempotent — safe to repeat)
     at_cmd("AT+DR=EU868",    1000, nullptr, "+DR:");
+    at_cmd("AT+TXP=14",      1000, nullptr, "+TXP:"); // +14 dBm max (EU868 limit)
     at_cmd("AT+CLASS=A",     1000, nullptr, "+CLASS:");
     at_cmd("AT+ADR=ON",      1000, nullptr, "+ADR:");
     at_cmd("AT+MODE=LWOTAA", 1000, nullptr, "+MODE:");

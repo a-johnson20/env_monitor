@@ -23,7 +23,7 @@ enum class Cmd : uint8_t {
   WIFI_CONNECT_SAVED = 0x20, // Connect to saved network by SSID
   PUMP_SET        = 0x21,  // Set pump speed (followed by uint8_t percent)
   PUMP_GET        = 0x22,  // Get current pump speed
-  CALIB_R2PPM     = 0x23,  // Calibrate TGS2611 R2ppm (uint8_t channel, int16_t raw ADC big-endian)
+  CALIB_MULTIPOINT = 0x23, // Calibrate TGS2611: [ch: u8][r2ppm: 4-byte LE float][alpha: 4-byte LE float]
   LORA_INFO       = 0x24,  // Read LoRa DevEUI + stored AppEUI/AppKey
   LORA_GEN_KEYS   = 0x25,  // Generate new AppEUI + AppKey, store in NVS, program module
   LOG_MENU        = 0x1B,  // Enter log export menu

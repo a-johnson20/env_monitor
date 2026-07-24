@@ -24,6 +24,11 @@ void begin();
 // Returns "AA:BB:CC:DD:EE:FF:00:11" on success, "" on failure.
 String get_dev_eui();
 
+// Compute a deterministic per-device stagger offset (0..max_offset_ms-1) from
+// the DevEUI so multiple co-located units do not transmit simultaneously.
+// Pass the colon-separated EUI string from get_dev_eui().
+uint32_t stagger_offset_ms(uint32_t max_offset_ms = 60000UL);
+
 // Program AppEUI and AppKey into the module via AT commands.
 //   eui  — "AA:BB:CC:DD:EE:FF:00:11"  (colon-separated, 23 chars)
 //   key  — "AABBCCDDEEFF00112233445566778899"  (32 uppercase hex chars, no separators)

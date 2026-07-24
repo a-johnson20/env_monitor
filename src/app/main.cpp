@@ -157,7 +157,20 @@ std::array<RunningAvg, N_SFM3505> win_sfm3505_o2{};
 // R2ppm reference resistance per TGS2611 channel (kΩ), loaded from EEPROM at boot.
 // NAN until calibrated (calib command writes it; then reboot to reload).
 static float tgs2611_r2ppm_kohm[N_TGS2611 > 0 ? N_TGS2611 : 1];
+// Fitted Shah alpha exponent per TGS2611 channel, loaded from EEPROM at boot.
+// Falls back to SHAH_ALPHA_DEFAULT if not yet calibrated.
+static float tgs2611_alpha[N_TGS2611 > 0 ? N_TGS2611 : 1];
 RunningAvg win_n2o_ppm{};
+
+// LoRa-specific accumulators — averaged over the full period between LoRa sends
+// (fed from the 10s commit means, ~6 samples per LoRa send at 60s interval).
+static RunningAvg lora_rh;
+static RunningAvg lora_temp;
+static RunningAvg lora_pres;
+static RunningAvg lora_ch4;
+static RunningAvg lora_raw_adc;
+static RunningAvg lora_air;
+static RunningAvg lora_n2o;
 
 sensors::PlatinumN2oUart n2o_uart;
 sensors::PlatinumN2oReading n2o_reading;
@@ -363,7 +376,9 @@ static void commit_and_reset_all_windows() {
   line += (win_n2o_ppm.count ? String(win_n2o_ppm.mean(), 2) : "NA");
 
   // Send live CSV data only when GUI has started live streaming
-  if (ui::live_stream_enabled()) {
+  // AND the serial menu is not currently processing a command (to avoid
+  // corrupting the binary protocol response with interleaved LIVE_DATA frames).
+  if (ui::live_stream_enabled() && !ui::is_busy()) {
     ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), line);
   }
 
@@ -406,6 +421,17 @@ static void commit_and_reset_all_windows() {
     }}
   leds::led_flash(7, n2o_reading.last_ok_ms > 0);  // UART1 → LED8: green=valid, red=fault
 
+  // Feed the 10s commit means into the LoRa accumulators (averaged over ~60s)
+  if (N_TRHP > 0) {
+    if (win_trhp_sht45_rh[0].count) lora_rh.add(win_trhp_sht45_rh[0].mean());
+    if (win_trhp_tmp117_t[0].count) lora_temp.add(win_trhp_tmp117_t[0].mean());
+    if (win_trhp_lps_p[0].count)    lora_pres.add(win_trhp_lps_p[0].mean());
+  }
+  if (N_TGS2611 > 0 && win_tgs2611_ppm[0].count) lora_ch4.add(win_tgs2611_ppm[0].mean());
+  if (N_TGS2611 > 0 && win_tgs2611_raw[0].count) lora_raw_adc.add(win_tgs2611_raw[0].mean());
+  if (N_SFM3505 > 0 && win_sfm3505_air[0].count) lora_air.add(win_sfm3505_air[0].mean());
+  if (win_n2o_ppm.count) lora_n2o.add(win_n2o_ppm.mean());
+
   // Reset per-window state (your new helper)
   reset_windows_and_flags();
 }
@@ -416,6 +442,9 @@ bool scd4x_present() { Wire.beginTransmission(hal::I2CAddr::SCD41); return Wire.
 void scd4x_ensure_running(Scd4xReading &st) {
   if (st.started) return;
   st.present = scd4x_present(); if (!st.present) return;
+  // Must stop periodic measurement first — wakeUp/reinit are ignored while measuring
+  scd4x.stopPeriodicMeasurement();
+  delay(500);  // per SCD4x datasheet: 500ms needed after stop command
   scd4x.wakeUp(); scd4x.reinit();
   if (scd4x.startPeriodicMeasurement() == NO_ERROR) { st.started = true; st.started_at_ms = millis(); }
 }
@@ -532,32 +561,17 @@ bool ads1113_single_shot(int16_t &raw) {
   raw = (int16_t)((Wire.read()<<8)|Wire.read()); return true;
 }
 
-// Called by serial_menu to store the current Rs as R2ppm for TGS2611 channel ch (0-based).
-// The sensor must be sampling ambient ~2 ppm CH4 air for >=24 h before issuing this command.
-// Returns true on success.
-bool tgs2611_save_r2ppm(uint8_t ch) {
+// Store pre-fitted calibration parameters (R2ppm and alpha) into the sensor EEPROM
+// on TGS2611 channel ch (0-based). Called by serial_menu after GUI-side fitting.
+bool tgs2611_save_calib_params(uint8_t ch, float r2ppm_kohm, float alpha) {
   if (ch >= N_TGS2611) return false;
   if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
-  int16_t raw;
-  if (!ads1113_single_shot(raw)) return false;
-  float v_rl = raw * ADS1113_LSB_V;
-  float rs = tgs2611::calc_rs_kohm(v_rl);
-  if (isnan(rs) || rs <= 0.0f) return false;
-  if (!tgs_write_r2ppm_on_selected(rs)) return false;
-  tgs2611_r2ppm_kohm[ch] = rs;
-  return true;
-}
-
-// Variant: store R2ppm computed from a caller-supplied raw ADC value (int16_t).
-// Allows the GUI to send a specific raw reading as the calibration reference.
-bool tgs2611_save_r2ppm_from_raw(uint8_t ch, int16_t raw) {
-  if (ch >= N_TGS2611) return false;
-  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
-  float v_rl = raw * ADS1113_LSB_V;
-  float rs = tgs2611::calc_rs_kohm(v_rl);
-  if (isnan(rs) || rs <= 0.0f) return false;
-  if (!tgs_write_r2ppm_on_selected(rs)) return false;
-  tgs2611_r2ppm_kohm[ch] = rs;
+  if (isnan(r2ppm_kohm) || r2ppm_kohm <= 0.0f) return false;
+  if (isnan(alpha) || alpha <= 0.0f) return false;
+  if (!tgs_write_r2ppm_on_selected(r2ppm_kohm)) return false;
+  if (!tgs_write_alpha_on_selected(alpha)) return false;
+  tgs2611_r2ppm_kohm[ch] = r2ppm_kohm;
+  tgs2611_alpha[ch] = alpha;
   return true;
 }
 
@@ -585,13 +599,16 @@ static uint32_t get_utc_epoch() {
   return (e > 0) ? (uint32_t)e : 0;
 }
 
-// Build the 14-byte LoRa uplink payload (big-endian):
-//   [0..3]   uint32  Unix UTC epoch       (0 = unavailable)
-//   [4..5]   uint16  CO2 ppm              (0xFFFF = N/A)
-//   [6..7]   uint16  SHT45 RH × 100 %    (0xFFFF = N/A;  5500 = 55.00 %)
-//   [8..9]   int16   TMP117 temp × 100 °C (0x8000 = N/A;  2500 = 25.00 °C)
-//   [10..11] uint16  LPS22DF pres × 10 hPa(0xFFFF = N/A; 10132 = 1013.2 hPa)
-//   [12..13] uint16  TGS2611 CH4 × 100 ppm(0xFFFF = N/A;   200 = 2.00 ppm)
+// Build the 20-byte LoRa uplink payload (big-endian):
+//   [0..3]   uint32  Unix UTC epoch         (0 = unavailable)
+//   [4..5]   uint16  CO2 ppm                (0xFFFF = N/A)
+//   [6..7]   uint16  SHT45 RH × 100 %       (0xFFFF = N/A;  5500 = 55.00 %)
+//   [8..9]   int16   TMP117 temp × 100 °C   (0x8000 = N/A;  2500 = 25.00 °C)
+//   [10..11] uint16  LPS22DF pres × 10 hPa  (0xFFFF = N/A; 10132 = 1013.2 hPa)
+//   [12..13] uint16  TGS2611 CH4 × 100 ppm  (0xFFFF = N/A;   200 = 2.00 ppm)
+//   [14..15] uint16  TGS2611 raw ADC         (0xFFFF = N/A)
+//   [16..17] uint16  SFM3505 air × 100 SLM  (0xFFFF = N/A;  1500 = 15.00 SLM)
+//   [18..19] uint16  N2O × 100 ppm          (0xFFFF = N/A;  5000 = 50.00 ppm)
 static void lora_build_payload(uint8_t* buf) {
   uint32_t epoch = get_utc_epoch();
   buf[0] = (epoch >> 24) & 0xFF;
@@ -617,10 +634,11 @@ static void lora_build_payload(uint8_t* buf) {
   }
   buf[4] = co2 >> 8;  buf[5] = co2 & 0xFF;
 
-  float rh   = (N_TRHP > 0 && win_trhp_sht45_rh[0].count) ? win_trhp_sht45_rh[0].mean() : NAN;
-  float temp = (N_TRHP > 0 && win_trhp_tmp117_t[0].count) ? win_trhp_tmp117_t[0].mean() : NAN;
-  float pres = (N_TRHP > 0 && win_trhp_lps_p[0].count)    ? win_trhp_lps_p[0].mean()    : NAN;
-  float ch4  = (N_TGS2611 > 0 && win_tgs2611_ppm[0].count) ? win_tgs2611_ppm[0].mean()  : NAN;
+  // Use LoRa accumulators (~60s average from 6× 10s commits)
+  float rh   = lora_rh.mean();
+  float temp = lora_temp.mean();
+  float pres = lora_pres.mean();
+  float ch4  = lora_ch4.mean();
 
   uint16_t rh_enc   = enc_u16(rh,   100.0f);
   int16_t  temp_enc = enc_i16(temp, 100.0f);
@@ -631,11 +649,40 @@ static void lora_build_payload(uint8_t* buf) {
   buf[8]  = (uint16_t)temp_enc >> 8; buf[9]  = (uint16_t)temp_enc & 0xFF;
   buf[10] = pres_enc >> 8;           buf[11] = pres_enc & 0xFF;
   buf[12] = ch4_enc >> 8;            buf[13] = ch4_enc & 0xFF;
+
+  // TGS2611 raw ADC (raw 12-bit reading from ADS1113)
+  float raw_avg = lora_raw_adc.mean();
+  uint16_t raw_adc = 0xFFFF;
+  if (!isnan(raw_avg)) {
+    long r = lroundf(raw_avg);
+    raw_adc = (uint16_t)(r < 0 ? 0 : r > 65534 ? 65534 : r);
+  }
+  buf[14] = raw_adc >> 8;   buf[15] = raw_adc & 0xFF;
+
+  // SFM3505 air flow (×100 SLM, e.g. 1500 = 15.00 SLM)
+  float air = lora_air.mean();
+  uint16_t air_enc = enc_u16(air, 100.0f);
+  buf[16] = air_enc >> 8;   buf[17] = air_enc & 0xFF;
+
+  // Platinum N2O (×100 ppm, e.g. 4423 = 44.23 ppm)
+  float n2o = lora_n2o.mean();
+  uint16_t n2o_enc = enc_u16(n2o, 100.0f);
+  buf[18] = n2o_enc >> 8;   buf[19] = n2o_enc & 0xFF;
 }
 
 static bool lora_send_reading() {
-  uint8_t payload[14];
+  uint8_t payload[20];
   lora_build_payload(payload);
+
+  // Reset LoRa accumulators after reading
+  lora_rh.reset();
+  lora_temp.reset();
+  lora_pres.reset();
+  lora_ch4.reset();
+  lora_raw_adc.reset();
+  lora_air.reset();
+  lora_n2o.reset();
+
   return lora::send_hex(payload, sizeof(payload));
 }
 
@@ -707,8 +754,11 @@ void setup() {
   // Calibrate TGS2611 channels
   app::calibrate_all_tgs2611(muxStateWire);
 
-  // Load R2ppm reference resistances from TGS2611 EEPROMs (calibrated in ambient ~2 ppm CH4 air).
-  for (size_t i = 0; i < N_TGS2611; ++i) tgs2611_r2ppm_kohm[i] = NAN;
+  // Load R2ppm and alpha calibration params from TGS2611 EEPROMs.
+  for (size_t i = 0; i < N_TGS2611; ++i) {
+    tgs2611_r2ppm_kohm[i] = NAN;
+    tgs2611_alpha[i] = tgs2611::SHAH_ALPHA_DEFAULT;
+  }
   {
     size_t i = 0;
     for (auto ch : hal::Mux::TGS2611) {
@@ -721,6 +771,13 @@ void setup() {
           ui::proto::write_message(0x02, buf);
         } else {
           ui::proto::write_message(0x02, "TGS2611[1] R2ppm: not calibrated — ppm output will be NA");
+        }
+        float alpha = NAN; bool alpha_ok = false;
+        if (tgs_read_alpha_on_selected(alpha, alpha_ok) && alpha_ok && alpha > 0.0f) {
+          tgs2611_alpha[i] = alpha;
+          char buf[64];
+          snprintf(buf, sizeof(buf), "TGS2611[%u] alpha=%.4f", (unsigned)(i+1), alpha);
+          ui::proto::write_message(0x02, buf);
         }
       }
       ++i;
@@ -794,6 +851,10 @@ void setup() {
   leds::led1_flash(s_lora_joined, 2000);
   ui::proto::write_message(0x02, s_lora_joined ? "LoRa: joined" : "LoRa: join failed (will retry in loop)");
 
+  // Deterministic stagger offset so co-located units don't transmit simultaneously.
+  // First send happens 'offset' ms after boot; subsequent sends maintain the 60s period.
+  s_last_lora_send_ms = millis() - lora::stagger_offset_ms(60000UL);
+
   // SHORT delay to let devices settle
   delay(1000);
 
@@ -835,13 +896,14 @@ void loop() {
       bool tx_ok = lora_send_reading();
       leds::led1_flash(tx_ok);
       if (!tx_ok) s_lora_joined = false;           // failure → re-join next cycle
-      s_last_lora_send_ms = now;
+      s_last_lora_send_ms += LORA_SEND_INTERVAL;   // maintain fixed 60s period
     }
   }
 
   // --- Send CSV header periodically (every ~10 seconds) when live streaming ---
   // This ensures the GUI always has a fresh header, even if it connects after startup
-  if (ui::live_stream_enabled() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
+  // Skip if serial menu is busy processing a command (avoids interleaving).
+  if (ui::live_stream_enabled() && !ui::is_busy() && (now - last_header_sent_ms >= 10000 || last_header_sent_ms == 0 || ui::live_just_started())) {
     ui::proto::write_message(static_cast<uint8_t>(ui::proto::RespType::LIVE_DATA), logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true, N_SFM3505));
     last_header_sent_ms = now;
   }
@@ -1075,7 +1137,8 @@ void loop() {
         float rs = tgs2611::calc_rs_kohm(readings.ads.volts);
         if (!isnan(rs)) {
           win_tgs2611_rs[i].add(rs);
-          float ppm = tgs2611::calc_ppm_ch4_shah(rs, tgs2611_r2ppm_kohm[i]);
+          float ppm = tgs2611::calc_ppm_ch4_shah(rs, tgs2611_r2ppm_kohm[i],
+                                                  tgs2611::SHAH_A_DEFAULT, tgs2611_alpha[i]);
           if (!isnan(ppm)) win_tgs2611_ppm[i].add(ppm);
         }
       }

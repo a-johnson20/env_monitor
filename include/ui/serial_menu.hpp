@@ -20,4 +20,9 @@ bool live_just_started();
 // This is a best-effort check that works on native USB CDC and UART bridges.
 bool serial_connected();
 
+// Returns true while the serial menu is processing a command.
+// During this time, other code (e.g. commit_and_reset_all_windows) must NOT
+// write to Serial to avoid corrupting the binary protocol response.
+bool is_busy();
+
 } // namespace ui
