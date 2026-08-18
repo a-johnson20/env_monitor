@@ -18,14 +18,12 @@ import csv
 import io
 import math
 import os
-<<<<<<< HEAD
-import re
-=======
 import struct
->>>>>>> origin/develop
 import sys
 import threading
+import re
 import time
+import json
 import tkinter as tk
 from collections import deque
 from dataclasses import dataclass, fields
@@ -33,6 +31,7 @@ from datetime import datetime
 from pathlib import Path
 from queue import Empty, Queue
 from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
 
 import serial
 from serial.tools import list_ports
@@ -42,6 +41,13 @@ try:
 except Exception:
     tb = None
     HAS_TTKBOOTSTRAP = False
+
+try:
+    import paho.mqtt.client as mqtt
+    HAS_PAHO_MQTT = True
+except Exception:
+    mqtt = None
+    HAS_PAHO_MQTT = False
 
 # Configure DPI awareness.
 #
@@ -933,10 +939,12 @@ class App(tk.Tk):
         "sht45_1_rh_avg":    ("Humidity",    "%RH"),
         "tmp117_1_t_avg":     ("Temperature", "\u00b0C"),
         "lps22df_1_p_avg":    ("Pressure",    "hPa"),
-        "tgs2611_1_raw_avg": ("TGS2611 Raw", ""),
         "tgs2611_1_ppm_avg": ("CH\u2084",      "ppm"),
+        "tgs2611_1_raw_avg": ("CH\u2084 Raw", ""),
+        "sfm3505_1_o2_slm_avg": ("Flow", "SLM"),
         "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
     }
+
 
     C_CARD_NA = "#6b7280"
     C_CARD_NEUTRAL = "#2563eb"
@@ -958,11 +966,25 @@ class App(tk.Tk):
                                   (25, C_CARD_WARNING, C_CARD_BORDER_WARNING)], # Warning at 100ppm
     }
 
+    LORA_COLS: dict = {
+        "scd4x_1_co2":      ("CO\u2082", "ppm"),
+        "sht45_1_rh_avg": ("Humidity", "%RH"),
+        "tmp117_1_t_avg": ("Temperature", "\u00b0C"),
+        "lps22df_1_p_avg": ("Pressure", "hPa"),
+        "tgs2611_1_ppm_avg": ("CH\u2084", "ppm"),
+        "tgs2611_1_raw_avg": ("CH\u2084 Raw", ""),
+        "sfm3505_1_air_slm_avg":      ("Flow", "SLM"),
+        "n2o_uart_ppm_avg":      ("N\u2082O", "ppm"),
+    }
+
+
     def __init__(self) -> None:
         super().__init__()
+
         self.title("GEM GUI")
         if APP_ICON_PATH:
             self.iconbitmap(str(APP_ICON_PATH))
+
         # Reduce initial size to account for DPI scaling and prevent blurriness
         self.geometry("900x680")
         self.minsize(850, 620)
@@ -1008,6 +1030,20 @@ class App(tk.Tk):
         self.live_autoscroll = tk.BooleanVar(value=True)
         self.gas_card_stats: dict[str, list[float]] = {}
         self.gas_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
+
+        # TTN / MQTT (LoRaWAN cloud) state
+        self.mqtt_client = None
+        self.mqtt_connected = False
+        self.mqtt_devices: dict[str, dict] = {}
+        self.mqtt_history: dict[str, dict[str, deque]] = {}
+        self.mqtt_selected_device = tk.StringVar(value="")
+        self.mqtt_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
+        self.mqtt_graph_canvases: dict[str, tk.Canvas] = {}
+        self.mqtt_history_limit = 300
+        self.mqtt_row_counter = 0
+        self.mqtt_data_dir = Path(__file__).resolve().parent / "lora_data"
+        self.mqtt_table_row_limit = 500
+
 
         # WiFi settings
         self.wifi_scan_cache: list[dict] = []
@@ -1261,22 +1297,72 @@ class App(tk.Tk):
         self.wifi_icon_label = tk.Label(wifi_frame, text="", font=wifi_icon_font, bg=self.c_bg, fg=self.c_muted)
         self.wifi_icon_label.pack(side=tk.LEFT, padx=(4, 0))
         
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
+        body = ttk.Frame(self)
+        body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        self.live_tab = ttk.Frame(notebook, padding=10)
-        self.files_tab = ttk.Frame(notebook, padding=10)
-        self.wifi_tab = ttk.Frame(notebook, padding=10)
-        notebook.add(self.live_tab,   text="▶  Live Data")
-        notebook.add(self.files_tab,  text="🗂  Files")
-        notebook.add(self.wifi_tab,   text="⚙  Settings")
+        sidebar = tk.Frame(body, bg=self.c_surface, width=170)
+        sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        sidebar.pack_propagate(False)
+
+        content = ttk.Frame(body)
+        content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
+        content.rowconfigure(0, weight=1)
+        content.columnconfigure(0, weight=1)
+
+        self.live_tab = ttk.Frame(content, padding=10)
+        self.files_tab = ttk.Frame(content, padding=10)
+        self.mqtt_tab = ttk.Frame(content, padding=10)
+        self.wifi_tab = ttk.Frame(content, padding=10)
+
+        for page in (self.live_tab, self.files_tab, self.mqtt_tab, self.wifi_tab):
+            page.grid(row=0, column=0, sticky="nsew")
+
+        self.sidebar_buttons: dict[str, tk.Button] = {}
+        nav_items = [
+            ("live", "▶  Live Data", self.live_tab),
+            ("files", "🗂  Files", self.files_tab),
+            ("mqtt", "📡  TTN Live", self.mqtt_tab),
+            ("settings", "⚙  Settings", self.wifi_tab),
+        ]
+        for key, label, frame in nav_items:
+            btn = tk.Button(
+                sidebar,
+                text=label,
+                anchor="w",
+                relief="flat",
+                bd=0,
+                bg=self.c_surface,
+                fg=self.c_text,
+                activebackground=self.c_tab_idle,
+                activeforeground=self.c_text,
+                font=("Segoe UI", 10),
+                padx=12,
+                pady=10,
+                cursor="hand2",
+                command=lambda f=frame, k=key: self._show_page(f, k),
+            )
+            btn.pack(fill=tk.X)
+            self.sidebar_buttons[key] = btn
 
         self._build_live_tab()
         self._build_files_tab()
+        self._build_mqtt_tab()
         self._build_wifi_tab()
+
+        self._show_page(self.live_tab, "live")
         
         # Initialize WiFi status display
         self._update_wifi_top_bar()
+
+
+    def _show_page(self, frame: ttk.Frame, key: str) -> None:
+        frame.tkraise()
+        for k, btn in self.sidebar_buttons.items():
+            if k == key:
+                btn.configure(bg=self.c_accent, fg="#ffffff")
+            else:
+                btn.configure(bg=self.c_surface, fg=self.c_text)
+
 
     def _build_live_tab(self) -> None:
         btns = ttk.Frame(self.live_tab)
@@ -1434,6 +1520,146 @@ class App(tk.Tk):
 
     def _on_graphs_mousewheel(self, event) -> None:
         self.graphs_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+    def _on_mqtt_graphs_content_configure(self, _event=None) -> None:
+        self.mqtt_graphs_canvas.configure(scrollregion=self.mqtt_graphs_canvas.bbox("all"))
+
+    def _on_mqtt_graphs_canvas_configure(self, event) -> None:
+        self.mqtt_graphs_canvas.itemconfigure(self.mqtt_graphs_content_id, width=event.width)
+
+    def _on_mqtt_graphs_mousewheel(self, event) -> None:
+        self.mqtt_graphs_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+
+    def _build_mqtt_tab(self) -> None:
+        conn = ttk.Frame(self.mqtt_tab)
+        conn.pack(fill=tk.X)
+
+        ttk.Label(conn, text="Broker").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        self.mqtt_broker_var = tk.StringVar(value="eu1.cloud.thethings.network")
+        ttk.Entry(conn, textvariable=self.mqtt_broker_var, width=28).grid(row=0, column=1, padx=(0, 10))
+
+        ttk.Label(conn, text="Port").grid(row=0, column=2, sticky="w", padx=(0, 4))
+        self.mqtt_port_var = tk.StringVar(value="1883")
+        ttk.Entry(conn, textvariable=self.mqtt_port_var, width=6).grid(row=0, column=3, padx=(0, 10))
+
+        ttk.Label(conn, text="Application ID").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(6, 0))
+        self.mqtt_app_id_var = tk.StringVar(value="")
+        ttk.Entry(conn, textvariable=self.mqtt_app_id_var, width=28).grid(row=1, column=1, pady=(6, 0), padx=(0, 10))
+
+        ttk.Label(conn, text="Tenant").grid(row=1, column=2, sticky="w", padx=(0, 4), pady=(6, 0))
+        self.mqtt_tenant_var = tk.StringVar(value="ttn")
+        ttk.Entry(conn, textvariable=self.mqtt_tenant_var, width=6).grid(row=1, column=3, pady=(6, 0), padx=(0, 10))
+
+        ttk.Label(conn, text="API Key").grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(6, 0))
+        self.mqtt_api_key_var = tk.StringVar(value="")
+        ttk.Entry(conn, textvariable=self.mqtt_api_key_var, width=42, show="*").grid(
+            row=2, column=1, columnspan=3, sticky="w", pady=(6, 0), padx=(0, 10)
+        )
+
+        btns = ttk.Frame(conn)
+        btns.grid(row=0, column=4, rowspan=3, padx=(16, 0), sticky="n")
+        self.mqtt_connect_btn = ttk.Button(btns, text="🔗  Connect", command=self.mqtt_connect, style="Accent.TButton")
+        self.mqtt_connect_btn.pack(fill=tk.X)
+        self.mqtt_disconnect_btn = ttk.Button(
+            btns, text="✖  Disconnect", command=self.mqtt_disconnect, state=tk.DISABLED, style="Accent.TButton"
+        )
+        self.mqtt_disconnect_btn.pack(fill=tk.X, pady=(4, 0))
+
+        if not HAS_PAHO_MQTT:
+            self.mqtt_connect_btn.configure(state=tk.DISABLED)
+            ttk.Label(
+                conn,
+                text="Install paho-mqtt to enable this tab: pip install paho-mqtt",
+                foreground="#dc2626",
+            ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(6, 0))
+
+        status_row = ttk.Frame(self.mqtt_tab)
+        status_row.pack(fill=tk.X, pady=(8, 0))
+        self.mqtt_status_var = tk.StringVar(value="Disconnected")
+        ttk.Label(status_row, textvariable=self.mqtt_status_var).pack(side=tk.LEFT)
+
+        ttk.Label(status_row, text="Device:").pack(side=tk.LEFT, padx=(20, 4))
+        self.mqtt_device_combo = ttk.Combobox(
+            status_row, textvariable=self.mqtt_selected_device, state="readonly", width=24, values=[]
+        )
+        self.mqtt_device_combo.pack(side=tk.LEFT)
+        self.mqtt_device_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_mqtt_display())
+
+        cards_outer = tk.Frame(self.mqtt_tab, bg=self.c_bg)
+        cards_outer.pack(fill=tk.X, pady=(12, 12))
+        tk.Label(
+            cards_outer, text="Current Readings", font=("Segoe UI Semibold", 11), bg=self.c_bg, fg=self.c_text
+        ).pack(anchor="w", padx=4, pady=(0, 6))
+        cards_row = tk.Frame(cards_outer, bg=self.c_bg)
+        cards_row.pack(fill=tk.X)
+
+        for col_name, (label, unit) in self.LORA_COLS.items():
+            card = tk.Frame(
+                cards_row, bg=self.C_CARD_BG, highlightbackground=self.C_CARD_BORDER_NA, highlightthickness=1, relief="flat"
+            )
+            card.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 10), ipady=10, ipadx=10)
+
+            tk.Label(card, text=label, font=("Segoe UI", 9), bg=self.C_CARD_BG, fg="#6b7280").pack(anchor="w")
+            val_frame = tk.Frame(card, bg=self.C_CARD_BG)
+            val_frame.pack(anchor="w")
+            val_label = tk.Label(val_frame, text="N/A", font=("Segoe UI", 22, "bold"), bg=self.C_CARD_BG, fg=self.C_CARD_NA)
+            val_label.pack(side=tk.LEFT, anchor="s")
+            unit_label = tk.Label(val_frame, text=f" {unit}", font=("Segoe UI", 11), bg=self.C_CARD_BG, fg="#9ca3af")
+            unit_label.pack(side=tk.LEFT, anchor="s", pady=(0, 3))
+
+            self.mqtt_card_widgets[col_name] = (val_label, unit_label, card)
+
+        split = ttk.Panedwindow(self.mqtt_tab, orient=tk.VERTICAL)
+        split.pack(fill=tk.BOTH, expand=True)
+
+        graphs_frame = ttk.Frame(split)
+        split.add(graphs_frame, weight=3)
+        ttk.Label(graphs_frame, text="Live Graphs", style="Section.TLabel").pack(anchor="w")
+
+        self.mqtt_graphs_canvas = tk.Canvas(graphs_frame, highlightthickness=0, bg=self.c_bg)
+        self.mqtt_graphs_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        mqtt_graphs_vsb = ttk.Scrollbar(graphs_frame, orient=tk.VERTICAL, command=self.mqtt_graphs_canvas.yview)
+        mqtt_graphs_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.mqtt_graphs_canvas.configure(yscrollcommand=mqtt_graphs_vsb.set)
+
+        self.mqtt_graphs_content = ttk.Frame(self.mqtt_graphs_canvas)
+        self.mqtt_graphs_content_id = self.mqtt_graphs_canvas.create_window((0, 0), window=self.mqtt_graphs_content, anchor="nw")
+        self.mqtt_graphs_content.bind("<Configure>", self._on_mqtt_graphs_content_configure)
+        self.mqtt_graphs_canvas.bind("<Configure>", self._on_mqtt_graphs_canvas_configure)
+        self.mqtt_graphs_canvas.bind("<Enter>", lambda _: self.mqtt_graphs_canvas.bind_all("<MouseWheel>", self._on_mqtt_graphs_mousewheel))
+        self.mqtt_graphs_canvas.bind("<Leave>", lambda _: self.mqtt_graphs_canvas.unbind_all("<MouseWheel>"))
+
+        self.mqtt_graphs_content.columnconfigure(0, weight=1)
+        self.mqtt_graphs_content.columnconfigure(1, weight=1)
+
+        for i, (col_name, (label, unit)) in enumerate(self.LORA_COLS.items()):
+            row, col = divmod(i, 2)
+            self.mqtt_graphs_content.rowconfigure(row, weight=1)
+            pane = ttk.LabelFrame(self.mqtt_graphs_content, text=f"{label} ({unit})" if unit else label)
+            pane.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
+            canvas = tk.Canvas(pane, bg=self.c_surface, highlightthickness=1, highlightbackground=self.c_border, height=160)
+            canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+            canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
+            canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
+            self.mqtt_graph_canvases[col_name] = canvas
+
+
+        table_frame = ttk.Frame(split)
+        split.add(table_frame, weight=1)
+        ttk.Label(table_frame, text="Raw Uplinks", style="Section.TLabel").pack(anchor="w")
+
+        table_cols = ["timestamp", "device_id"] + list(self.LORA_COLS.keys())
+        self.mqtt_table = ttk.Treeview(table_frame, columns=table_cols, show="headings", height=8)
+        for c in table_cols:
+            self.mqtt_table.heading(c, text=c)
+            self.mqtt_table.column(c, width=90, anchor="center")
+        self.mqtt_table.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        mqtt_table_vsb = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.mqtt_table.yview)
+        mqtt_table_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.mqtt_table.configure(yscrollcommand=mqtt_table_vsb.set)
+
 
     def _build_files_tab(self) -> None:
         btns = ttk.Frame(self.files_tab)
@@ -2142,11 +2368,6 @@ class App(tk.Tk):
                                 self.events.put(("wifi_saved_ok", networks))
                             except Exception:
                                 pass
-                            try:
-                                nets = self.client.wifi_scan(timeout_s=15.0)
-                                self.events.put(("wifi_scan_ok", nets))
-                            except Exception:
-                                pass
                         threading.Thread(target=post_connect, daemon=True).start()
                         # Refresh the form to show Disconnect button
                         if self.wifi_network_tree.selection():
@@ -2208,6 +2429,11 @@ class App(tk.Tk):
                         self.wifi_current_ssid = new_ssid
                         self.wifi_current_rssi = new_rssi
                         self._update_wifi_top_bar()
+                        if ssid_changed:
+                            self.status_var.set(f"WiFi: {new_ssid or 'Disconnected'}")
+                            # Refresh the form to show Connect/Disconnect button
+                            if self.wifi_network_tree.selection():
+                                self._on_network_select()
                     
                     # Start wifi polling if device is connected and polling isn't running
                     if new_ssid and self.wifi_poll_timer is None:
@@ -2261,6 +2487,13 @@ class App(tk.Tk):
                     pct = int(payload)
                     self.pump_pct_var.set(pct)
                     self.pump_label_var.set(f"{pct}%")
+                elif kind == "mqtt_status":
+                    self._handle_mqtt_status(str(payload))
+                elif kind == "mqtt_message":
+                    device_id, row = payload
+                    self._handle_mqtt_message(device_id, row)
+                elif kind == "mqtt_error":
+                    self.mqtt_status_var.set(f"MQTT error: {payload}")
         except Empty:
             pass
         self._schedule_poll()
@@ -3799,9 +4032,173 @@ class App(tk.Tk):
             # Silently fail if timestamp parsing fails
             pass
 
+    def mqtt_connect(self) -> None:
+        if not HAS_PAHO_MQTT:
+            messagebox.showerror("Missing dependency", "Install paho-mqtt first: pip install paho-mqtt")
+            return
+        broker = self.mqtt_broker_var.get().strip()
+        try:
+            port = int(self.mqtt_port_var.get().strip())
+        except ValueError:
+            messagebox.showerror("Invalid port", "Port must be a number (e.g. 1883 or 8883)")
+            return
+        app_id = self.mqtt_app_id_var.get().strip()
+        tenant = self.mqtt_tenant_var.get().strip() or "ttn"
+        api_key = self.mqtt_api_key_var.get().strip()
+        if not app_id or not api_key:
+            messagebox.showerror("Missing info", "Application ID and API Key are required")
+            return
+
+        username = f"{app_id}@{tenant}"
+        topic = f"v3/{username}/devices/+/up"
+
+        client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+        client.username_pw_set(username, api_key)
+
+        def on_connect(_client, _userdata, _flags, rc, _properties=None):
+            if rc == 0:
+                _client.subscribe(topic)
+                self.events.put(("mqtt_status", "connected"))
+            else:
+                self.events.put(("mqtt_error", f"connect failed rc={rc}"))
+
+        def on_disconnect(_client, _userdata, *_args):
+            self.events.put(("mqtt_status", "disconnected"))
+
+        def on_message(_client, _userdata, msg):
+            print("MQTT MESSAGE RECEIVED on topic:", msg.topic)
+            try:
+                payload = json.loads(msg.payload.decode("utf-8"))
+            except json.JSONDecodeError:
+                return
+            device_id = payload.get("end_device_ids", {}).get("device_id", "unknown_device")
+            decoded = payload.get("uplink_message", {}).get("decoded_payload")
+            if not decoded:
+                return
+            epoch = decoded.get("utc_epoch")
+            timestamp = (
+                datetime.fromtimestamp(epoch).isoformat(sep=" ", timespec="seconds")
+                if epoch
+                else datetime.now().isoformat(sep=" ", timespec="seconds")
+            )
+            row = {"timestamp": timestamp}
+            for field in self.LORA_COLS:
+                row[field] = decoded.get(field)
+            self.events.put(("mqtt_message", (device_id, row)))
+
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.on_message = on_message
+
+        try:
+            client.connect_async(broker, port, keepalive=60)
+        except Exception as exc:
+            messagebox.showerror("Connection failed", str(exc))
+            return
+
+        client.loop_start()
+        self.mqtt_client = client
+        self.mqtt_status_var.set("Connecting...")
+        self.mqtt_connect_btn.configure(state=tk.DISABLED)
+        self.mqtt_disconnect_btn.configure(state=tk.NORMAL)
+
+    def mqtt_disconnect(self) -> None:
+        if self.mqtt_client is not None:
+            try:
+                self.mqtt_client.loop_stop()
+                self.mqtt_client.disconnect()
+            except Exception:
+                pass
+            self.mqtt_client = None
+        self.mqtt_connected = False
+        self.mqtt_status_var.set("Disconnected")
+        self.mqtt_connect_btn.configure(state=tk.NORMAL if HAS_PAHO_MQTT else tk.DISABLED)
+        self.mqtt_disconnect_btn.configure(state=tk.DISABLED)
+
+    def _handle_mqtt_status(self, status: str) -> None:
+        self.mqtt_connected = status == "connected"
+        self.mqtt_status_var.set("Connected" if self.mqtt_connected else "Disconnected")
+
+    def _handle_mqtt_message(self, device_id: str, row: dict) -> None:
+        is_new_device = device_id not in self.mqtt_devices
+        self.mqtt_devices[device_id] = row
+
+        if is_new_device:
+            self.mqtt_history[device_id] = {
+                "x": deque(maxlen=self.mqtt_history_limit),
+                "ts": deque(maxlen=self.mqtt_history_limit),
+                "series": {col: deque(maxlen=self.mqtt_history_limit) for col in self.LORA_COLS},
+            }
+
+            values = list(self.mqtt_device_combo["values"]) + [device_id]
+            self.mqtt_device_combo["values"] = values
+            if not self.mqtt_selected_device.get():
+                self.mqtt_selected_device.set(device_id)
+
+        self.mqtt_row_counter += 1
+        hist = self.mqtt_history[device_id]
+        hist["x"].append(self.mqtt_row_counter)
+        hist["ts"].append(row.get("timestamp", ""))
+        for col in self.LORA_COLS:
+            val = row.get(col)
+            hist["series"][col].append(val if isinstance(val, (int, float)) else None)
+
+
+        self._append_mqtt_csv_row(device_id, row)
+
+        table_row = [row.get("timestamp", ""), device_id] + [
+            "" if row.get(col) is None else row.get(col) for col in self.LORA_COLS
+        ]
+        self.mqtt_table.insert("", tk.END, values=table_row)
+        children = self.mqtt_table.get_children()
+        if len(children) > self.mqtt_table_row_limit:
+            self.mqtt_table.delete(*children[: len(children) - self.mqtt_table_row_limit])
+
+        if device_id == self.mqtt_selected_device.get():
+            self._refresh_mqtt_display()
+
+    def _refresh_mqtt_display(self) -> None:
+        device_id = self.mqtt_selected_device.get()
+        row = self.mqtt_devices.get(device_id, {})
+        self._update_mqtt_cards(row)
+        for col in self.LORA_COLS:
+            self._redraw_mqtt_graph(device_id, col)
+
+    def _update_mqtt_cards(self, row: dict) -> None:
+        for col_name, (val_label, unit_label, _card) in self.mqtt_card_widgets.items():
+            val = row.get(col_name)
+            if val is None:
+                val_label.configure(text="N/A", fg=self.C_CARD_NA)
+            else:
+                text = f"{val:.2f}" if isinstance(val, float) else str(val)
+                val_label.configure(text=text, fg=self.C_CARD_NEUTRAL)
+
+    def _redraw_mqtt_graph(self, device_id: str, col: str) -> None:
+        canvas = self.mqtt_graph_canvases.get(col)
+        if canvas is None:
+            return
+        hist = self.mqtt_history.get(device_id)
+        if not hist:
+            canvas.delete("all")
+            return
+        self._draw_series(canvas, list(hist["x"]), list(hist["ts"]), list(hist["series"][col]))
+
+    def _append_mqtt_csv_row(self, device_id: str, row: dict) -> None:
+        self.mqtt_data_dir.mkdir(parents=True, exist_ok=True)
+        path = self.mqtt_data_dir / f"{device_id}.csv"
+        fieldnames = ["timestamp"] + list(self.LORA_COLS.keys())
+        is_new = not path.exists()
+        with path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if is_new:
+                writer.writeheader()
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
+
+
     def on_close(self) -> None:
         try:
             self._cancel_wifi_poll()
+            self.mqtt_disconnect()
             self.client.close()
         finally:
             self.destroy()
