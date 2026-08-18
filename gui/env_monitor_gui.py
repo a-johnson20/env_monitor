@@ -922,11 +922,7 @@ class App(tk.Tk):
         "scd4x_1_t",
         "scd4x_1_rh",
         "sht45_1_t_avg", 
-<<<<<<< HEAD
-        "lps22df_1_t_avg", 
-=======
         "lps22df_1_t_avg",
->>>>>>> origin/develop
         "tgs2611_1_v_avg", 
         "tgs2611_1_rs_avg",
         "sfm3505_1_o2_slm_avg",
