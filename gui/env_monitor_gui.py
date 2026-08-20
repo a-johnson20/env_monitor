@@ -945,26 +945,11 @@ class App(tk.Tk):
         "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
     }
 
-
     C_CARD_NA = "#6b7280"
     C_CARD_NEUTRAL = "#2563eb"
-    C_CARD_WARNING = "#ea580c"
-    C_CARD_DANGER = "#dc2626"
     C_CARD_BG = "#ffffff"
     C_CARD_BORDER_NA = "#e5e7eb"
     C_CARD_BORDER_NEUTRAL = "#bfdbfe"
-    C_CARD_BORDER_WARNING = "#fecaca"
-    C_CARD_BORDER_DANGER = "#fecaca"
-
-    # Thresholds for gas readings (ppm)
-    GAS_THRESHOLDS: dict = {
-        "scd4x_1_co2":       [(5000, C_CARD_DANGER, C_CARD_BORDER_DANGER), # Danger at 5000ppm
-                              (1000, C_CARD_WARNING, C_CARD_BORDER_WARNING)], # Warning at 1000ppm
-        "tgs2611_1_ppm_avg": [(1000, C_CARD_DANGER, C_CARD_BORDER_DANGER), # Danger at 1000ppm
-                              (500, C_CARD_WARNING, C_CARD_BORDER_WARNING)], # Warning at 500ppm
-        "n2o_uart_ppm_avg":     [(100, C_CARD_DANGER, C_CARD_BORDER_DANGER), # Danger at 50ppm
-                                  (25, C_CARD_WARNING, C_CARD_BORDER_WARNING)], # Warning at 100ppm
-    }
 
     LORA_COLS: dict = {
         "scd4x_1_co2":      ("CO\u2082", "ppm"),
@@ -3222,14 +3207,8 @@ class App(tk.Tk):
                     text=f"min: {min(s):.1f} | avg: {sum(s)/len(s):.1f} | max: {max(s):.1f}"
                 )
 
-                thresholds = self.GAS_THRESHOLDS.get(col_name, [])
                 text_col = self.C_CARD_NEUTRAL
                 border_col = self.C_CARD_BORDER_NEUTRAL
-                for thresh, tc, bc in thresholds:
-                    if parsed >= thresh:
-                        text_col = tc
-                        border_col = bc
-                        break
 
                 val_lbl.configure(text=display, fg=text_col)
                 unit_lbl.configure(fg=text_col)
