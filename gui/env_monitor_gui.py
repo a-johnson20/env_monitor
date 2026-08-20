@@ -4081,10 +4081,21 @@ class App(tk.Tk):
                 if epoch
                 else datetime.now().isoformat(sep=" ", timespec="seconds")
             )
+            field_map = {
+                "scd4x_1_co2":           "co2_ppm",
+                "sht45_1_rh_avg":        "rh_pct",
+                "tmp117_1_t_avg":        "temp_c",
+                "lps22df_1_p_avg":       "pres_hpa",
+                "tgs2611_1_ppm_avg":     "ch4_ppm",
+                "tgs2611_1_raw_avg":     "tgs2611_raw",
+                "sfm3505_1_air_slm_avg": "air_slm",
+                "n2o_uart_ppm_avg":      "n2o_ppm",
+            }
             row = {"timestamp": timestamp}
-            for field in self.LORA_COLS:
-                row[field] = decoded.get(field)
+            for gui_field, ttn_field in field_map.items():
+                row[gui_field] = decoded.get(ttn_field)
             self.events.put(("mqtt_message", (device_id, row)))
+
 
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
