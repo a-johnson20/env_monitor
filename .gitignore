@@ -9,6 +9,12 @@ cmake-build-*/
 *.bin
 *.map
 
+# Python
+.venv/
+venv/
+__pycache__/
+*.pyc
+
 # VS Code / IDEs
 .vscode/
 .idea/

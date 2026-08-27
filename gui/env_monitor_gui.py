@@ -2923,7 +2923,7 @@ class App(tk.Tk):
                 try:
                     for i, (index, dev_path) in enumerate(items):
                         date_str = App._date_str_from_dev_path(dev_path)
-                        name = f"{sensor_num}_{date_str}_{i + 1:02d}.csv"
+                        name = f"{sensor_num}_{date_str}.csv"
                         out_path = out_dir_path / name
                         self.events.put(("busy", f"Downloading {dev_path} ({len(saved) + 1}/{len(items)}) ..."))
                         _, payload = self.client.download_log_bytes(index=index, timeout_s=20.0)
