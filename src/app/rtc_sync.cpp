@@ -8,7 +8,6 @@
 namespace rtc_sync {
 
 static constexpr const char* TZ_UK  = "GMT0BST,M3.5.0/1,M10.5.0/2"; // UK DST rules
-static constexpr const char* TZ_UTC = "UTC0";
 
 static RV3028*  g_rtc = nullptr;
 static bool     g_rtc_present = false;
@@ -21,11 +20,6 @@ static uint32_t g_last_daily_check_ms = 0;
 
 static inline void set_tz_uk() {
   setenv("TZ", TZ_UK, 1);
-  tzset();
-}
-
-static inline void set_tz_utc() {
-  setenv("TZ", TZ_UTC, 1);
   tzset();
 }
 
@@ -50,56 +44,60 @@ static bool writeRtcFromUtc(const struct tm& utc_tm) {
 }
 
 
-static bool syncFromNtp() {
-  // Work in UTC while fetching NTP
-  set_tz_utc();
+// ---- NTP sync (non-blocking) ----
+// The NTP wait used to busy-block loop() for up to 5 s. That stalled the serial
+// protocol exactly when a WiFi connection came up (the GUI's WIFI_STATUS polls
+// timed out and the UI flashed "WiFi: Disconnected"). The wait is now driven a
+// few milliseconds at a time from poll(), keeping the firmware responsive.
 
-  // ESP32 Arduino overload: (gmtOffsetSec, dstOffsetSec, s1, s2, s3)
+static bool     g_sync_pending     = false;   // NTP wait in progress
+static uint32_t g_sync_deadline_ms = 0;
+static bool     g_sync_result      = false;   // outcome of the most recent sync
+
+// Kick off an NTP fetch. Completion is polled from poll() / syncFromNtp().
+static void start_ntp_sync() {
+  // NOTE: no TZ switch here — the fetch only uses time()/gmtime_r(), and
+  // flipping the global TZ while other loop() code runs (now that the wait is
+  // asynchronous) would mis-render timestamps written during the wait.
   configTime(0, 0, "pool.ntp.org", "time.google.com", "time.cloudflare.com");
+  g_sync_deadline_ms = millis() + 5000;   // 5s budget (keep well under GUI 15s scan timeout)
+  g_sync_pending = true;
+}
 
-  const uint32_t deadline = millis() + 5000;   // 5s budget (keep well under GUI 15s scan timeout)
+// Advance a pending NTP wait. Returns true when the wait has finished.
+static bool poll_ntp_sync() {
+  if (!g_sync_pending) return true;
+
   time_t now = 0;
   struct tm utc_tm{};
-  bool got = false;
-  while (millis() < deadline) {
-    time(&now);
-    if (now > 1700000000) {                    // sanity: > 2023-11-14
-      if (gmtime_r(&now, &utc_tm) != nullptr) {
-        got = true;
-        break;
-      }
+  time(&now);
+  if (now > 1700000000 && gmtime_r(&now, &utc_tm) != nullptr) {  // sanity: > 2023-11-14
+    g_sync_result = writeRtcFromUtc(utc_tm);
+    if (g_sync_result) {
+      g_synced_once = true;
+      g_last_sync_epoch = static_cast<uint32_t>(now);
     }
+    set_tz_uk();  // safety: keep local rendering on UK time
+    g_sync_pending = false;
+    return true;
+  }
+
+  if ((int32_t)(millis() - g_sync_deadline_ms) >= 0) {  // budget expired
+    g_sync_result = false;
+    set_tz_uk();
+    g_sync_pending = false;
+    return true;
+  }
+  return false;  // still waiting — loop() stays responsive
+}
+
+// Blocking convenience wrapper (used by force_resync() only).
+static bool syncFromNtp() {
+  start_ntp_sync();
+  while (!poll_ntp_sync()) {
     delay(50);
   }
-  if (!got) return false;
-
-  if (!writeRtcFromUtc(utc_tm)) return false;
-
-  // --- Verify what the RTC reports (helps catch library year quirks) ---
-  if (g_rtc && g_rtc_present) {
-    uint8_t r_sec  = g_rtc->getSeconds();
-    uint8_t r_min  = g_rtc->getMinutes();
-    uint8_t r_hour = g_rtc->getHours();
-    uint8_t r_wday = g_rtc->getWeekday();
-    uint8_t r_mday = g_rtc->getDate();
-    uint8_t r_mon  = g_rtc->getMonth();
-    uint16_t r_year = g_rtc->getYear(); // full year, e.g. 2026
-    char vbuf[80];
-    snprintf(vbuf, sizeof(vbuf), "[RTC verify] %04u-%02u-%02u %02u:%02u:%02u (wday=%u)",
-                  r_year, r_mon, r_mday, r_hour, r_min, r_sec, r_wday);
-    (void)vbuf; // Debug only - do not write to serial
-    snprintf(vbuf, sizeof(vbuf), "[NTP used ] %04d-%02d-%02d %02d:%02d:%02d (UTC)",
-                  utc_tm.tm_year + 1900, utc_tm.tm_mon + 1, utc_tm.tm_mday,
-                  utc_tm.tm_hour, utc_tm.tm_min, utc_tm.tm_sec);
-    (void)vbuf;
-  }
-
-  // Switch process TZ back to UK for UI/logs
-  set_tz_uk();
-
-  g_synced_once = true;
-  g_last_sync_epoch = static_cast<uint32_t>(now);
-  return true;
+  return g_sync_result;
 }
 
 // ---- public API ----
@@ -119,17 +117,21 @@ void begin(RV3028& rtc, bool rtc_present) {
 void poll() {
   const bool w = wifi::is_connected();
 
-  // One-shot on connection edge
-  if (w && !g_prev_wifi && !g_synced_once && g_rtc_present) {
-    syncFromNtp();
+  // One-shot on connection edge — non-blocking: the NTP wait now completes
+  // across poll() calls while loop() keeps running (and answering serial).
+  if (w && !g_prev_wifi && !g_synced_once && g_rtc_present && !g_sync_pending) {
+    start_ntp_sync();
   }
+
+  // Drive any pending NTP wait forward (a few ms at a time).
+  poll_ntp_sync();
 
   // Daily resync if connected (at most once every ~24h)
   const uint32_t now_ms = millis();
-  if (w && g_rtc_present && g_synced_once &&
+  if (w && g_rtc_present && g_synced_once && !g_sync_pending &&
       (now_ms - g_last_daily_check_ms) >= (24u * 60u * 60u * 1000u)) {
     g_last_daily_check_ms = now_ms;
-    syncFromNtp();
+    start_ntp_sync();
   }
 
   g_prev_wifi = w;

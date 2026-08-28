@@ -6,7 +6,7 @@ datas += collect_data_files('ttkbootstrap')
 
 
 a = Analysis(
-    ['gui\\env_monitor_gui.py'],
+    ['gui/env_monitor_gui.py'],
     pathex=[],
     binaries=[],
     datas=datas,
@@ -39,5 +39,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\GEM_icon_256.ico'],
+    icon=['assets/GEM_icon_256.ico'],
 )

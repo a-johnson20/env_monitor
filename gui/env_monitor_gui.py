@@ -290,6 +290,97 @@ class SerialMenuClient:
             # Discard this byte — it's stale data from a previous operation
         raise RuntimeError(f"Timeout waiting for valid response (expected one of {valid_types})")
 
+    # Frame types that carry a length-prefixed payload ([type][len][payload...])
+    # and may be emitted by the device *unsolicited* between a command and its
+    # response: STATUS(0x02), LIVE_DATA(0xFE), RTC_RESPONSE(0x21),
+    # LORA_INFO(0x23), PUMP_STATUS(0x22).
+    _LEN_FRAMED = frozenset({
+        ProtoResp.STATUS, ProtoResp.LIVE_DATA, ProtoResp.RTC_RESPONSE,
+        ProtoResp.LORA_INFO, ProtoResp.PUMP_STATUS,
+    })
+
+    def _consume_frame(self, resp: int, timeout_s: float) -> None:
+        """Consume the remainder of a frame whose type byte `resp` was already read.
+
+        Keeps the byte stream in sync so payload bytes of unsolicited frames
+        can never be misread as the start of the next response.
+        """
+        if resp in self._LEN_FRAMED:
+            self._read_string(timeout_s)                 # [type][len][payload]
+        elif resp == ProtoResp.ERROR:
+            self._read_byte(timeout_s)                   # [type][error_code]
+        elif resp in (ProtoResp.WIFI_LIST, ProtoResp.WIFI_SAVED):
+            count = self._read_byte(timeout_s)
+            for _ in range(count):
+                self._read_byte(timeout_s)               # rssi
+                self._read_byte(timeout_s)               # security
+                ssid_len = self._read_byte(timeout_s)
+                if ssid_len:
+                    self._read_exact(ssid_len, timeout_s)
+        elif resp in (ProtoResp.LOG_BEGIN, ProtoResp.LOG_END):
+            self._read_exact(4, timeout_s)               # size (u32 LE)
+            path_len = self._read_byte(timeout_s)
+            if path_len:
+                self._read_exact(path_len, timeout_s)
+        elif resp == ProtoResp.LOG_DATA:
+            self._read_string(timeout_s)                 # [type][len][data]
+        elif resp == ProtoResp.LOG_LIST:
+            count = self._read_byte(timeout_s)
+            for _ in range(count):
+                self._read_exact(4, timeout_s)           # size (u32 LE)
+                path_len = self._read_byte(timeout_s)
+                if path_len:
+                    self._read_exact(path_len, timeout_s)
+        elif resp == ProtoResp.WIFI_INFO:
+            connected = self._read_byte(timeout_s)
+            if connected:
+                self._read_byte(timeout_s)               # rssi
+                for _ in range(4):                       # ssid, ip, gw, dns
+                    self._read_string(timeout_s)
+        # Anything else (PROMPT_*, stray bytes): no known payload to consume.
+
+    def _read_response(self, expected, timeout_s: float = 5.0):
+        """Frame-aware response reader.
+
+        Reads from the serial stream until a frame whose type byte is in
+        `expected` arrives. Frames the device may emit unsolicited (STATUS
+        messages, live-data lines, RTC/LoRa replies, ...) are consumed so they
+        can never be mistaken for the command's response — previously a stray
+        byte (e.g. 91 = '[' from a "[...]" status text) surfaced as an
+        "Unexpected response: N" popup.
+
+        `expected` is an int or a set of response type bytes.
+        Returns (resp_type, last_status_text_or_None).
+        Raises RuntimeError on timeout.
+        """
+        if isinstance(expected, int):
+            expected = {expected}
+        deadline = time.time() + timeout_s
+        last_status = None
+        while True:
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                raise RuntimeError(
+                    f"Timeout waiting for response (expected one of {sorted(expected)})")
+            resp = self._read_byte(remaining)
+            if resp in expected:
+                return resp, last_status
+            if resp == ProtoResp.STATUS:
+                # Keep the newest status text — useful for error messages.
+                try:
+                    last_status = self._read_string(max(0.05, deadline - time.time()))
+                except RuntimeError:
+                    if deadline - time.time() <= 0:
+                        raise
+                continue
+            # Skip/consume any other unexpected frame so its payload cannot
+            # be misparsed as the next response.
+            try:
+                self._consume_frame(resp, max(0.05, deadline - time.time()))
+            except RuntimeError:
+                if deadline - time.time() <= 0:
+                    raise
+
     # ============ COMMAND METHODS ============
 
     def list_logs(self, timeout_s: float = 20.0) -> list[FileEntry]:
@@ -492,13 +583,12 @@ class SerialMenuClient:
             
             self._send_cmd(ProtoCmd.WIFI_SCAN)
             
-            # Read response
-            resp_type = self._read_byte(timeout_s)
+            # Read response — skip any unsolicited frames (STATUS text, RTC
+            # replies, ...) so they can't be mistaken for the scan result.
+            resp_type, _ = self._read_response(
+                {ProtoResp.WIFI_LIST, ProtoResp.ERROR}, timeout_s)
             
             if resp_type == ProtoResp.ERROR:
-                return []
-            
-            if resp_type != ProtoResp.WIFI_LIST:
                 return []
             
             # Read network list
@@ -553,16 +643,19 @@ class SerialMenuClient:
                 
                 ser.flush()
                 
-                # Read response
-                resp_type = self._read_byte(timeout_s)
+                # Read response — skip any unsolicited frames (STATUS text, RTC
+                # replies, ...) so they can't be mistaken for the connect result.
+                resp_type, status_text = self._read_response(
+                    {ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
                 
                 if resp_type == ProtoResp.OK:
                     return {"success": True, "ssid": ssid, "message": "Connected"}
-                elif resp_type == ProtoResp.ERROR:
+                else:  # ERROR
                     self._read_byte(timeout_s)
-                    return {"success": False, "ssid": ssid, "message": "Connection failed"}
-                else:
-                    return {"success": False, "ssid": ssid, "message": f"Unexpected response: {resp_type}"}
+                    msg = "Connection failed"
+                    if status_text:
+                        msg = f"Connection failed — device said: {status_text}"
+                    return {"success": False, "ssid": ssid, "message": msg}
             except Exception as e:
                 return {"success": False, "ssid": ssid, "message": str(e)}
 
@@ -578,11 +671,13 @@ class SerialMenuClient:
             try:
                 self._send_cmd(ProtoCmd.WIFI_DISCONNECT)
                 
-                resp_type = self._read_byte(timeout_s)
+                # Skip unsolicited frames, then read the result
+                resp_type, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
                 
                 if resp_type == ProtoResp.OK:
                     return {"success": True, "message": "Disconnected"}
-                else:
+                else:  # ERROR
+                    self._read_byte(timeout_s)
                     return {"success": False, "message": "Disconnect failed"}
             except Exception as e:
                 return {"success": False, "message": str(e)}
@@ -596,30 +691,30 @@ class SerialMenuClient:
             ser = self._require_open()
             ser.reset_input_buffer()
             
-            try:
-                self._send_cmd(ProtoCmd.WIFI_STATUS)
-                
-                resp_type = self._read_byte(timeout_s)
-                
-                if resp_type != ProtoResp.WIFI_INFO:
-                    return {"ssid": "", "rssi": ""}
-                
-                connected = self._read_byte(timeout_s)
-                
-                if not connected:
-                    return {"ssid": "", "rssi": ""}
-                
-                rssi_byte = self._read_byte(timeout_s)
-                rssi = rssi_byte if rssi_byte < 128 else rssi_byte - 256
-                
-                ssid = self._read_string(timeout_s)
-                self._read_string(timeout_s)  # IP
-                self._read_string(timeout_s)  # Gateway
-                self._read_string(timeout_s)  # DNS
-                
-                return {"ssid": ssid, "rssi": str(rssi)}
-            except Exception:
+            self._send_cmd(ProtoCmd.WIFI_STATUS)
+            
+            # Wait for a real WIFI_INFO frame, skipping any unsolicited frames
+            # (STATUS text, RTC replies, ...) that arrive in between.
+            # NOTE: this raises RuntimeError on timeout / no valid response.
+            # Callers must treat that as "status unknown" — NOT as "device is
+            # disconnected" (the device is regularly busy for several seconds
+            # right after connecting, e.g. while syncing the RTC from NTP).
+            resp_type, _ = self._read_response({ProtoResp.WIFI_INFO}, timeout_s)
+            
+            connected = self._read_byte(timeout_s)
+            
+            if not connected:
                 return {"ssid": "", "rssi": ""}
+            
+            rssi_byte = self._read_byte(timeout_s)
+            rssi = rssi_byte if rssi_byte < 128 else rssi_byte - 256
+            
+            ssid = self._read_string(timeout_s)
+            self._read_string(timeout_s)  # IP
+            self._read_string(timeout_s)  # Gateway
+            self._read_string(timeout_s)  # DNS
+            
+            return {"ssid": ssid, "rssi": str(rssi)}
 
     def wifi_get_saved_networks(self, timeout_s: float = 5.0) -> list[str]:
         """Get saved WiFi networks"""
@@ -633,9 +728,11 @@ class SerialMenuClient:
             try:
                 self._send_cmd(ProtoCmd.WIFI_SAVED_LIST)
                 
-                resp_type = self._read_byte(timeout_s)
+                # Skip unsolicited frames, then read the saved list
+                resp_type, _ = self._read_response(
+                    {ProtoResp.WIFI_SAVED, ProtoResp.ERROR}, timeout_s)
                 
-                if resp_type != ProtoResp.WIFI_SAVED:
+                if resp_type == ProtoResp.ERROR:
                     return []
                 
                 num_networks = self._read_byte(timeout_s)
@@ -671,15 +768,18 @@ class SerialMenuClient:
                 ser.write(encoded)
                 ser.flush()
                 
-                resp_type = self._read_byte(timeout_s)
+                # Skip unsolicited frames, then read the connect result
+                resp_type, status_text = self._read_response(
+                    {ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
                 
                 if resp_type == ProtoResp.OK:
                     return {"success": True, "ssid": ssid, "message": "Connected"}
-                elif resp_type == ProtoResp.ERROR:
+                else:  # ERROR
                     self._read_byte(timeout_s)
-                    return {"success": False, "ssid": ssid, "message": "Connection failed"}
-                else:
-                    return {"success": False, "ssid": ssid, "message": f"Unexpected response: {resp_type}"}
+                    msg = "Connection failed"
+                    if status_text:
+                        msg = f"Connection failed — device said: {status_text}"
+                    return {"success": False, "ssid": ssid, "message": msg}
             except Exception as e:
                 return {"success": False, "ssid": ssid, "message": str(e)}
 
@@ -703,16 +803,14 @@ class SerialMenuClient:
                 ser.write(encoded)
                 ser.flush()
                 
-                # Read response
-                resp_type = self._read_byte(timeout_s)
+                # Skip unsolicited frames, then read the result
+                resp_type, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
                 
                 if resp_type == ProtoResp.OK:
                     return {"success": True, "ssid": ssid, "message": "Network forgotten"}
-                elif resp_type == ProtoResp.ERROR:
+                else:  # ERROR
                     error_code = self._read_byte(timeout_s)
                     return {"success": False, "ssid": ssid, "message": f"Error code {error_code}"}
-                else:
-                    return {"success": False, "ssid": ssid, "message": f"Unexpected response: {resp_type}"}
             except Exception as e:
                 return {"success": False, "ssid": ssid, "message": str(e)}
 
@@ -769,10 +867,8 @@ class SerialMenuClient:
             try:
                 self._send_cmd(ProtoCmd.RTC_TIME)
                 
-                resp_type = self._read_byte(timeout_s)
-                
-                if resp_type != ProtoResp.RTC_RESPONSE:
-                    return {"success": False, "time": ""}
+                # Skip unsolicited frames, then read the RTC response
+                resp_type, _ = self._read_response({ProtoResp.RTC_RESPONSE}, timeout_s)
                 
                 time_str = self._read_string(timeout_s)
                 return {"success": True, "time": time_str}
@@ -2337,6 +2433,7 @@ class App(tk.Tk):
                     result = payload
                     if result["success"]:
                         self.wifi_current_ssid = result['ssid']
+                        self._wifi_disc_strikes = 0
                         self._update_wifi_top_bar()
                         self._schedule_wifi_poll()
                         self.status_var.set(f"Connected to {result['ssid']}")
@@ -2344,7 +2441,7 @@ class App(tk.Tk):
                         # to avoid overlapping serial commands
                         def post_connect() -> None:
                             try:
-                                status = self.client.wifi_get_status(timeout_s=5.0)
+                                status = self.client.wifi_get_status(timeout_s=8.0)
                                 self.events.put(("wifi_status_ok", status))
                             except Exception:
                                 pass
@@ -2406,23 +2503,35 @@ class App(tk.Tk):
                     new_ssid = status.get("ssid", "")
                     new_rssi = status.get("rssi", "")
                     
-                    # Update if values changed
-                    ssid_changed = (self.wifi_current_ssid != new_ssid)
-                    rssi_changed = (self.wifi_current_rssi != new_rssi)
+                    # Require two consecutive "not connected" readings before
+                    # flipping the UI to Disconnected. A single empty reading can
+                    # be transient (e.g. the device briefly reports a drop during
+                    # a reconnect); reacting to it immediately made the status bar
+                    # flash "WiFi: Disconnected" right after connecting.
+                    if not new_ssid and self.wifi_current_ssid:
+                        self._wifi_disc_strikes = getattr(self, "_wifi_disc_strikes", 0) + 1
+                    else:
+                        self._wifi_disc_strikes = 0
+                    confirmed = bool(new_ssid) or self._wifi_disc_strikes >= 2
                     
-                    if ssid_changed or rssi_changed:
-                        self.wifi_current_ssid = new_ssid
-                        self.wifi_current_rssi = new_rssi
-                        self._update_wifi_top_bar()
-                        if ssid_changed:
-                            self.status_var.set(f"WiFi: {new_ssid or 'Disconnected'}")
-                            # Refresh the form to show Connect/Disconnect button
-                            if self.wifi_network_tree.selection():
-                                self._on_network_select()
-                    
-                    # Start wifi polling if device is connected and polling isn't running
-                    if new_ssid and self.wifi_poll_timer is None:
-                        self._schedule_wifi_poll()
+                    if confirmed:
+                        # Update if values changed
+                        ssid_changed = (self.wifi_current_ssid != new_ssid)
+                        rssi_changed = (self.wifi_current_rssi != new_rssi)
+                        
+                        if ssid_changed or rssi_changed:
+                            self.wifi_current_ssid = new_ssid
+                            self.wifi_current_rssi = new_rssi
+                            self._update_wifi_top_bar()
+                            if ssid_changed:
+                                self.status_var.set(f"WiFi: {new_ssid or 'Disconnected'}")
+                                # Refresh the form to show Connect/Disconnect button
+                                if self.wifi_network_tree.selection():
+                                    self._on_network_select()
+                        
+                        # Start wifi polling if device is connected and polling isn't running
+                        if new_ssid and self.wifi_poll_timer is None:
+                            self._schedule_wifi_poll()
                 elif kind == "rtc_time_ok":
                     result = payload
                     if result.get("success", False):
@@ -3942,7 +4051,7 @@ class App(tk.Tk):
 
         def worker() -> None:
             try:
-                status = self.client.wifi_get_status(timeout_s=5.0)
+                status = self.client.wifi_get_status(timeout_s=8.0)
                 self.events.put(("wifi_status_ok", status))
             except Exception:
                 # Silently fail - don't disrupt the user

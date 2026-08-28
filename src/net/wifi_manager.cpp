@@ -5,7 +5,6 @@
 #include <cstring>     //for std::memset/strncpy/memcpy
 
 #include "net/wifi_manager.hpp"
-#include "ui/serial_protocol.hpp"
 
 extern "C" {
   #include "esp_wifi.h"
@@ -35,19 +34,6 @@ namespace wifi {
       case WIFI_AUTH_WPA2_ENTERPRISE: return Sec::WPA2_ENTERPRISE;
       default:                        return Sec::UNKNOWN;
     }
-  }
-
-  static void log_link_info() {
-    // Use STATUS message format instead of raw Serial.printf
-    // to avoid corrupting the binary protocol stream
-    char buf[128];
-    snprintf(buf, sizeof(buf), "[WiFi] SSID=%s  IP=%s  GW=%s  DNS0=%s  RSSI=%d",
-      WiFi.SSID().c_str(),
-      WiFi.localIP().toString().c_str(),
-      WiFi.gatewayIP().toString().c_str(),
-      WiFi.dnsIP().toString().c_str(),
-      WiFi.RSSI());
-    ui::proto::write_status(buf, strlen(buf));
   }
 
   const char* sec_to_str(Sec s) {
