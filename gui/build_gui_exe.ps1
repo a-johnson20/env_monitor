@@ -2,10 +2,12 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "Building env_monitor GUI executable..."
 
-python -m pip install --upgrade pip
-python -m pip install pyserial pyinstaller ttkbootstrap
+py -m pip install --upgrade pip
+# ttkbootstrap 2.x is a breaking rewrite (renamed themes e.g. united -> united-light,
+# and checkbox/slider rendering regressions) - pin to the last 1.x release.
+py -m pip install pyserial pyinstaller "ttkbootstrap<2"
 
-python -m PyInstaller `
+py -m PyInstaller `
   --noconfirm `
   --onefile `
   --windowed `

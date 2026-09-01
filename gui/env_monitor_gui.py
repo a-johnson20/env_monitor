@@ -51,21 +51,20 @@ except Exception:
 
 # Configure DPI awareness.
 #
-# We use SYSTEM_DPI_AWARE (value 1). This pins the process to a single DPI for
-# its whole lifetime — the DPI of the monitor the window was launched on. That
-# has two benefits for this GUI:
-#   * The UI keeps a comfortable, constant physical size when dragged onto a
-#     different monitor (it does NOT auto-rescale and blow up).
-#   * The window is rendered at the true system DPI on the launch monitor, so
-#     it stays crisp there. On a secondary monitor with a different DPI, Windows
-#     does a light DWM bitmap stretch (the only tradeoff for a constant size).
-#     This is an inherent limitation of Tk 8.6.x, which cannot natively support
-#     per-monitor DPI rendering.
+# We use PER_MONITOR_DPI_AWARE (value 2) rather than SYSTEM_DPI_AWARE. Under
+# system-DPI-aware mode, Windows never delivers WM_DPICHANGED to the process,
+# so it falls back to DWM bitmap-stretching the whole window whenever it is
+# maximized/moved/resized on a non-launch monitor — that stretch-then-repaint
+# is what shows up as blurry text and brief black rendering artifacts on
+# maximize. Per-monitor awareness renders natively on every monitor (no DWM
+# stretch, no black flash) and lets our own WM_DPICHANGED handler below
+# (_bind_dpi_change) pin Tk's scaling factor so the UI still doesn't
+# auto-rescale/blow up when moved to a different-DPI monitor.
 try:
     import ctypes
     if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "shcore"):
         try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(1)  # PROCESS_SYSTEM_DPI_AWARE
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
         except Exception:
             try:
                 ctypes.windll.user32.SetProcessDPIAware()
@@ -1012,11 +1011,6 @@ class SerialMenuClient:
 
 # ============ GUI APPLICATION ============
 
-
-
-
-
-
 class App(tk.Tk):
 
     # Choose which readings to hide from the raw data log table
@@ -1242,7 +1236,7 @@ class App(tk.Tk):
                 self.c_accent_hover = self.c_accent
                 self.c_accent_press = self.c_accent
                 self.c_border = getattr(colors, "border", self.c_border)
-                self.c_row_alt = getattr(colors, "bg", self.c_row_alt)
+                self.c_row_alt = getattr(colors, "bg_alt", self.c_row_alt)
         else:
             self.style = ttk.Style(self)
             available = set(self.style.theme_names())
@@ -1280,11 +1274,10 @@ class App(tk.Tk):
 
         self.style.configure("TEntry", padding=5)
         self.style.configure("TCombobox", padding=4)
-        # Make dropdown selection less visually loud.
         self.option_add("*TCombobox*Listbox.background", self.c_surface)
         self.option_add("*TCombobox*Listbox.foreground", self.c_text)
-        self.option_add("*TCombobox*Listbox.selectBackground", self.c_surface)
-        self.option_add("*TCombobox*Listbox.selectForeground", self.c_text)
+        self.option_add("*TCombobox*Listbox.selectBackground", self.c_accent)
+        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
         self.option_add("*TCombobox*Listbox.font", "{Segoe UI} 10")
 
         self.style.configure("TNotebook", background=self.c_bg, borderwidth=0, tabmargins=(2, 0, 2, 0))
@@ -1319,7 +1312,6 @@ class App(tk.Tk):
         )
         self.style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", "#111827")])
         self.style.map("Treeview.Heading", background=[("active", "#dce5f2")])
-
     def _apply_tree_stripes(self, tree: ttk.Treeview, rows: list[tuple]) -> None:
         tree.tag_configure("even", background=self.c_surface)
         tree.tag_configure("odd", background=self.c_row_alt)
@@ -1662,7 +1654,7 @@ class App(tk.Tk):
 
         ttk.Label(status_row, text="Device:").pack(side=tk.LEFT, padx=(20, 4))
         self.mqtt_device_combo = ttk.Combobox(
-            status_row, textvariable=self.mqtt_selected_device, state="readonly", width=24, values=[]
+            status_row, textvariable=self.mqtt_selected_device, state="readonly", width=24, values=[],
         )
         self.mqtt_device_combo.pack(side=tk.LEFT)
         self.mqtt_device_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_mqtt_display())
@@ -2219,7 +2211,7 @@ class App(tk.Tk):
         self.wifi_form_security = ttk.Combobox(
             self.wifi_form_frame,
             values=["None", "WPA2-PSK", "WPA2-ENT"],
-            state="readonly"
+            state="readonly",
         )
         self.wifi_form_security.pack(fill=tk.X, pady=(4, 8))
         self.wifi_form_security.bind("<<ComboboxSelected>>", self._on_other_security_changed)
