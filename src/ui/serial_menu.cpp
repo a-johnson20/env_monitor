@@ -20,6 +20,13 @@ void pump_save_percent(float pct);
 // Stores pre-fitted R2ppm (kΩ) and alpha parameters into the sensor EEPROM on channel ch.
 extern bool tgs2611_save_calib_params(uint8_t ch, float r2ppm_kohm, float alpha);
 
+// External TGS EEPROM identity write/read from main.cpp (GUI "EEPROM Write" section).
+extern bool tgs2611_write_ids(uint8_t ch, uint16_t tgs_id, const char* lot, const char* board_id);
+extern bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
+                             char *lot, uint8_t lot_size,
+                             char *board_id, uint8_t board_size);
+extern bool tgs2611_clear_ids(uint8_t ch);
+
 namespace ui {
 
 static bool g_live_stream = false;
@@ -406,31 +413,43 @@ void poll() {
     proto::write_response(proto::RespType::OK);
   }
 
-  // If in live stream mode, only check for stop command
+  // If in live stream mode, only accept a few commands; EEPROM read/write is
+  // allowed so the GUI can program sensor identity without stopping the stream
+  // (the command handler below blocks the sensor loop, so mux access is safe).
+  bool eeprom_during_live = false;
+  uint8_t cmd_byte = 0;
+  proto::Cmd cmd = proto::Cmd::BACK;
   if (g_live_stream) {
-    if (Serial.available()) {
-      uint8_t cmd_byte = Serial.read();
-      proto::Cmd cmd = (proto::Cmd)cmd_byte;
-      
-      if (cmd == proto::Cmd::RTC_TIME) {
-        // Allow RTC polling during live stream
-        send_rtc_time();
-      } else if (cmd == proto::Cmd::LIVE_STOP) {
-        g_live_stream = false;
-        proto::write_response(proto::RespType::OK);
-      }
-      // Ignore other commands during live streaming
+    if (!Serial.available()) {
+      return;
     }
-    return;
+    cmd_byte = Serial.read();
+    cmd = (proto::Cmd)cmd_byte;
+
+    if (cmd == proto::Cmd::RTC_TIME) {
+      // Allow RTC polling during live stream
+      send_rtc_time();
+      return;
+    } else if (cmd == proto::Cmd::LIVE_STOP) {
+      g_live_stream = false;
+      proto::write_response(proto::RespType::OK);
+      return;
+    } else if (cmd == proto::Cmd::EEPROM_READ || cmd == proto::Cmd::EEPROM_WRITE) {
+      eeprom_during_live = true;  // fall through to normal handler below
+    } else {
+      // Ignore other commands during live streaming
+      return;
+    }
   }
 
-  // Read command byte
-  if (!Serial.available()) {
-    return;
+  if (!eeprom_during_live) {
+    // Read command byte
+    if (!Serial.available()) {
+      return;
+    }
+    cmd_byte = Serial.read();
+    cmd = (proto::Cmd)cmd_byte;
   }
-
-  uint8_t cmd_byte = Serial.read();
-  proto::Cmd cmd = (proto::Cmd)cmd_byte;
 
   // Set busy flag for the duration of command processing.
   // This prevents main.cpp's commit_and_reset_all_windows() and header-send
@@ -537,6 +556,79 @@ void poll() {
       memcpy(&r2ppm, r2ppm_bytes, 4);
       memcpy(&alpha, alpha_bytes, 4);
       if (tgs2611_save_calib_params(ch, r2ppm, alpha)) {
+        proto::write_response(proto::RespType::OK);
+      } else {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+      }
+      break;
+    }
+
+    case proto::Cmd::EEPROM_WRITE: {
+      // Payload: [ch: u8][tgs_id: u16 BE][lot_len: u8][lot bytes][board_len: u8][board bytes]
+      uint8_t ch, id_hi, id_lo, lot_len, board_len;
+      if (!read_byte_timeout(ch) || !read_byte_timeout(id_hi) ||
+          !read_byte_timeout(id_lo) || !read_byte_timeout(lot_len)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      // Sanity limits before reading variable-length fields
+      // (lot: 15-char block, board: 31-char block)
+      if (lot_len > 16) {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+        break;
+      }
+      char lot[17] = {0}, board[33] = {0};
+      if (lot_len && !read_bytes_timeout((uint8_t*)lot, lot_len)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      if (!read_byte_timeout(board_len)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      if (board_len > 32) {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+        break;
+      }
+      if (board_len && !read_bytes_timeout((uint8_t*)board, board_len)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      uint16_t tgs_id = (uint16_t(id_hi) << 8) | id_lo;
+      if (tgs2611_write_ids(ch, tgs_id, lot, board)) {
+        proto::write_response(proto::RespType::OK);
+      } else {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+      }
+      break;
+    }
+
+    case proto::Cmd::EEPROM_READ: {
+      // Payload: [ch: u8]; reply LORA_INFO-style message: "id,crc,lot,board" CSV
+      uint8_t ch;
+      if (!read_byte_timeout(ch)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      uint16_t tgs_id = 0; bool crc_ok = false;
+      char lot[17] = {0}, board[33] = {0};
+      if (!tgs2611_read_ids(ch, tgs_id, crc_ok, lot, sizeof(lot), board, sizeof(board))) {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+        break;
+      }
+      String payload = String(tgs_id) + "," + (crc_ok ? "OK" : "BAD") + "," + lot + "," + board;
+      proto::write_message(static_cast<uint8_t>(proto::RespType::EEPROM_IDS), payload);
+      break;
+    }
+
+    case proto::Cmd::EEPROM_CLEAR: {
+      // Payload: [ch: u8]; erases ID/lot/board blocks back to blank 0xFF
+      uint8_t ch;
+      if (!read_byte_timeout(ch)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      if (tgs2611_clear_ids(ch)) {
         proto::write_response(proto::RespType::OK);
       } else {
         proto::write_error(proto::ErrorCode::INVALID_CMD);

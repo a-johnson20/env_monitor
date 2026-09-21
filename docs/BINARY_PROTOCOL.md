@@ -33,6 +33,9 @@ All commands are single-byte opcodes:
 0x1D - LOG_GET         (File index as single byte)
 0x1E - RTC_TIME        (No payload)
 0x1F - BACK            (No payload)
+0x26 - EEPROM_WRITE    (Channel + TGS ID (u16 BE) + length-prefixed lot + length-prefixed board ID)
+0x27 - EEPROM_READ     (Channel as single byte; replies EEPROM_IDS CSV "id,crc,lot,board")
+0x28 - EEPROM_CLEAR    (Channel as single byte; erases ID/lot/board blocks back to blank 0xFF)
 ```
 
 #### Response Types (Device → Client)
@@ -52,6 +55,8 @@ All commands are single-byte opcodes:
 
 0x20 - LIVE_DATA       (CSV data - raw sensor readings)
 0x21 - RTC_RESPONSE    (Time string with length prefix)
+0x23 - LORA_INFO       (DevEUI,AppEUI,AppKey CSV string with length prefix)
+0x24 - EEPROM_IDS      (TGS identity CSV "id,crc,lot,board" with length prefix)
 ```
 
 #### Error Codes

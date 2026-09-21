@@ -25,6 +25,7 @@
 #include "common/sensors/platinum_n2o_uart.hpp"
 #include "common/sensors/tgs2611_ch4.hpp"
 #include "common/sensors/tgs_eeprom.hpp"
+#include "common/eeprom/at24_11.hpp"   // crc8_xor, at24_write/read for TGS ID blocks
 #include "ui/serial_menu.hpp"
 #include "ui/serial_protocol.hpp"
 #include "net/wifi_manager.hpp"
@@ -573,6 +574,166 @@ bool tgs2611_save_calib_params(uint8_t ch, float r2ppm_kohm, float alpha) {
   tgs2611_r2ppm_kohm[ch] = r2ppm_kohm;
   tgs2611_alpha[ch] = alpha;
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// TGS EEPROM identity write/read (moved from writer firmware)
+// ---------------------------------------------------------------------------
+// EEPROM layout:
+//   0x00..0x02: TGS sensor ID  — [u16 BE id][XOR CRC of the 2 id bytes]
+//   0x20..0x30: Lot #          — [len u8][15 ASCII zero-padded][XOR CRC of len+payload]
+//   0x40..0x60: Board ID       — [len u8][31 ASCII zero-padded][XOR CRC at 0x60]
+//                                (v1 blocks: 15 ASCII, CRC at 0x50 — still read back)
+
+static bool tgs_eeprom_write_id_on_selected(uint16_t id) {
+  uint8_t buf[3] = { uint8_t(id >> 8), uint8_t(id & 0xFF), 0 };
+  buf[2] = crc8_xor(buf, 2);
+  if (!at24_write(hal::I2CAddr::AT24, 0x00, buf, 3)) return false;
+  // verify
+  uint8_t rb[3] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, 0x00, rb, 3)) return false;
+  return ((uint16_t(rb[0]) << 8 | rb[1]) == id) && (crc8_xor(rb, 2) == rb[2]);
+}
+
+// Sanitize an ID string (lot/board): allow A-Z a-z 0-9 '-' '_'; drop others, keep case.
+static uint8_t tgs_eeprom_sanitize_ascii(const char* in, char* out, uint8_t max_len) {
+  uint8_t n = 0;
+  while (*in && n < max_len) {
+    const char c = *in++;
+    const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_';
+    if (ok) out[n++] = c;
+  }
+  return n;
+}
+
+// Block layout: [len u8][max_len ASCII zero-padded][XOR CRC of len+payload]
+static bool tgs_eeprom_write_ascii_block(uint8_t block_off, const char* str, uint8_t max_len) {
+  char payload[32];
+  uint8_t len = tgs_eeprom_sanitize_ascii(str, payload, max_len);
+
+  uint8_t page[1 + 31];
+  page[0] = len;
+  for (uint8_t i = 0; i < max_len; i++) page[i + 1] = (i < len) ? uint8_t(payload[i]) : 0;
+
+  if (!at24_write(hal::I2CAddr::AT24, block_off, page, sizeof(page))) return false;
+
+  uint8_t crc = crc8_xor(page, 1 + len);
+  if (!at24_write(hal::I2CAddr::AT24, block_off + 1 + max_len, &crc, 1)) return false;
+
+  // verify (CRC over readback)
+  uint8_t len_rb = 0, data_rb[32] = {0}, crc_rb = 0;
+  if (!at24_read(hal::I2CAddr::AT24, block_off, &len_rb, 1)) return false;
+  if (len_rb > max_len) return false;
+  if (!at24_read(hal::I2CAddr::AT24, block_off + 1, data_rb, max_len)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, block_off + 1 + max_len, &crc_rb, 1)) return false;
+
+  uint8_t crc_chk = crc8_xor(&len_rb, 1);
+  for (uint8_t i = 0; i < len_rb; i++) crc_chk ^= data_rb[i];
+  return crc_rb == crc_chk;
+}
+
+// Read a CRC-validated ASCII block. Writes out[] only on CRC success.
+static bool tgs_eeprom_read_crc_ascii_block(uint8_t block_off, uint8_t max_len, uint8_t crc_off,
+                                            char* out, uint8_t out_size) {
+  if (out_size == 0) return false;
+  uint8_t len = 0, crc = 0;
+  uint8_t data[32] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, block_off, &len, 1)) return false;
+  if (len > max_len) return false;
+  if (!at24_read(hal::I2CAddr::AT24, block_off + 1, data, max_len)) return false;
+  if (!at24_read(hal::I2CAddr::AT24, crc_off, &crc, 1)) return false;
+
+  uint8_t crc_chk = crc8_xor(&len, 1);
+  for (uint8_t i = 0; i < len; i++) crc_chk ^= data[i];
+  if (crc_chk != crc) return false;
+
+  uint8_t n = (len < out_size - 1) ? len : (uint8_t)(out_size - 1);
+  memcpy(out, data, n);
+  out[n] = '\0';
+  return true;
+}
+
+// Legacy/plain fallback: raw ASCII, stop at first NUL or non-printable.
+static bool tgs_eeprom_read_plain_ascii_block(uint8_t block_off, uint8_t max_len,
+                                              char* out, uint8_t out_size) {
+  if (out_size == 0) return false;
+  out[0] = '\0';
+  uint8_t data[32] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, block_off + 1, data, max_len)) return false;
+  uint8_t n = 0;
+  while (n < max_len && n < out_size - 1) {
+    const uint8_t c = data[n];
+    if (c == 0x00 || c == 0xFF) break;
+    if (c < 0x20 || c > 0x7E) break;
+    out[n++] = (char)c;
+  }
+  out[n] = '\0';
+  return true;
+}
+
+// Write TGS sensor ID, lot number and board ID to the EEPROM on TGS2611
+// channel ch (0-based). Called by serial_menu from the GUI.
+bool tgs2611_write_ids(uint8_t ch, uint16_t tgs_id, const char* lot, const char* board_id) {
+  if (ch >= N_TGS2611) return false;
+  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
+  if (!tgs_eeprom_write_id_on_selected(tgs_id)) return false;
+  if (lot && *lot) {
+    if (!tgs_eeprom_write_ascii_block(0x20, lot, 15)) return false;
+  }
+  if (board_id && *board_id) {
+    if (!tgs_eeprom_write_ascii_block(0x40, board_id, 31)) return false;
+  }
+  return true;
+}
+
+// Read back current TGS sensor ID (+CRC state), lot number and board ID.
+bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
+                      char *lot, uint8_t lot_size,
+                      char *board_id, uint8_t board_size) {
+  if (ch >= N_TGS2611) return false;
+  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
+  if (!tgs_read_sensor_id_on_selected(tgs_id, crc_ok)) return false;
+  if (lot && lot_size) {
+    if (!tgs_eeprom_read_crc_ascii_block(0x20, 15, 0x30, lot, lot_size)) {
+      tgs_eeprom_read_plain_ascii_block(0x20, 15, lot, lot_size);
+    }
+  }
+  if (board_id && board_size) {
+    // v2 (31 chars, CRC at 0x60), then v1 (15 chars, CRC at 0x50), then plain.
+    if (!tgs_eeprom_read_crc_ascii_block(0x40, 31, 0x60, board_id, board_size) &&
+        !tgs_eeprom_read_crc_ascii_block(0x40, 15, 0x50, board_id, board_size)) {
+      tgs_eeprom_read_plain_ascii_block(0x40, 31, board_id, board_size);
+    }
+  }
+  return true;
+}
+
+// Erase the identity blocks (sensor ID, lot #, board ID) back to blank 0xFF
+// on TGS2611 channel ch (0-based). Verified by read-back.
+bool tgs2611_clear_ids(uint8_t ch) {
+  if (ch >= N_TGS2611) return false;
+  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
+
+  uint8_t blank[33];
+  memset(blank, 0xFF, sizeof(blank));
+
+  // 0x00..0x02: sensor ID block (2-byte id + CRC)
+  if (!at24_write(hal::I2CAddr::AT24, 0x00, blank, 3)) return false;
+  // 0x20..0x30: lot block (len + 15 ASCII + CRC)
+  if (!at24_write(hal::I2CAddr::AT24, 0x20, blank, 17)) return false;
+  // 0x40..0x60: board ID block (len + 31 ASCII + CRC)
+  if (!at24_write(hal::I2CAddr::AT24, 0x40, blank, 33)) return false;
+
+  // Verify: read back the ID block; blank = 0xFFFF (matches writer's BLANK check)
+  uint8_t rb[3] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, 0x00, rb, 3)) return false;
+  if (rb[0] != 0xFF || rb[1] != 0xFF || rb[2] != 0xFF) return false;
+  // Verify lot + board lengths read back as 0xFF
+  if (!at24_read(hal::I2CAddr::AT24, 0x20, rb, 1)) return false;
+  if (rb[0] != 0xFF) return false;
+  if (!at24_read(hal::I2CAddr::AT24, 0x40, rb, 1)) return false;
+  return rb[0] == 0xFF;
 }
 
 // ---------------------------------------------------------------------------

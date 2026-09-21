@@ -135,6 +135,9 @@ class ProtoCmd:
     CALIB_MULTIPOINT = 0x23  # [ch: u8][r2ppm: 4-byte LE float][alpha: 4-byte LE float]
     LORA_INFO = 0x24
     LORA_GEN_KEYS = 0x25
+    EEPROM_WRITE = 0x26  # [ch: u8][tgs_id: u16 BE][lot_len: u8][lot][board_len: u8][board]
+    EEPROM_READ = 0x27   # payload [ch: u8]; reply "id,crc,lot,board" CSV
+    EEPROM_CLEAR = 0x28  # payload [ch: u8]; erase ID/lot/board blocks back to blank
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -157,6 +160,7 @@ class ProtoResp:
     RTC_RESPONSE = 0x21
     PUMP_STATUS = 0x22
     LORA_INFO = 0x23   # DevEUI,AppEUI,AppKey CSV string
+    EEPROM_IDS = 0x24  # TGS EEPROM IDs: "id,crc,lot,board" CSV string
     PROMPT_STRING = 0x30
     PROMPT_CONFIRM = 0x31
 
@@ -1008,6 +1012,70 @@ class SerialMenuClient:
                 return {"success": False, "message": f"Error code {code}"}
             return {"success": False, "message": f"Unexpected response: {resp}"}
 
+    def eeprom_read_ids(self, channel: int, timeout_s: float = 5.0) -> dict:
+        """Send EEPROM_READ (0x27): read current TGS ID, lot #, board ID from device."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.EEPROM_READ)
+            ser.write(bytes([channel & 0xFF]))
+            ser.flush()
+            # _read_response consumes interleaved LIVE_DATA/STATUS frames so
+            # streaming output can never be mistaken for the reply.
+            resp, _ = self._read_response(ProtoResp.EEPROM_IDS, timeout_s)
+            length = self._read_byte(timeout_s)
+            payload = self._read_exact(length, timeout_s).decode("utf-8", errors="replace")
+            parts = payload.split(",", 3)
+            return {
+                "success": True,
+                "tgs_id": parts[0] if len(parts) > 0 else "",
+                "crc": parts[1] if len(parts) > 1 else "",
+                "lot": parts[2] if len(parts) > 2 else "",
+                "board": parts[3] if len(parts) > 3 else "",
+            }
+
+    def eeprom_write_ids(self, channel: int, tgs_id: int, lot: str, board: str,
+                         timeout_s: float = 8.0) -> dict:
+        """Send EEPROM_WRITE (0x26): write TGS ID, lot #, board ID to sensor EEPROM."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        lot_b = lot.encode("ascii", errors="ignore")[:16]
+        board_b = board.encode("ascii", errors="ignore")[:32]
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.EEPROM_WRITE)
+            ser.write(bytes([channel & 0xFF]))
+            ser.write(bytes([(tgs_id >> 8) & 0xFF, tgs_id & 0xFF]))
+            ser.write(bytes([len(lot_b)]))
+            ser.write(lot_b)
+            ser.write(bytes([len(board_b)]))
+            ser.write(board_b)
+            ser.flush()
+            resp, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.OK:
+                return {"success": True}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
+
+    def eeprom_clear_ids(self, channel: int, timeout_s: float = 8.0) -> dict:
+        """Send EEPROM_CLEAR (0x28): erase TGS ID / lot # / board ID blocks."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.EEPROM_CLEAR)
+            ser.write(bytes([channel & 0xFF]))
+            ser.flush()
+            resp, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.OK:
+                return {"success": True}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
+
 
 # ============ GUI APPLICATION ============
 
@@ -1312,6 +1380,7 @@ class App(tk.Tk):
         )
         self.style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", "#111827")])
         self.style.map("Treeview.Heading", background=[("active", "#dce5f2")])
+        
     def _apply_tree_stripes(self, tree: ttk.Treeview, rows: list[tuple]) -> None:
         tree.tag_configure("even", background=self.c_surface)
         tree.tag_configure("odd", background=self.c_row_alt)
@@ -2127,6 +2196,75 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(12, 0)
         )
 
+        # ---- Advanced Settings (EEPROM Write) ----
+        self._eeprom_advanced_btn = ttk.Button(
+            _scroll_inner, text="\u2699  Advanced Settings",
+            command=self._toggle_eeprom_advanced, style="Accent.TButton",
+        )
+        self._eeprom_advanced_btn.pack(anchor="w", pady=(10, 2))
+
+        self._eeprom_frame = ttk.LabelFrame(_scroll_inner, text="EEPROM Write")
+        # packed/hidden by _toggle_eeprom_advanced
+
+        eep_grid = ttk.Frame(self._eeprom_frame)
+        eep_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
+        eep_grid.columnconfigure(1, weight=1)
+
+        ttk.Label(eep_grid, text="Channel index:").grid(row=0, column=0, sticky="w", pady=2)
+        self.eeprom_ch_var = tk.StringVar(value="1")
+        ttk.Entry(eep_grid, textvariable=self.eeprom_ch_var, width=5).grid(
+            row=0, column=1, sticky="w", padx=(8, 0))
+
+        ttk.Label(eep_grid, text="TGS ID:").grid(row=1, column=0, sticky="w", pady=2)
+        self.eeprom_tgs_id_var = tk.StringVar(value="")
+        ttk.Entry(eep_grid, textvariable=self.eeprom_tgs_id_var, width=12).grid(
+            row=1, column=1, sticky="w", padx=(8, 0))
+
+        ttk.Label(eep_grid, text="Lot number:").grid(row=2, column=0, sticky="w", pady=2)
+        self.eeprom_lot_var = tk.StringVar(value="")
+        ttk.Entry(eep_grid, textvariable=self.eeprom_lot_var, width=20).grid(
+            row=2, column=1, sticky="w", padx=(8, 0))
+
+        ttk.Label(eep_grid, text="Board ID:").grid(row=3, column=0, sticky="w", pady=2)
+        self.eeprom_board_var = tk.StringVar(value="")
+        ttk.Entry(eep_grid, textvariable=self.eeprom_board_var, width=34).grid(
+            row=3, column=1, sticky="w", padx=(8, 0))
+
+        eep_btn_row = ttk.Frame(self._eeprom_frame)
+        eep_btn_row.pack(fill=tk.X, padx=10, pady=(4, 8))
+
+        self.eeprom_write_btn = ttk.Button(
+            eep_btn_row, text="Write to EEPROM", command=self._eeprom_write_ids,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.eeprom_write_btn.pack(side=tk.LEFT)
+
+        self.eeprom_read_btn = ttk.Button(
+            eep_btn_row, text="Read EEPROM", command=self._eeprom_read_info,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.eeprom_read_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.eeprom_clear_btn = ttk.Button(
+            eep_btn_row, text="Clear EEPROM", command=self._eeprom_clear_clicked,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.eeprom_clear_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.eeprom_status_var = tk.StringVar(value="")
+        ttk.Label(eep_btn_row, textvariable=self.eeprom_status_var, foreground="#888888").pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
+
+    def _toggle_eeprom_advanced(self) -> None:
+        """Show/hide the EEPROM Write section."""
+        if self._eeprom_frame.winfo_ismapped() or getattr(self, "_eeprom_visible", False):
+            self._eeprom_frame.pack_forget()
+            self._eeprom_visible = False
+        else:
+            self._eeprom_frame.pack(fill=tk.X, pady=(0, 4), after=self._eeprom_advanced_btn)
+            self._eeprom_visible = True
+
     def _clear_wifi_form(self) -> None:
         """Clear all widgets from the form area."""
         for widget in self.wifi_form_frame.winfo_children():
@@ -2568,6 +2706,56 @@ class App(tk.Tk):
                     else:
                         self.lora_status_var.set("")
                 elif kind == "lora_done":
+                    self._update_wifi_controls()
+                elif kind == "eeprom_read_done":
+                    (result,) = payload
+                    self._eeprom_confirm_write(result)
+                elif kind == "eeprom_write_ok":
+                    ch_disp, tgs_id, lot, board = payload
+                    self.eeprom_status_var.set(
+                        f"ch{ch_disp}: ID={tgs_id}, Lot={lot or '\u2014'}, Board={board or '\u2014'} \u2713")
+                    self.status_var.set(f"TGS ch{ch_disp} EEPROM written")
+                elif kind == "eeprom_write_done":
+                    self._update_wifi_controls()
+                elif kind == "eeprom_info_ok":
+                    ch_disp, result = payload
+                    if result.get("success"):
+                        messagebox.showinfo(
+                            f"EEPROM \u2014 Channel {ch_disp}",
+                            f"Currently stored values:\n\n{self._eeprom_values_text(result)}")
+                        self.eeprom_status_var.set("Read OK")
+                    else:
+                        messagebox.showerror(
+                            "EEPROM Read Failed",
+                            f"Could not read channel {ch_disp}:\n"
+                            f"{result.get('message', 'read failed')}")
+                        self.eeprom_status_var.set("Read FAILED")
+                elif kind == "eeprom_read_btn_done":
+                    self._update_wifi_controls()
+                elif kind == "eeprom_clear_confirm":
+                    ch_disp, result = payload
+                    if result.get("success"):
+                        current = self._eeprom_values_text(result)
+                    else:
+                        current = ("(could not read current values \u2014 "
+                                   f"{result.get('message', 'read failed')})")
+                    if messagebox.askyesno(
+                            "Confirm EEPROM Clear",
+                            f"Channel {ch_disp} \u2014 values currently stored:\n\n"
+                            f"{current}\n\n"
+                            f"This will erase the TGS ID, Lot # and Board ID\n"
+                            f"from the sensor EEPROM. This cannot be undone.\n\n"
+                            f"Are you sure you want to continue?",
+                            icon="warning"):
+                        self._eeprom_do_clear(ch_disp)
+                    else:
+                        self.eeprom_status_var.set("Cancelled")
+                        self._update_wifi_controls()
+                elif kind == "eeprom_clear_ok":
+                    ch_disp = payload
+                    self.eeprom_status_var.set(f"ch{ch_disp}: EEPROM cleared \u2713")
+                    self.status_var.set(f"TGS ch{ch_disp} EEPROM erased")
+                elif kind == "eeprom_clear_btn_done":
                     self._update_wifi_controls()
                 elif kind == "pump_init":
                     pct = int(payload)
@@ -3548,6 +3736,10 @@ class App(tk.Tk):
         lora_st = tk.NORMAL if pump_ok else tk.DISABLED
         self.lora_refresh_btn.configure(state=lora_st)
         self.lora_gen_btn.configure(state=lora_st)
+        # EEPROM Write section
+        self.eeprom_write_btn.configure(state=pump_st)
+        self.eeprom_read_btn.configure(state=pump_st)
+        self.eeprom_clear_btn.configure(state=pump_st)
 
     def _pump_set(self) -> None:
         """Set pump to slider value."""
@@ -3573,6 +3765,9 @@ class App(tk.Tk):
         self.pump_full_btn.configure(state=tk.DISABLED)
         self.calib_r2ppm_btn.configure(state=tk.DISABLED)
         self._calib_add_btn.configure(state=tk.DISABLED)
+        self.eeprom_write_btn.configure(state=tk.DISABLED)
+        self.eeprom_read_btn.configure(state=tk.DISABLED)
+        self.eeprom_clear_btn.configure(state=tk.DISABLED)
 
         def worker() -> None:
             try:
@@ -3717,6 +3912,190 @@ class App(tk.Tk):
                 self.events.put(("error", exc))
             finally:
                 self.events.put(("calib_r2ppm_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _eeprom_write_ids(self) -> None:
+        """Write TGS ID / Lot # / Board ID to the sensor EEPROM after confirming.
+
+        First reads the currently stored values from the device and shows a
+        warning dialog with them; only writes if the user confirms.
+        """
+        # --- Parse & validate inputs ---
+        try:
+            ch_display = int(self.eeprom_ch_var.get())
+            if ch_display < 1:
+                raise ValueError
+            ch = ch_display - 1  # firmware is 0-based
+        except ValueError:
+            self.eeprom_status_var.set("Invalid channel (must be \u2265 1)")
+            return
+
+        tgs_id_str = self.eeprom_tgs_id_var.get().strip()
+        if not tgs_id_str or not tgs_id_str.isdigit() or not (0 <= int(tgs_id_str) <= 65535):
+            self.eeprom_status_var.set(
+                "TGS ID must be a number 0\u201365535 (calibration index). "
+                "Figaro's printed code (e.g. 462VV) goes in Lot #")
+            return
+        tgs_id = int(tgs_id_str)
+
+        lot = self.eeprom_lot_var.get().strip()
+        board = self.eeprom_board_var.get().strip()
+        if len(lot) > 15 or len(board) > 31:
+            self.eeprom_status_var.set("Lot \u2264 15 chars, Board ID \u2264 31 chars")
+            return
+        charset_ok = all(
+            c.isalnum() and c.isascii() or c in "-_"
+            for c in (lot + board)
+        )
+        if not charset_ok:
+            self.eeprom_status_var.set("Lot / Board ID: A-Z a-z 0-9 '_' '-' only")
+            return
+
+        self.eeprom_status_var.set("Reading current values\u2026")
+        self.eeprom_write_btn.configure(state=tk.DISABLED)
+
+        def read_worker() -> None:
+            try:
+                result = self.client.eeprom_read_ids(channel=ch, timeout_s=5.0)
+                self.events.put(("eeprom_read_done", (result,)))
+            except Exception as exc:
+                self.events.put(("error", exc))
+                self.events.put(("eeprom_read_done", ({"success": False, "message": str(exc)},)))
+
+        threading.Thread(target=read_worker, daemon=True).start()
+
+    def _eeprom_confirm_write(self, current: dict) -> None:
+        """Show warning with currently stored values; write on confirmation."""
+        try:
+            ch_display = int(self.eeprom_ch_var.get())
+            ch = ch_display - 1
+        except ValueError:
+            self._update_wifi_controls()
+            return
+        tgs_id = int(self.eeprom_tgs_id_var.get().strip())
+        lot = self.eeprom_lot_var.get().strip()
+        board = self.eeprom_board_var.get().strip()
+
+        if current.get("success"):
+            crc = current.get("crc", "?")
+            msg = (
+                f"Channel {ch_display} \u2014 currently stored values:\n"
+                f"  TGS ID:   {current.get('tgs_id', '?')} (CRC {crc})\n"
+                f"  Lot #:    {current.get('lot') or '(empty)'}\n"
+                f"  Board ID: {current.get('board') or '(empty)'}\n\n"
+                f"This will be overwritten with:\n"
+                f"  TGS ID:   {tgs_id}\n"
+                f"  Lot #:    {lot or '(empty)'}\n"
+                f"  Board ID: {board or '(empty)'}\n\n"
+                f"Are you sure you want to continue?"
+            )
+        else:
+            msg = (
+                f"Could not read current values "
+                f"({current.get('message', 'read failed')}).\n\n"
+                f"Write TGS ID={tgs_id}, Lot#={lot or '(empty)'}, "
+                f"Board ID={board or '(empty)'} to channel {ch_display} anyway?"
+            )
+
+        if not messagebox.askyesno("Confirm EEPROM Write", msg, icon="warning"):
+            self.eeprom_status_var.set("Cancelled")
+            self._update_wifi_controls()
+            return
+
+        self.eeprom_status_var.set("Writing\u2026")
+
+        def write_worker() -> None:
+            try:
+                result = self.client.eeprom_write_ids(
+                    channel=ch, tgs_id=tgs_id, lot=lot, board=board, timeout_s=8.0)
+                if result.get("success"):
+                    self.events.put(("eeprom_write_ok", (ch_display, tgs_id, lot, board)))
+                else:
+                    self.events.put(("error", result.get("message", "EEPROM write failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("eeprom_write_done", None))
+
+        threading.Thread(target=write_worker, daemon=True).start()
+
+    def _eeprom_values_text(self, current: dict) -> str:
+        """Format stored EEPROM values (from eeprom_read_ids) for display."""
+        crc = current.get("crc", "?")
+        return (
+            f"  TGS ID:   {current.get('tgs_id', '?')}"
+            f"{' (BLANK)' if current.get('tgs_id') == '65535' else ''}"
+            f"  [CRC {crc}]\n"
+            f"  Lot #:    {current.get('lot') or '(empty)'}\n"
+            f"  Board ID: {current.get('board') or '(empty)'}"
+        )
+
+    def _eeprom_read_info(self) -> None:
+        """Read the stored EEPROM identity values and show them in a popup."""
+        try:
+            ch_display = int(self.eeprom_ch_var.get())
+            if ch_display < 1:
+                raise ValueError
+            ch = ch_display - 1
+        except ValueError:
+            self.eeprom_status_var.set("Invalid channel (must be \u2265 1)")
+            return
+
+        self.eeprom_status_var.set("Reading\u2026")
+        self.eeprom_read_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                result = self.client.eeprom_read_ids(channel=ch, timeout_s=5.0)
+                self.events.put(("eeprom_info_ok", (ch_display, result)))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("eeprom_read_btn_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _eeprom_clear_clicked(self) -> None:
+        """Read current values, warn, and erase the EEPROM identity blocks."""
+        try:
+            ch_display = int(self.eeprom_ch_var.get())
+            if ch_display < 1:
+                raise ValueError
+            ch = ch_display - 1
+        except ValueError:
+            self.eeprom_status_var.set("Invalid channel (must be \u2265 1)")
+            return
+
+        self.eeprom_status_var.set("Reading\u2026")
+        self.eeprom_clear_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                result = self.client.eeprom_read_ids(channel=ch, timeout_s=5.0)
+                self.events.put(("eeprom_clear_confirm", (ch_display, result)))
+            except Exception as exc:
+                self.events.put(("error", exc))
+                self.events.put(("eeprom_clear_btn_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _eeprom_do_clear(self, ch_display: int) -> None:
+        """Erase identity blocks on ch_display in a background thread."""
+        self.eeprom_status_var.set("Erasing\u2026")
+
+        def worker() -> None:
+            try:
+                result = self.client.eeprom_clear_ids(
+                    channel=ch_display - 1, timeout_s=8.0)
+                if result.get("success"):
+                    self.events.put(("eeprom_clear_ok", ch_display))
+                else:
+                    self.events.put(("error", result.get("message", "EEPROM clear failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("eeprom_clear_btn_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
 

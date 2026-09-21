@@ -26,6 +26,9 @@ enum class Cmd : uint8_t {
   CALIB_MULTIPOINT = 0x23, // Calibrate TGS2611: [ch: u8][r2ppm: 4-byte LE float][alpha: 4-byte LE float]
   LORA_INFO       = 0x24,  // Read LoRa DevEUI + stored AppEUI/AppKey
   LORA_GEN_KEYS   = 0x25,  // Generate new AppEUI + AppKey, store in NVS, program module
+  EEPROM_WRITE    = 0x26,  // Write TGS EEPROM IDs: [ch: u8][tgs_id: u16 BE][lot_len: u8][lot][board_len: u8][board]
+  EEPROM_READ     = 0x27,  // Read TGS EEPROM IDs: payload [ch: u8]; reply CSV "id,crc,lot,board"
+  EEPROM_CLEAR    = 0x28,  // Erase TGS EEPROM IDs (ID/lot/board back to blank 0xFF): payload [ch: u8]
   LOG_MENU        = 0x1B,  // Enter log export menu
   LOG_LIST        = 0x1C,  // List log files
   LOG_GET         = 0x1D,  // Get log file (followed by uint8_t index)
@@ -52,6 +55,7 @@ enum class RespType : uint8_t {
   RTC_RESPONSE    = 0x21,  // RTC time response
   PUMP_STATUS     = 0x22,  // Pump speed response (followed by uint8_t percent)
   LORA_INFO       = 0x23,  // LoRa identifiers: "DevEUI,AppEUI,AppKey" CSV string
+  EEPROM_IDS      = 0x24,  // TGS EEPROM IDs: "id,crc,lot,board" CSV string
   
   // Prompts
   PROMPT_STRING   = 0x30,  // Request string input (followed by length + prompt_text)
