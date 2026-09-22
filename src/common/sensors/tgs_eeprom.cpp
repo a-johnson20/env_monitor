@@ -57,3 +57,29 @@ bool tgs_write_alpha_on_selected(float alpha) {
   payload[4] = crc8_xor(payload, 4);
   return at24_write(hal::I2CAddr::AT24, 0x08, payload, 5);
 }
+
+// Calibration date/time stored at EEPROM 0x0D..0x11 (Unix epoch, seconds).
+//   0x0D..0x10 — u32 little-endian epoch
+//   0x11       — XOR CRC of bytes 0x0D..0x10
+bool tgs_read_calib_time_on_selected(uint32_t &out_epoch, bool &crc_ok) {
+  uint8_t buf[5] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, 0x0D, buf, 5)) return false;
+  crc_ok = (crc8_xor(buf, 4) == buf[4]);
+  out_epoch = uint32_t(buf[0]) | (uint32_t(buf[1]) << 8) |
+              (uint32_t(buf[2]) << 16) | (uint32_t(buf[3]) << 24);
+  return true;
+}
+
+bool tgs_write_calib_time_on_selected(uint32_t epoch) {
+  uint8_t payload[5] = {
+    uint8_t(epoch & 0xFF), uint8_t((epoch >> 8) & 0xFF),
+    uint8_t((epoch >> 16) & 0xFF), uint8_t((epoch >> 24) & 0xFF), 0
+  };
+  payload[4] = crc8_xor(payload, 4);
+  if (!at24_write(hal::I2CAddr::AT24, 0x0D, payload, 5)) return false;
+  // verify (read-back)
+  uint32_t rb_epoch = 0;
+  bool rb_crc_ok = false;
+  if (!tgs_read_calib_time_on_selected(rb_epoch, rb_crc_ok)) return false;
+  return rb_crc_ok && rb_epoch == epoch;
+}

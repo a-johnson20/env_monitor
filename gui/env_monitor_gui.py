@@ -70,7 +70,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.0.4"
+GUI_VERSION = "1.1.0"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -237,6 +237,7 @@ class ProtoCmd:
     EEPROM_READ = 0x27   # payload [ch: u8]; reply "id,crc,lot,board" CSV
     EEPROM_CLEAR = 0x28  # payload [ch: u8]; erase ID/lot/board blocks back to blank
     FW_VERSION = 0x29    # no payload; reply FW_VERSION string
+    CALIB_TIMESTAMP = 0x2A  # [ch: u8][unix time: 4-byte LE u32]; stores calib date in sensor EEPROM
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -1065,6 +1066,27 @@ class SerialMenuClient:
                 return {"success": False, "message": f"Error code {code}"}
             return {"success": False, "message": f"Unexpected response: {resp}"}
 
+    def calib_timestamp(self, channel: int, epoch: int, timeout_s: float = 8.0) -> dict:
+        """Send CALIB_TIMESTAMP (0x2A): store the calibration unix time (UTC) in sensor EEPROM.
+
+        Sent automatically right after a successful calib_multipoint so the
+        calibration date can be shown on later EEPROM reads.
+        """
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.CALIB_TIMESTAMP)
+            ser.write(bytes([channel & 0xFF]))
+            ser.write(struct.pack('<I', epoch & 0xFFFFFFFF))
+            ser.flush()
+            resp, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.OK:
+                return {"success": True}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
+
     def lora_info(self, timeout_s: float = 10.0) -> dict:
         """Read DevEUI from module + AppEUI/AppKey from device NVS."""
         if not self.is_open:
@@ -1114,7 +1136,8 @@ class SerialMenuClient:
             return {"success": False, "message": f"Unexpected response: {resp}"}
 
     def eeprom_read_ids(self, channel: int, timeout_s: float = 5.0) -> dict:
-        """Send EEPROM_READ (0x27): read current TGS ID, lot #, board ID from device."""
+        """Send EEPROM_READ (0x27): read current TGS ID, lot #, board ID and last
+        calibration date/time from device."""
         if not self.is_open:
             raise RuntimeError("Serial port not open")
         with self.lock:
@@ -1128,13 +1151,15 @@ class SerialMenuClient:
             resp, _ = self._read_response(ProtoResp.EEPROM_IDS, timeout_s)
             length = self._read_byte(timeout_s)
             payload = self._read_exact(length, timeout_s).decode("utf-8", errors="replace")
-            parts = payload.split(",", 3)
+            parts = payload.split(",", 4)
             return {
                 "success": True,
                 "tgs_id": parts[0] if len(parts) > 0 else "",
                 "crc": parts[1] if len(parts) > 1 else "",
                 "lot": parts[2] if len(parts) > 2 else "",
                 "board": parts[3] if len(parts) > 3 else "",
+                # Decimal unix time of last calibration; "" = never, "ERR" = bad CRC
+                "calib_time": parts[4] if len(parts) > 4 else "",
             }
 
     def eeprom_write_ids(self, channel: int, tgs_id: int, lot: str, board: str,
@@ -2881,9 +2906,10 @@ class App(tk.Tk):
                 elif kind == "pump_done":
                     self._update_wifi_controls()
                 elif kind == "calib_r2ppm_ok":
-                    ch_disp, r2ppm, alpha = payload
+                    ch_disp, r2ppm, alpha, ts_stored = payload
+                    note = "" if ts_stored else "  (calib time not stored)"
                     self.calib_r2ppm_status_var.set(
-                        f"ch{ch_disp}: R\u2082ppm={r2ppm:.4f} k\u03a9, \u03b1={alpha:.4f} \u2713")
+                        f"ch{ch_disp}: R\u2082ppm={r2ppm:.4f} k\u03a9, \u03b1={alpha:.4f} \u2713{note}")
                     self.status_var.set(f"TGS2611 ch{ch_disp} calibrated")
                 elif kind == "calib_r2ppm_done":
                     self._update_wifi_controls()
@@ -4128,7 +4154,18 @@ class App(tk.Tk):
                 result = self.client.calib_multipoint(
                     channel=ch, r2ppm_kohm=r2ppm_final, alpha=alpha_final, timeout_s=5.0)
                 if result.get("success"):
-                    self.events.put(("calib_r2ppm_ok", (ch_display, r2ppm_final, alpha_final)))
+                    # Automatically timestamp the calibration (unix time, UTC)
+                    # and store it in the sensor EEPROM. Non-fatal on older
+                    # firmware without the CALIB_TIMESTAMP command.
+                    ts_stored = False
+                    try:
+                        ts_result = self.client.calib_timestamp(
+                            channel=ch, epoch=int(time.time()), timeout_s=8.0)
+                        ts_stored = bool(ts_result.get("success"))
+                    except Exception:
+                        ts_stored = False
+                    self.events.put(
+                        ("calib_r2ppm_ok", (ch_display, r2ppm_final, alpha_final, ts_stored)))
                 else:
                     self.events.put(("error", result.get("message", "Calibration failed")))
             except Exception as exc:
@@ -4206,7 +4243,8 @@ class App(tk.Tk):
                 f"Channel {ch_display} \u2014 currently stored values:\n"
                 f"  TGS ID:   {current.get('tgs_id', '?')} (CRC {crc})\n"
                 f"  Lot #:    {current.get('lot') or '(empty)'}\n"
-                f"  Board ID: {current.get('board') or '(empty)'}\n\n"
+                f"  Board ID: {current.get('board') or '(empty)'}\n"
+                f"  Calibrated: {self._format_calib_time(current.get('calib_time', ''))}\n\n"
                 f"This will be overwritten with:\n"
                 f"  TGS ID:   {tgs_id}\n"
                 f"  Lot #:    {lot or '(empty)'}\n"
@@ -4243,6 +4281,19 @@ class App(tk.Tk):
 
         threading.Thread(target=write_worker, daemon=True).start()
 
+    @staticmethod
+    def _format_calib_time(raw: str) -> str:
+        """Format the EEPROM calib-time field (decimal unix time) for display."""
+        s = (raw or "").strip()
+        if not s:
+            return "(never)"
+        if s == "ERR":
+            return "(invalid)"
+        try:
+            return datetime.fromtimestamp(int(s)).strftime("%Y-%m-%d %H:%M")
+        except (ValueError, OverflowError, OSError):
+            return s
+
     def _eeprom_values_text(self, current: dict) -> str:
         """Format stored EEPROM values (from eeprom_read_ids) for display."""
         crc = current.get("crc", "?")
@@ -4251,7 +4302,8 @@ class App(tk.Tk):
             f"{' (BLANK)' if current.get('tgs_id') == '65535' else ''}"
             f"  [CRC {crc}]\n"
             f"  Lot #:    {current.get('lot') or '(empty)'}\n"
-            f"  Board ID: {current.get('board') or '(empty)'}"
+            f"  Board ID: {current.get('board') or '(empty)'}\n"
+            f"  Calibrated: {self._format_calib_time(current.get('calib_time', ''))}"
         )
 
     def _eeprom_read_info(self) -> None:

@@ -24,6 +24,7 @@ enum class Cmd : uint8_t {
   PUMP_SET        = 0x21,  // Set pump speed (followed by uint8_t percent)
   PUMP_GET        = 0x22,  // Get current pump speed
   CALIB_MULTIPOINT = 0x23, // Calibrate TGS2611: [ch: u8][r2ppm: 4-byte LE float][alpha: 4-byte LE float]
+  CALIB_TIMESTAMP  = 0x2A, // Store calibration date/time in TGS EEPROM: [ch: u8][unix time: 4-byte LE u32]
   LORA_INFO       = 0x24,  // Read LoRa DevEUI + stored AppEUI/AppKey
   LORA_GEN_KEYS   = 0x25,  // Generate new AppEUI + AppKey, store in NVS, program module
   EEPROM_WRITE    = 0x26,  // Write TGS EEPROM IDs: [ch: u8][tgs_id: u16 BE][lot_len: u8][lot][board_len: u8][board]

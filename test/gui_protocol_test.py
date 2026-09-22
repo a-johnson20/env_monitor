@@ -10,8 +10,10 @@ Covers the WiFi-connect failure modes reported in the field:
     (device busy frames / late replies misparsed as a disconnect report)
 """
 
+import struct
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "gui"))
@@ -202,6 +204,56 @@ def test_fw_version_error_on_old_firmware():
     r = c.fw_version(timeout_s=2.0)
     expect(r["success"] is False, f"expected failure, got {r}")
     expect("Error code 1" in r["message"], f"message mismatch: {r}")
+
+
+def test_calib_timestamp_ok():
+    """CALIB_TIMESTAMP (0x2A) reply OK → success; payload is [ch][u32 LE epoch]."""
+    c = make_client(on_reset=bytes([0x00]))
+    r = c.calib_timestamp(channel=1, epoch=1700000000, timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(c.ser.written.startswith(bytes([0x2A, 0x01])), f"cmd/ch bytes wrong: {c.ser.written!r}")
+    expect(struct.pack("<I", 1700000000) in c.ser.written, "epoch bytes wrong")
+
+
+def test_calib_timestamp_error_on_old_firmware():
+    """Older firmware answers ERROR/1 (unknown command) — reported, not raised."""
+    c = make_client(on_reset=bytes([0x01, 0x01]))
+    r = c.calib_timestamp(channel=0, epoch=1700000000, timeout_s=2.0)
+    expect(r["success"] is False, f"expected failure, got {r}")
+    expect("Error code 1" in r["message"], f"message mismatch: {r}")
+
+
+def test_eeprom_read_parses_calib_time_field():
+    """EEPROM_IDS CSV gains a 5th field: decimal unix time of last calibration."""
+    payload = b"123,OK,462VV,BRD-01,1700000000"
+    data = bytes([0x24, len(payload)]) + payload
+    c = make_client(on_reset=data)
+    r = c.eeprom_read_ids(channel=0, timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(r["tgs_id"] == "123" and r["lot"] == "462VV" and r["board"] == "BRD-01",
+           f"identity fields wrong: {r}")
+    expect(r["calib_time"] == "1700000000", f"calib_time missing: {r}")
+
+
+def test_eeprom_read_calib_time_blank_and_error():
+    """Empty 5th field = never calibrated; 'ERR' = timestamp CRC bad — both parse."""
+    for raw, expected in ((b"123,OK,462VV,BRD-01,", ""),
+                          (b"123,OK,462VV,BRD-01,ERR", "ERR")):
+        data = bytes([0x24, len(raw)]) + raw
+        c = make_client(on_reset=data)
+        r = c.eeprom_read_ids(channel=0, timeout_s=2.0)
+        expect(r["success"] is True and r["calib_time"] == expected, f"got {r}")
+
+
+def test_format_calib_time_variants():
+    """_format_calib_time maps '' → (never), 'ERR' → (invalid), unix → local time."""
+    f = gui.App._format_calib_time
+    expect(f("") == "(never)", f"empty mapping wrong: {f('')!r}")
+    expect(f("ERR") == "(invalid)", f"ERR mapping wrong: {f('ERR')!r}")
+    out = f("1700000000")
+    expect(out == datetime.fromtimestamp(1700000000).strftime("%Y-%m-%d %H:%M"),
+           f"unix mapping wrong: {out!r}")
+    expect(f("junk") == "junk", f"unparsable should pass through: {f('junk')!r}")
 
 
 def test_parse_version_variants():

@@ -24,8 +24,12 @@ extern bool tgs2611_save_calib_params(uint8_t ch, float r2ppm_kohm, float alpha)
 extern bool tgs2611_write_ids(uint8_t ch, uint16_t tgs_id, const char* lot, const char* board_id);
 extern bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
                              char *lot, uint8_t lot_size,
-                             char *board_id, uint8_t board_size);
+                             char *board_id, uint8_t board_size,
+                             uint32_t &calib_epoch, bool &calib_ok);
 extern bool tgs2611_clear_ids(uint8_t ch);
+
+// External TGS EEPROM calibration-timestamp write from main.cpp (GUI calibration).
+extern bool tgs2611_write_calib_time(uint8_t ch, uint32_t epoch);
 
 // External firmware version string from main.cpp (GUI "About" section).
 extern void firmware_version(char* out, size_t out_size);
@@ -438,9 +442,11 @@ void poll() {
       proto::write_response(proto::RespType::OK);
       return;
     } else if (cmd == proto::Cmd::EEPROM_READ || cmd == proto::Cmd::EEPROM_WRITE ||
-               cmd == proto::Cmd::EEPROM_CLEAR || cmd == proto::Cmd::FW_VERSION) {
-      // Identity programming and version queries are safe mid-stream: they only
-      // touch the sensor EEPROM / NVS, and the handler below sets g_busy so the
+               cmd == proto::Cmd::EEPROM_CLEAR || cmd == proto::Cmd::CALIB_TIMESTAMP ||
+               cmd == proto::Cmd::FW_VERSION) {
+      // Identity programming, calibration timestamp and version queries are
+      // safe mid-stream: they only touch the sensor EEPROM / NVS, and the
+      // handler below sets g_busy so the
       // sensor loop cannot interleave a LIVE_DATA frame with the reply.
       eeprom_during_live = true;  // fall through to normal handler below
     } else {
@@ -570,6 +576,26 @@ void poll() {
       break;
     }
 
+    case proto::Cmd::CALIB_TIMESTAMP: {
+      // Payload: [ch: u8][unix time: 4-byte LE u32]. Sent automatically by the
+      // GUI right after a successful CALIB_MULTIPOINT; stored in the sensor
+      // EEPROM so the calibration date can be shown on EEPROM reads.
+      uint8_t ch;
+      uint8_t ts_bytes[4];
+      if (!read_byte_timeout(ch) || !read_bytes_timeout(ts_bytes, 4)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      const uint32_t epoch = uint32_t(ts_bytes[0]) | (uint32_t(ts_bytes[1]) << 8) |
+                             (uint32_t(ts_bytes[2]) << 16) | (uint32_t(ts_bytes[3]) << 24);
+      if (tgs2611_write_calib_time(ch, epoch)) {
+        proto::write_response(proto::RespType::OK);
+      } else {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+      }
+      break;
+    }
+
     case proto::Cmd::EEPROM_WRITE: {
       // Payload: [ch: u8][tgs_id: u16 BE][lot_len: u8][lot bytes][board_len: u8][board bytes]
       uint8_t ch, id_hi, id_lo, lot_len, board_len;
@@ -611,7 +637,9 @@ void poll() {
     }
 
     case proto::Cmd::EEPROM_READ: {
-      // Payload: [ch: u8]; reply LORA_INFO-style message: "id,crc,lot,board" CSV
+      // Payload: [ch: u8]; reply LORA_INFO-style message:
+      // "id,crc,lot,board,calib" CSV. calib = decimal unix time of the last
+      // calibration, empty when unset/blank, "ERR" when its CRC is bad.
       uint8_t ch;
       if (!read_byte_timeout(ch)) {
         proto::write_error(proto::ErrorCode::TIMEOUT);
@@ -619,11 +647,22 @@ void poll() {
       }
       uint16_t tgs_id = 0; bool crc_ok = false;
       char lot[17] = {0}, board[33] = {0};
-      if (!tgs2611_read_ids(ch, tgs_id, crc_ok, lot, sizeof(lot), board, sizeof(board))) {
+      uint32_t calib_epoch = 0; bool calib_ok = false;
+      if (!tgs2611_read_ids(ch, tgs_id, crc_ok, lot, sizeof(lot), board, sizeof(board),
+                            calib_epoch, calib_ok)) {
         proto::write_error(proto::ErrorCode::INVALID_CMD);
         break;
       }
-      String payload = String(tgs_id) + "," + (crc_ok ? "OK" : "BAD") + "," + lot + "," + board;
+      char calib_str[12] = "";
+      if (calib_ok) {
+        if (calib_epoch != 0 && calib_epoch != 0xFFFFFFFFu) {
+          snprintf(calib_str, sizeof(calib_str), "%lu", (unsigned long)calib_epoch);
+        }
+      } else {
+        strlcpy(calib_str, "ERR", sizeof(calib_str));
+      }
+      String payload = String(tgs_id) + "," + (crc_ok ? "OK" : "BAD") + "," + lot + "," +
+                       board + "," + calib_str;
       proto::write_message(static_cast<uint8_t>(proto::RespType::EEPROM_IDS), payload);
       break;
     }

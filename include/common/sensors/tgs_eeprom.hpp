@@ -24,3 +24,14 @@ bool tgs_read_alpha_on_selected(float &out_alpha, bool &crc_ok);
 // Write the Shah alpha exponent to EEPROM addresses 0x08..0x0C.
 // Returns true if the I2C write succeeded.
 bool tgs_write_alpha_on_selected(float alpha);
+
+// Read the calibration date/time (Unix epoch, seconds UTC) stored at EEPROM
+// addresses 0x0D..0x11. Layout: [u32 LE epoch][XOR CRC of the 4 epoch bytes].
+// Returns true if the I2C read succeeded (independent of CRC); sets crc_ok.
+bool tgs_read_calib_time_on_selected(uint32_t &out_epoch, bool &crc_ok);
+
+// Write the calibration date/time (Unix epoch, seconds UTC) to EEPROM
+// addresses 0x0D..0x11. The GUI sends this automatically right after a
+// successful calibration upload. Returns true if the I2C write succeeded
+// (verified by read-back).
+bool tgs_write_calib_time_on_selected(uint32_t epoch);

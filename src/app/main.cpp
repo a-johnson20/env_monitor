@@ -39,7 +39,7 @@
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
 // Keep this in sync with GUI_VERSION in gui/env_monitor_gui.py — the two are
 // compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.0.0"
+#define FIRMWARE_VERSION "1.1.0"
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -584,11 +584,23 @@ bool tgs2611_save_calib_params(uint8_t ch, float r2ppm_kohm, float alpha) {
   return true;
 }
 
+// Store the calibration date/time (Unix epoch, seconds UTC) into the sensor
+// EEPROM on TGS2611 channel ch (0-based). The GUI sends this automatically
+// right after a successful CALIB_MULTIPOINT. Called by serial_menu.
+bool tgs2611_write_calib_time(uint8_t ch, uint32_t epoch) {
+  if (ch >= N_TGS2611) return false;
+  if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
+  return tgs_write_calib_time_on_selected(epoch);
+}
+
 // ---------------------------------------------------------------------------
 // TGS EEPROM identity write/read (moved from writer firmware)
 // ---------------------------------------------------------------------------
 // EEPROM layout:
 //   0x00..0x02: TGS sensor ID  — [u16 BE id][XOR CRC of the 2 id bytes]
+//   0x03..0x07: R2ppm          — [f32 LE][XOR CRC] (see tgs_eeprom.cpp)
+//   0x08..0x0C: Shah alpha     — [f32 LE][XOR CRC] (see tgs_eeprom.cpp)
+//   0x0D..0x11: Calib unix time — [u32 LE epoch][XOR CRC of the 4 epoch bytes]
 //   0x20..0x30: Lot #          — [len u8][15 ASCII zero-padded][XOR CRC of len+payload]
 //   0x40..0x60: Board ID       — [len u8][31 ASCII zero-padded][XOR CRC at 0x60]
 //                                (v1 blocks: 15 ASCII, CRC at 0x50 — still read back)
@@ -695,10 +707,12 @@ bool tgs2611_write_ids(uint8_t ch, uint16_t tgs_id, const char* lot, const char*
   return true;
 }
 
-// Read back current TGS sensor ID (+CRC state), lot number and board ID.
+// Read back current TGS sensor ID (+CRC state), lot number, board ID and the
+// stored calibration unix time (0 / crc_ok=false if unset or unreadable).
 bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
                       char *lot, uint8_t lot_size,
-                      char *board_id, uint8_t board_size) {
+                      char *board_id, uint8_t board_size,
+                      uint32_t &calib_epoch, bool &calib_ok) {
   if (ch >= N_TGS2611) return false;
   if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
   if (!tgs_read_sensor_id_on_selected(tgs_id, crc_ok)) return false;
@@ -714,11 +728,15 @@ bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
       tgs_eeprom_read_plain_ascii_block(0x40, 31, board_id, board_size);
     }
   }
+  // Calibration unix time (blank / CRC-bad leaves calib_ok=false).
+  calib_epoch = 0;
+  calib_ok = false;
+  tgs_read_calib_time_on_selected(calib_epoch, calib_ok);
   return true;
 }
 
-// Erase the identity blocks (sensor ID, lot #, board ID) back to blank 0xFF
-// on TGS2611 channel ch (0-based). Verified by read-back.
+// Erase the identity blocks (sensor ID, calib unix time, lot #, board ID)
+// back to blank 0xFF on TGS2611 channel ch (0-based). Verified by read-back.
 bool tgs2611_clear_ids(uint8_t ch) {
   if (ch >= N_TGS2611) return false;
   if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
@@ -728,6 +746,8 @@ bool tgs2611_clear_ids(uint8_t ch) {
 
   // 0x00..0x02: sensor ID block (2-byte id + CRC)
   if (!at24_write(hal::I2CAddr::AT24, 0x00, blank, 3)) return false;
+  // 0x0D..0x11: calibration unix time block (4-byte epoch + CRC)
+  if (!at24_write(hal::I2CAddr::AT24, 0x0D, blank, 5)) return false;
   // 0x20..0x30: lot block (len + 15 ASCII + CRC)
   if (!at24_write(hal::I2CAddr::AT24, 0x20, blank, 17)) return false;
   // 0x40..0x60: board ID block (len + 31 ASCII + CRC)
@@ -741,7 +761,14 @@ bool tgs2611_clear_ids(uint8_t ch) {
   if (!at24_read(hal::I2CAddr::AT24, 0x20, rb, 1)) return false;
   if (rb[0] != 0xFF) return false;
   if (!at24_read(hal::I2CAddr::AT24, 0x40, rb, 1)) return false;
-  return rb[0] == 0xFF;
+  if (rb[0] != 0xFF) return false;
+  // Verify the calibration unix time block is blank too
+  uint8_t ts_rb[5] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, 0x0D, ts_rb, 5)) return false;
+  for (uint8_t i = 0; i < 5; ++i) {
+    if (ts_rb[i] != 0xFF) return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------

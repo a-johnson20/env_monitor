@@ -34,9 +34,11 @@ All commands are single-byte opcodes:
 0x1E - RTC_TIME        (No payload)
 0x1F - BACK            (No payload)
 0x26 - EEPROM_WRITE    (Channel + TGS ID (u16 BE) + length-prefixed lot + length-prefixed board ID)
-0x27 - EEPROM_READ     (Channel as single byte; replies EEPROM_IDS CSV "id,crc,lot,board")
+0x27 - EEPROM_READ     (Channel as single byte; replies EEPROM_IDS CSV "id,crc,lot,board,calib")
 0x28 - EEPROM_CLEAR    (Channel as single byte; erases ID/lot/board blocks back to blank 0xFF)
 0x29 - FW_VERSION      (No payload; replies FW_VERSION string, e.g. "1.0.0")
+0x2A - CALIB_TIMESTAMP (Channel + Unix time as u32 LE; stores the calibration
+                        date/time in the sensor EEPROM)
 ```
 
 #### Response Types (Device → Client)
@@ -57,7 +59,9 @@ All commands are single-byte opcodes:
 0x20 - LIVE_DATA       (CSV data - raw sensor readings)
 0x21 - RTC_RESPONSE    (Time string with length prefix)
 0x23 - LORA_INFO       (DevEUI,AppEUI,AppKey CSV string with length prefix)
-0x24 - EEPROM_IDS      (TGS identity CSV "id,crc,lot,board" with length prefix)
+0x24 - EEPROM_IDS      (TGS identity CSV "id,crc,lot,board,calib" with length prefix; calib is
+                        the decimal Unix time of the last calibration, empty if never
+                        calibrated, "ERR" if its CRC is bad)
 0x25 - FW_VERSION      (Firmware version string "MAJOR.MINOR.PATCH" with length prefix)
 ```
 
@@ -100,6 +104,27 @@ Some commands require multiple values. They're sent sequentially:
 2. SSID (length-prefixed string)
 3. Username (length-prefixed string)
 4. Password (length-prefixed string)
+
+## TGS Sensor EEPROM Map (calibration timestamp)
+
+The GUI stamps every successful TGS2611 calibration with the current time and
+stores it in the sensor's own EEPROM (AT24C02-compatible, on the same mux
+channel), so the date travels with the sensor, not with the board:
+
+| Addresses  | Contents                                                        |
+|------------|-----------------------------------------------------------------|
+| 0x00..0x02 | TGS sensor ID — [u16 BE id][XOR CRC]                            |
+| 0x03..0x07 | R2ppm — [f32 LE][XOR CRC]                                       |
+| 0x08..0x0C | Shah alpha — [f32 LE][XOR CRC]                                  |
+| 0x0D..0x11 | Calibration unix time (UTC) — [u32 LE epoch][XOR CRC]           |
+| 0x20..0x30 | Lot # — [len u8][15 ASCII zero-padded][XOR CRC of len+payload]  |
+| 0x40..0x60 | Board ID — [len u8][31 ASCII zero-padded][XOR CRC at 0x60]      |
+
+Write path: after `0x23` (CALIB_MULTIPOINT) returns OK, the GUI automatically
+sends `0x2A` (CALIB_TIMESTAMP) with `[ch: u8][unix: u32 LE]`. Older firmware
+that does not know `0x2A` replies `ERROR/1`, which the GUI reports as
+"(calib time not stored)" without failing the calibration itself. `0x28`
+(EEPROM_CLEAR) also erases the timestamp block back to blank 0xFF.
 
 ## Files Modified
 
