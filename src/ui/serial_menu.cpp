@@ -27,6 +27,9 @@ extern bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
                              char *board_id, uint8_t board_size);
 extern bool tgs2611_clear_ids(uint8_t ch);
 
+// External firmware version string from main.cpp (GUI "About" section).
+extern void firmware_version(char* out, size_t out_size);
+
 namespace ui {
 
 static bool g_live_stream = false;
@@ -434,7 +437,11 @@ void poll() {
       g_live_stream = false;
       proto::write_response(proto::RespType::OK);
       return;
-    } else if (cmd == proto::Cmd::EEPROM_READ || cmd == proto::Cmd::EEPROM_WRITE) {
+    } else if (cmd == proto::Cmd::EEPROM_READ || cmd == proto::Cmd::EEPROM_WRITE ||
+               cmd == proto::Cmd::EEPROM_CLEAR || cmd == proto::Cmd::FW_VERSION) {
+      // Identity programming and version queries are safe mid-stream: they only
+      // touch the sensor EEPROM / NVS, and the handler below sets g_busy so the
+      // sensor loop cannot interleave a LIVE_DATA frame with the reply.
       eeprom_during_live = true;  // fall through to normal handler below
     } else {
       // Ignore other commands during live streaming
@@ -660,6 +667,17 @@ void poll() {
       lora::save_keys(app_eui, app_key);
       String payload = dev_eui + "," + app_eui + "," + app_key;
       proto::write_message(static_cast<uint8_t>(proto::RespType::LORA_INFO), payload);
+      break;
+    }
+
+    case proto::Cmd::FW_VERSION: {
+      // The firmware version lives on the ESP32 (NVS, seeded from the
+      // compile-time constant) so the GUI can compare it against its own
+      // version on connect. Payload: length-prefixed version string.
+      char ver[32] = {0};
+      firmware_version(ver, sizeof(ver));
+      proto::write_message(static_cast<uint8_t>(proto::RespType::FW_VERSION),
+                           ver, strlen(ver));
       break;
     }
 

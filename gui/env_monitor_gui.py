@@ -49,6 +49,47 @@ except Exception:
     mqtt = None
     HAS_PAHO_MQTT = False
 
+# ===========================================================================
+# GUI VERSION  —  bump this on every GUI change
+# ===========================================================================
+# The firmware carries its own version (FIRMWARE_VERSION in src/app/main.cpp),
+# stored on the ESP32 in NVS and reported over the serial protocol
+# (ProtoCmd.FW_VERSION), so the two can be compared on every connection.
+#
+# Compatibility follows SemVer:
+#   MAJOR — breaking change (serial protocol altered). Mismatched majors must be
+#           re-paired, so the check reports incompatible.
+#   MINOR — additive change (new command/response, extra field). Both revisions
+#           still interoperate, but the newer side may have features the older
+#           one cannot use, so the check warns rather than fails.
+#   PATCH — fixes only, wire format identical: always interchangeable, ignored.
+#
+# The About line reports the comparison as one of four fixed verdicts (see
+# version_compat below), where "protocol N" is the MAJOR number:
+#   Compatible (protocol 1)
+#   Compatible (protocol 1, minor version differs)
+#   Incompatible (GUI protocol 2, firmware protocol 1)
+#   Compatibility unknown (firmware protocol unknown)
+GUI_VERSION = "1.0.4"
+
+# Version-check levels — drive the colour of the Settings > About status line.
+VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
+VERSION_LEVEL_WARN = "warn"        # amber — compatible, but one side is newer
+VERSION_LEVEL_ERROR = "error"      # red   — breaking change, re-pair required
+VERSION_LEVEL_UNKNOWN = "unknown"  # grey  — version could not be read
+
+VERSION_LEVEL_COLOURS = {
+    VERSION_LEVEL_OK: "#16a34a",
+    VERSION_LEVEL_WARN: "#d97706",
+    VERSION_LEVEL_ERROR: "#dc2626",
+    VERSION_LEVEL_UNKNOWN: "#888888",
+}
+
+# The one verdict used when no comparison is possible. Shared by version_compat()
+# and the About read-failure path so the two can never drift apart.
+VERSION_UNKNOWN_TEXT = "Compatibility unknown (firmware protocol unknown)"
+
+
 # Configure DPI awareness.
 #
 # We use PER_MONITOR_DPI_AWARE (value 2) rather than SYSTEM_DPI_AWARE. Under
@@ -107,6 +148,63 @@ def get_icon_path() -> Path | None:
 
 APP_ICON_PATH = get_icon_path()
 
+
+def parse_version(text: str):
+    """Parse "MAJOR.MINOR[.PATCH]" into a (major, minor, patch) tuple.
+
+    Missing/extra parts are tolerated (patch defaults to 0). Returns None when
+    the string is not a version at all (e.g. the device did not answer).
+    """
+    try:
+        parts = [int(p) for p in str(text).strip().split(".")[:3]]
+    except (TypeError, ValueError):
+        return None
+    if len(parts) < 2:
+        return None
+    while len(parts) < 3:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2])
+
+
+def version_compat(gui_version: str, fw_version: str):
+    """Compare GUI and firmware versions using SemVer rules.
+
+    Returns (compatible, status_text, level). `compatible` says whether the pair
+    can be used together at all; `level` refines that for the indicator colour
+    ("ok" / "warn" / "error" / "unknown").
+
+    "protocol N" is the MAJOR number — the serial-protocol revision. MINOR is an
+    additive change (both revisions still interoperate) and PATCH is ignored, so
+    the verdict text is always one of exactly four forms:
+
+        Compatible (protocol 1)
+        Compatible (protocol 1, minor version differs)
+        Incompatible (GUI protocol 2, firmware protocol 1)
+        Compatibility unknown (firmware protocol unknown)
+
+    The full version strings stay visible in the About fields; only the verdict
+    is condensed here. `level` is "ok" (exact protocol revision match), "warn"
+    (compatible, minor differs), "error" (major differs — re-pair) or "unknown"
+    (version unreadable).
+    """
+    fw = parse_version(fw_version)
+    gui = parse_version(gui_version)
+    # No verdict is possible unless both sides parse. The raw device reply is
+    # still shown verbatim in the About "Firmware version" field.
+    if fw is None or gui is None:
+        return False, VERSION_UNKNOWN_TEXT, VERSION_LEVEL_UNKNOWN
+    if fw[0] != gui[0]:
+        return (False,
+                f"Incompatible (GUI protocol {gui[0]}, firmware protocol {fw[0]})",
+                VERSION_LEVEL_ERROR)
+    if fw[1] != gui[1]:
+        # Same major, different minor: additive-only change per SemVer, so both
+        # revisions still interoperate — the newer side just may add features.
+        return (True, f"Compatible (protocol {fw[0]}, minor version differs)",
+                VERSION_LEVEL_WARN)
+    return True, f"Compatible (protocol {fw[0]})", VERSION_LEVEL_OK
+
+
 # Try to register the WiFi font on Windows
 if WIFI_FONT_PATH and hasattr(ctypes, 'windll'):
     try:
@@ -138,6 +236,7 @@ class ProtoCmd:
     EEPROM_WRITE = 0x26  # [ch: u8][tgs_id: u16 BE][lot_len: u8][lot][board_len: u8][board]
     EEPROM_READ = 0x27   # payload [ch: u8]; reply "id,crc,lot,board" CSV
     EEPROM_CLEAR = 0x28  # payload [ch: u8]; erase ID/lot/board blocks back to blank
+    FW_VERSION = 0x29    # no payload; reply FW_VERSION string
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -161,6 +260,7 @@ class ProtoResp:
     PUMP_STATUS = 0x22
     LORA_INFO = 0x23   # DevEUI,AppEUI,AppKey CSV string
     EEPROM_IDS = 0x24  # TGS EEPROM IDs: "id,crc,lot,board" CSV string
+    FW_VERSION = 0x25  # Firmware version string (MAJOR.MINOR.PATCH)
     PROMPT_STRING = 0x30
     PROMPT_CONFIRM = 0x31
 
@@ -296,10 +396,11 @@ class SerialMenuClient:
     # Frame types that carry a length-prefixed payload ([type][len][payload...])
     # and may be emitted by the device *unsolicited* between a command and its
     # response: STATUS(0x02), LIVE_DATA(0xFE), RTC_RESPONSE(0x21),
-    # LORA_INFO(0x23), PUMP_STATUS(0x22).
+    # LORA_INFO(0x23), PUMP_STATUS(0x22), EEPROM_IDS(0x24), FW_VERSION(0x25).
     _LEN_FRAMED = frozenset({
         ProtoResp.STATUS, ProtoResp.LIVE_DATA, ProtoResp.RTC_RESPONSE,
-        ProtoResp.LORA_INFO, ProtoResp.PUMP_STATUS,
+        ProtoResp.LORA_INFO, ProtoResp.PUMP_STATUS, ProtoResp.EEPROM_IDS,
+        ProtoResp.FW_VERSION,
     })
 
     def _consume_frame(self, resp: int, timeout_s: float) -> None:
@@ -1073,6 +1174,25 @@ class SerialMenuClient:
             resp, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
             if resp == ProtoResp.OK:
                 return {"success": True}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
+
+    def fw_version(self, timeout_s: float = 5.0) -> dict:
+        """Send FW_VERSION (0x29): read the firmware version string from the device.
+
+        Powers the Settings > About compatibility check (run on connect).
+        """
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.FW_VERSION)
+            resp, _ = self._read_response({ProtoResp.FW_VERSION, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.FW_VERSION:
+                length = self._read_byte(timeout_s)
+                version = self._read_exact(length, timeout_s).decode("utf-8", errors="replace")
+                return {"success": True, "version": version.strip()}
             code = self._read_byte(timeout_s)
             return {"success": False, "message": f"Error code {code}"}
 
@@ -2256,6 +2376,72 @@ class App(tk.Tk):
             side=tk.LEFT, padx=(12, 0)
         )
 
+        # ---- About (version compatibility) ----
+        about_frame = ttk.LabelFrame(_scroll_inner, text="About")
+        about_frame.pack(fill=tk.X, pady=(12, 4))
+
+        self.gui_version_var = tk.StringVar(value=GUI_VERSION)
+        self.fw_version_var = tk.StringVar(value="\u2014")
+        self.version_status_var = tk.StringVar(value="")
+
+        about_grid = ttk.Frame(about_frame)
+        about_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
+        about_grid.columnconfigure(1, weight=1)
+
+        ttk.Label(about_grid, text="GUI version:", anchor="w").grid(
+            row=0, column=0, sticky="w", pady=2)
+        ttk.Entry(about_grid, textvariable=self.gui_version_var, state="readonly",
+                  width=26).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+
+        ttk.Label(about_grid, text="Firmware version:", anchor="w").grid(
+            row=1, column=0, sticky="w", pady=2)
+        ttk.Entry(about_grid, textvariable=self.fw_version_var, state="readonly",
+                  width=26).grid(row=1, column=1, sticky="ew", padx=(8, 0))
+
+        about_btn_row = ttk.Frame(about_frame)
+        about_btn_row.pack(fill=tk.X, padx=10, pady=(0, 8))
+
+        self.about_refresh_btn = ttk.Button(
+            about_btn_row, text="Refresh", command=self._about_refresh,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.about_refresh_btn.pack(side=tk.LEFT)
+
+        self.version_status_label = ttk.Label(
+            about_btn_row, textvariable=self.version_status_var, foreground="#888888")
+        self.version_status_label.pack(side=tk.LEFT, padx=(12, 0))
+
+    def _about_refresh(self) -> None:
+        """Read the firmware version from the device and check compatibility."""
+        if not self.connected:
+            return
+        self.about_refresh_btn.configure(state=tk.DISABLED)
+        self.fw_version_var.set("\u2026")
+        self.version_status_var.set("Reading\u2026")
+        self.version_status_label.configure(foreground="#888888")
+
+        def worker() -> None:
+            try:
+                result = self.client.fw_version(timeout_s=5.0)
+                if result.get("success"):
+                    self.events.put(("fw_version_ok", result["version"]))
+                else:
+                    self.events.put(("fw_version_failed", result.get("message", "")))
+            except Exception as exc:
+                self.events.put(("fw_version_failed", str(exc)))
+            finally:
+                self.events.put(("about_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _apply_fw_version(self, version: str) -> None:
+        """Store the reported firmware version and update the compat indicator."""
+        self.fw_version_var.set(version or "\u2014")
+        _compatible, text, level = version_compat(GUI_VERSION, version)
+        self.version_status_var.set(text)
+        self.version_status_label.configure(
+            foreground=VERSION_LEVEL_COLOURS.get(level, "#888888"))
+
     def _toggle_eeprom_advanced(self) -> None:
         """Show/hide the EEPROM Write section."""
         if self._eeprom_frame.winfo_ismapped() or getattr(self, "_eeprom_visible", False):
@@ -2456,6 +2642,8 @@ class App(tk.Tk):
                     self._schedule_rtc_poll()
                     # Fetch initial WiFi status
                     self._initial_status_fetch()
+                    # Check firmware/GUI version compatibility
+                    self._about_refresh()
                 elif kind == "disconnected":
                     self._set_live_indicator(False)
                     self.connected = False
@@ -2492,6 +2680,11 @@ class App(tk.Tk):
                     self._update_wifi_top_bar()
                     self.rtc_current_datetime = "0000-00-00 00:00"
                     self.rtc_time_label.configure(text=self.rtc_current_datetime)
+                    # About: firmware version is per-device, so clear it on
+                    # disconnect (the GUI version field is a local constant and
+                    # stays put).
+                    self.fw_version_var.set("\u2014")
+                    self.version_status_var.set("")
                 elif kind == "live_line":
                     self._append_live_line(str(payload))
                 elif kind == "files":
@@ -2757,6 +2950,25 @@ class App(tk.Tk):
                     self.status_var.set(f"TGS ch{ch_disp} EEPROM erased")
                 elif kind == "eeprom_clear_btn_done":
                     self._update_wifi_controls()
+                elif kind == "fw_version_ok":
+                    self._apply_fw_version(str(payload))
+                elif kind == "fw_version_failed":
+                    # The About verdict stays one of the four fixed forms; the
+                    # reason for the failed read goes to the main status line so
+                    # the diagnostic is not lost.
+                    self.fw_version_var.set("\u2014")
+                    self.version_status_var.set(VERSION_UNKNOWN_TEXT)
+                    self.version_status_label.configure(
+                        foreground=VERSION_LEVEL_COLOURS[VERSION_LEVEL_UNKNOWN])
+                    msg = str(payload or "")
+                    if "code 1" in msg or "Timeout" in msg:
+                        self.status_var.set(
+                            "Firmware did not answer the version query "
+                            "(too old to support About — re-flash to enable it)")
+                    else:
+                        self.status_var.set(f"Firmware version read failed: {msg}")
+                elif kind == "about_done":
+                    self._update_wifi_controls()
                 elif kind == "pump_init":
                     pct = int(payload)
                     self.pump_pct_var.set(pct)
@@ -2848,6 +3060,15 @@ class App(tk.Tk):
                     self.events.put(("lora_info_ok", lora))
             except Exception:
                 pass
+            # Firmware version for Settings > About (compatibility check).
+            try:
+                ver = self.client.fw_version(timeout_s=5.0)
+                if ver.get("success"):
+                    self.events.put(("fw_version_ok", ver["version"]))
+                else:
+                    self.events.put(("fw_version_failed", ver.get("message", "")))
+            except Exception as exc:
+                self.events.put(("fw_version_failed", str(exc)))
             self.events.put(("initial_status_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -3740,6 +3961,8 @@ class App(tk.Tk):
         self.eeprom_write_btn.configure(state=pump_st)
         self.eeprom_read_btn.configure(state=pump_st)
         self.eeprom_clear_btn.configure(state=pump_st)
+        # About (firmware version query / compatibility check)
+        self.about_refresh_btn.configure(state=pump_st)
 
     def _pump_set(self) -> None:
         """Set pump to slider value."""

@@ -36,6 +36,7 @@ All commands are single-byte opcodes:
 0x26 - EEPROM_WRITE    (Channel + TGS ID (u16 BE) + length-prefixed lot + length-prefixed board ID)
 0x27 - EEPROM_READ     (Channel as single byte; replies EEPROM_IDS CSV "id,crc,lot,board")
 0x28 - EEPROM_CLEAR    (Channel as single byte; erases ID/lot/board blocks back to blank 0xFF)
+0x29 - FW_VERSION      (No payload; replies FW_VERSION string, e.g. "1.0.0")
 ```
 
 #### Response Types (Device → Client)
@@ -57,6 +58,7 @@ All commands are single-byte opcodes:
 0x21 - RTC_RESPONSE    (Time string with length prefix)
 0x23 - LORA_INFO       (DevEUI,AppEUI,AppKey CSV string with length prefix)
 0x24 - EEPROM_IDS      (TGS identity CSV "id,crc,lot,board" with length prefix)
+0x25 - FW_VERSION      (Firmware version string "MAJOR.MINOR.PATCH" with length prefix)
 ```
 
 #### Error Codes
@@ -165,6 +167,61 @@ If you need to add new commands:
 - **Old firmware** (with text protocol)
 
 Both can use the corresponding GUI version.
+
+## Versioning (GUI ↔ Firmware)
+
+Both sides carry an independent `MAJOR.MINOR.PATCH` version so a mismatch is
+visible before it turns into mysterious protocol errors.
+
+| Side | Where the version lives | Reported by |
+|------|-------------------------|-------------|
+| GUI | `GUI_VERSION` near the top of `gui/env_monitor_gui.py` (just after the imports) | Settings > About (read-only field) |
+| Firmware | `FIRMWARE_VERSION` near the top of `src/app/main.cpp` (just after the includes), persisted to ESP32 NVS (namespace `fw`, key `version`) | `FW_VERSION` command (0x29) |
+
+Details:
+
+* Both constants are deliberately declared **high up in their file** so a version
+  bump is the first thing you see when you open it — no searching required.
+  Bump them manually as part of the change (see the SemVer rule below).
+
+* The firmware version is stored on the ESP32 (NVS) so it is queryable without
+  a rebuild, and it is **re-seeded from the `FIRMWARE_VERSION` constant on every
+  boot**. NVS therefore always mirrors the flashed binary: bump the constant,
+  re-flash, and the device reports the new version. Editing the NVS entry by
+  hand cannot spoof a version the running binary was not built with, because the
+  next boot overwrites it.
+* The GUI fetches the firmware version immediately on connect (and on
+  "Refresh" in Settings > About) and shows a compatibility verdict:
+  **green** = exact protocol match, **amber** = compatible but the minor version
+  differs, **red** = incompatible, **grey** = version unreadable. The verdict is
+  plain prose with no tick/cross glyphs (readable with any font/encoding), and
+  the colour is the only extra indicator.
+* **Compatibility rule (SemVer)** — mismatched versions are graded rather than
+  simply rejected, because minor releases are additive. The verdict text is
+  always one of exactly four forms, where **`protocol N` is the MAJOR number**
+  (the serial-protocol revision); the full version strings stay visible in the
+  About fields:
+
+  | Verdict text | Condition | Level / colour | Meaning |
+  |--------------|-----------|----------------|---------|
+  | `Compatible (protocol 1)` | same `MAJOR.MINOR` | green | Both sides are the same protocol revision |
+  | `Compatible (protocol 1, minor version differs)` | same `MAJOR`, different `MINOR` | amber | Additive change only, so the pair still interoperates; the newer side may offer features the older one cannot call |
+  | `Incompatible (GUI protocol 2, firmware protocol 1)` | different `MAJOR` | red | Breaking reorganisation — re-pair GUI and firmware |
+  | `Compatibility unknown (firmware protocol unknown)` | firmware version unreadable | grey | Device did not answer `0x29` (pre-1.0.0 firmware) or sent unusable text |
+
+  `PATCH` differences are always interchangeable (identical wire format) and are
+  not reported at all, so they still read as `Compatible (protocol 1)`. The
+  unknown case is deliberately minimal: the raw device reply stays visible in the
+  About "Firmware version" field, and the reason for a failed read (e.g. too old
+  to support `0x29`) is reported on the main status line rather than in the
+  verdict.
+* Bump `MINOR` for additive protocol changes (new command/response, extra field),
+  `PATCH` for fixes that keep the wire format identical, `MAJOR` for breaking
+  reorganisations. Bump **both** sides in the same commit when the protocol
+  changes — that is what makes the About check meaningful.
+* Firmware older than the shipped release may not implement a given command at
+  all (e.g. `0x29`): the GUI surfaces that as an error on the action rather than
+  crashing, which is why an amber/unknown verdict is informational only.
 
 ## Testing the Protocol
 

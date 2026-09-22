@@ -175,6 +175,120 @@ def test_scan_survives_in_transit_frame():
     expect(nets[0]["rssi"] == "-48", f"rssi mismatch: {nets}")
 
 
+def test_fw_version_parses_string():
+    """FW_VERSION reply (0x25 + length + string) parses to a version string."""
+    ver = b"1.0.0"
+    data = bytes([0x25, len(ver)]) + ver
+    c = make_client(on_reset=data)
+    r = c.fw_version(timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(r["version"] == "1.0.0", f"version mismatch: {r}")
+
+
+def test_fw_version_survives_status_frame_in_front():
+    """An unsolicited STATUS frame before the FW_VERSION reply is skipped."""
+    msg = b"[NTP] sync in progress"
+    ver = b"1.2.3"
+    data = bytes([0x02, len(msg)]) + msg + bytes([0x25, len(ver)]) + ver
+    c = make_client(on_reset=data)
+    r = c.fw_version(timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(r["version"] == "1.2.3", f"version mismatch: {r}")
+
+
+def test_fw_version_error_on_old_firmware():
+    """Older firmware answers ERROR/1 (unknown command) — reported, not raised."""
+    c = make_client(on_reset=bytes([0x01, 0x01]))
+    r = c.fw_version(timeout_s=2.0)
+    expect(r["success"] is False, f"expected failure, got {r}")
+    expect("Error code 1" in r["message"], f"message mismatch: {r}")
+
+
+def test_parse_version_variants():
+    """parse_version tolerates short forms and rejects non-version text."""
+    expect(gui.parse_version("1.0.0") == (1, 0, 0), "1.0.0 parse failed")
+    expect(gui.parse_version("2.5") == (2, 5, 0), "2.5 parse failed")
+    expect(gui.parse_version(" 3.1.4-beta ") is None, "junk accepted")
+    expect(gui.parse_version("") is None, "empty accepted")
+
+
+def test_version_compat_rules():
+    """Verdicts are exactly one of the four agreed forms.
+
+    PATCH is invisible, MINOR is additive (compatible, flagged), MAJOR is
+    breaking (incompatible) — and the verdict never carries more than that.
+    """
+    expect(gui.version_compat("1.0.0", "1.0.0")
+           == (True, "Compatible (protocol 1)", gui.VERSION_LEVEL_OK),
+           "exact match verdict wrong")
+
+    # PATCH difference: same wire format, so the verdict is identical to a match.
+    expect(gui.version_compat("1.0.3", "1.0.0")
+           == (True, "Compatible (protocol 1)", gui.VERSION_LEVEL_OK),
+           "patch difference should be invisible")
+
+    # MINOR difference: compatible either direction, with the caution appended.
+    for gui_v, fw_v in (("1.0.0", "1.1.0"), ("1.2.0", "1.0.9")):
+        ok, text, level = gui.version_compat(gui_v, fw_v)
+        expect((ok, text, level) ==
+               (True, "Compatible (protocol 1, minor version differs)",
+                gui.VERSION_LEVEL_WARN),
+               f"minor verdict wrong for {gui_v} vs {fw_v}: {text!r}")
+
+    # MAJOR difference: incompatible, and both protocol revisions are named.
+    ok, text, level = gui.version_compat("2.0.0", "1.9.9")
+    expect((ok, text, level) ==
+           (False, "Incompatible (GUI protocol 2, firmware protocol 1)",
+            gui.VERSION_LEVEL_ERROR),
+           f"major verdict wrong: {text!r}")
+
+
+def test_unavailable_version_reports_unknown_verdict():
+    """An unreadable firmware version gives one verdict, whatever the cause."""
+    for fw_v in ("", "abc", "1", "VGH"):
+        ok, text, level = gui.version_compat(gui.GUI_VERSION, fw_v)
+        expect((ok, level) == (False, gui.VERSION_LEVEL_UNKNOWN),
+               f"wrong verdict for {fw_v!r}: {level}")
+        expect(text == gui.VERSION_UNKNOWN_TEXT,
+               f"verdict text drifted for {fw_v!r}: {text!r}")
+
+
+def test_every_verdict_is_one_of_the_four_forms():
+    """The About line can only ever display the four agreed message shapes."""
+    import re
+    allowed = re.compile(
+        r"^Compatible \(protocol \d+\)$"
+        r"|^Compatible \(protocol \d+, minor version differs\)$"
+        r"|^Incompatible \(GUI protocol \d+, firmware protocol \d+\)$"
+        r"|^Compatibility unknown \(firmware protocol unknown\)$")
+    cases = [("1.0.0", "1.0.0"), ("1.0.0", "1.0.9"), ("1.0.0", "1.1.0"),
+             ("1.3.2", "1.0.0"), ("2.0.0", "1.9.9"), ("1.0.0", "2.0.0"),
+             ("1.0.0", ""), ("1.0.0", "abc"), ("junk", "1.0.0")]
+    for gui_v, fw_v in cases:
+        _ok, text, _level = gui.version_compat(gui_v, fw_v)
+        expect(bool(allowed.match(text)),
+               f"unexpected verdict for {gui_v} vs {fw_v!r}: {text!r}")
+
+
+def test_version_levels_all_coloured():
+    """Every level the checker can return has an indicator colour mapped."""
+    for level in (gui.VERSION_LEVEL_OK, gui.VERSION_LEVEL_WARN,
+                  gui.VERSION_LEVEL_ERROR, gui.VERSION_LEVEL_UNKNOWN):
+        expect(level in gui.VERSION_LEVEL_COLOURS, f"no colour for level {level}")
+
+
+def test_version_messages_have_no_status_symbols():
+    """Compat verdicts are plain text: no tick/cross/warning glyphs (colour
+    already conveys the verdict in the About status line)."""
+    banned = "\u2713\u2717\u26a0"
+    cases = [("1.0.0", "1.0.0"), ("1.0.0", "1.1.0"), ("1.2.0", "1.0.9"),
+             ("2.0.0", "1.9.9"), ("1.0.0", "")]
+    for gui_v, fw_v in cases:
+        _ok, text, _level = gui.version_compat(gui_v, fw_v)
+        expect(not any(sym in text for sym in banned),
+               f"glyph left in verdict for {gui_v} vs {fw_v}: {text}")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     failed = 0

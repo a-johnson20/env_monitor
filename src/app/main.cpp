@@ -33,6 +33,14 @@
 #include "common/drivers/lora_e5.hpp"
 #include "common/drivers/ws2812_leds.hpp"
 
+// ===========================================================================
+// FIRMWARE VERSION  —  bump this on every firmware change
+// ===========================================================================
+// SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
+// Keep this in sync with GUI_VERSION in gui/env_monitor_gui.py — the two are
+// compared on connect and shown in the GUI's Settings > About section.
+#define FIRMWARE_VERSION "1.0.0"
+
 // Namespaces using
 using hal::Mux::Ch;
 
@@ -734,6 +742,29 @@ bool tgs2611_clear_ids(uint8_t ch) {
   if (rb[0] != 0xFF) return false;
   if (!at24_read(hal::I2CAddr::AT24, 0x40, rb, 1)) return false;
   return rb[0] == 0xFF;
+}
+
+// ---------------------------------------------------------------------------
+// Firmware version (NVS-backed) — FIRMWARE_VERSION is defined at the top
+// ---------------------------------------------------------------------------
+// Report the firmware version. The value is kept in NVS so it is queryable
+// cheaply, but it is *re-seeded from the compile-time constant on every boot*:
+// NVS only ever mirrors the binary that was flashed, so bumping
+// FIRMWARE_VERSION always shows up immediately and the stored copy can never
+// report a version the running firmware was not built with.
+void firmware_version(char* out, size_t out_size) {
+  static Preferences fw_prefs;
+  static bool seeded = false;
+  if (!seeded) {
+    seeded = true;
+    fw_prefs.begin("fw", false);
+    const bool changed = (fw_prefs.getString("version", "") != FIRMWARE_VERSION);
+    if (changed) {
+      fw_prefs.putString("version", FIRMWARE_VERSION);
+    }
+  }
+  String v = fw_prefs.getString("version", FIRMWARE_VERSION);
+  strlcpy(out, v.c_str(), out_size);
 }
 
 // ---------------------------------------------------------------------------
