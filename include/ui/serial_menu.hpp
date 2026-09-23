@@ -25,4 +25,13 @@ bool serial_connected();
 // write to Serial to avoid corrupting the binary protocol response.
 bool is_busy();
 
+// True while a LoRa-E5 AT-command transaction (join/send/info/keygen) is in
+// progress. The module only supports one transaction at a time, so callers
+// must not start another while this is set — used to reject LORA_INFO /
+// LORA_GEN_KEYS commands that arrive re-entrantly (via poll() being called
+// from the LoRa driver's idle-poll hook) while main.cpp's periodic join/send
+// already owns the module.
+bool lora_op_active();
+void set_lora_op_active(bool active);
+
 } // namespace ui

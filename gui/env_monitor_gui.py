@@ -70,7 +70,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.4.0"
+GUI_VERSION = "1.4.1"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -93,10 +93,13 @@ VERSION_UNKNOWN_TEXT = "Compatibility unknown (firmware protocol unknown)"
 # Pump control timing.
 #   SEND_DEBOUNCE_MS — a slider move is forwarded after this pause, so a drag
 #                      sends a handful of updates instead of one per pixel.
-#   POLL_MS          — how often the pump speed + enable-switch state is read
-#                      back from the device (picks up switch toggles).
+#   POLL_MS          — safety-net poll interval for the pump speed / enable-
+#                      switch state. The firmware pushes a PUMP_STATUS frame
+#                      as soon as the switch changes (see SerialMenuClient's
+#                      pump-watch listener), so this poll mainly covers a
+#                      missed push (e.g. right after a reconnect glitch).
 PUMP_SEND_DEBOUNCE_MS = 250
-PUMP_POLL_MS = 2000
+PUMP_POLL_MS = 5000
 
 
 # Configure DPI awareness.
@@ -295,6 +298,8 @@ class SerialMenuClient:
         self.lock = threading.Lock()
         self.live_thread: threading.Thread | None = None
         self.live_stop = threading.Event()
+        self.pump_watch_thread: threading.Thread | None = None
+        self.pump_watch_stop = threading.Event()
 
     @property
     def is_open(self) -> bool:
@@ -317,6 +322,7 @@ class SerialMenuClient:
 
     def close(self) -> None:
         """Close serial port"""
+        self.stop_pump_watch()
         self.stop_live()
         with self.lock:
             if self.ser is not None:
@@ -1101,6 +1107,65 @@ class SerialMenuClient:
             if length > 2:                       # tolerate future extra fields
                 self._read_exact(length - 2, timeout_s)
             return {"success": True, "percent": pct, "enabled": enabled}
+
+    def start_pump_watch(self, on_status) -> None:
+        """Start a background listener for unsolicited PUMP_STATUS pushes.
+
+        Firmware >= 1.4.1 writes a PUMP_STATUS frame the moment the latching
+        enable switch changes, instead of the GUI having to wait for its next
+        poll to notice. This listener only reads a byte when it can grab
+        `self.lock` without blocking, so it never races an in-flight command
+        — any byte it sees while holding the lock is necessarily unsolicited.
+        It backs off while live streaming, since `_live_loop` reads the port
+        directly without the lock.
+        """
+        if self.pump_watch_thread is not None and self.pump_watch_thread.is_alive():
+            return
+        self.pump_watch_stop.clear()
+        self.pump_watch_thread = threading.Thread(
+            target=self._pump_watch_loop, args=(on_status,), daemon=True,
+        )
+        self.pump_watch_thread.start()
+
+    def stop_pump_watch(self) -> None:
+        """Stop the pump-status push listener."""
+        self.pump_watch_stop.set()
+        if self.pump_watch_thread is not None:
+            self.pump_watch_thread.join(timeout=2.0)
+            self.pump_watch_thread = None
+
+    def _pump_watch_loop(self, on_status) -> None:
+        while not self.pump_watch_stop.is_set():
+            if (self.live_thread is not None and self.live_thread.is_alive()) \
+                    or not self.lock.acquire(blocking=False):
+                time.sleep(0.05)
+                continue
+            try:
+                if self.ser is None or not self.ser.is_open:
+                    continue
+                b = self.ser.read(1)
+                if not b:
+                    continue
+                resp = b[0]
+                if resp == ProtoResp.PUMP_STATUS:
+                    length = self._read_byte(0.2)
+                    pct = self._read_byte(0.2) if length >= 1 else 0
+                    enabled = bool(self._read_byte(0.2)) if length >= 2 else None
+                    if length > 2:
+                        self._read_exact(length - 2, 0.2)
+                    on_status({"success": True, "percent": pct, "enabled": enabled})
+                else:
+                    # Not a pump push (shouldn't normally happen while idle):
+                    # consume it whole so a later command can't misread its
+                    # payload as its own response.
+                    try:
+                        self._consume_frame(resp, 0.2)
+                    except RuntimeError:
+                        pass
+            except Exception:
+                pass
+            finally:
+                self.lock.release()
 
     def calib_multipoint(self, channel: int, r2ppm_kohm: float, alpha: float,
                           timeout_s: float = 5.0) -> dict:
@@ -2832,8 +2897,10 @@ class App(tk.Tk):
                     self.refresh_ports()
                     # Start RTC polling
                     self._schedule_rtc_poll()
-                    # Start pump speed / enable-switch polling
+                    # Start pump speed / enable-switch polling (safety net) and
+                    # the push listener that reacts to switch changes instantly.
                     self._schedule_pump_poll()
+                    self.client.start_pump_watch(lambda status: self.events.put(("pump_status", status)))
                     # Fetch initial WiFi status
                     self._initial_status_fetch()
                     # Check firmware/GUI version compatibility
@@ -2872,6 +2939,7 @@ class App(tk.Tk):
                     self._cancel_wifi_poll()
                     self._cancel_rtc_poll()
                     self._cancel_pump_poll()
+                    self.client.stop_pump_watch()
                     self._update_wifi_top_bar()
                     self.rtc_current_datetime = "0000-00-00 00:00"
                     self.rtc_time_label.configure(text=self.rtc_current_datetime)
@@ -4232,6 +4300,12 @@ class App(tk.Tk):
         pump_ok = self.connected and not self.live_running
         pump_st = tk.NORMAL if pump_ok else tk.DISABLED
         self.pump_slider.configure(state=pump_st)
+        # The pump-status push/poll is skipped during live streaming (it would
+        # race the live loop's direct port reads), so the switch line would
+        # otherwise sit on a stale reading — say so explicitly instead.
+        if self.connected and self.live_running:
+            self.pump_switch_var.set("Enable switch: unavailable during live capture")
+            self.pump_switch_label.configure(foreground="#888888")
         # CH4 calibration
         self.calib_r2ppm_btn.configure(state=pump_st)
         MAX_CALIB_POINTS = 5
@@ -4335,7 +4409,11 @@ class App(tk.Tk):
                 self.pump_label_var.set(f"{pct}%")
             finally:
                 self._pump_syncing = False
-        self._set_pump_switch_state(status.get("enabled"), pct)
+        # Show the slider's own value in the switch line rather than the
+        # polled/pushed percent: while a slider change is pending or a send is
+        # in flight, the device hasn't caught up yet, so echoing its stale
+        # percent would flicker the switch text back to the old value.
+        self._set_pump_switch_state(status.get("enabled"), self.pump_pct_var.get())
 
     def _calib_add_row(self) -> None:
         """Append a new (ppm, raw ADC) entry row to the calibration panel."""

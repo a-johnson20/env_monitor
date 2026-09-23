@@ -47,6 +47,7 @@ static bool g_live_stream = false;
 static bool g_live_just_started = false;
 static bool seen_connection = false;
 static bool g_busy = false;  // true while processing a command, prevents LIVE_DATA interleaving
+static volatile bool g_lora_op_active = false;  // true while an AT-command transaction owns the E5 module
 
 struct LogFileEntry {
   String path;
@@ -103,6 +104,8 @@ bool serial_connected() {
 bool live_stream_enabled() { return g_live_stream; }
 bool live_just_started()   { bool v = g_live_just_started; g_live_just_started = false; return v; }
 bool is_busy()             { return g_busy; }
+bool lora_op_active()          { return g_lora_op_active; }
+void set_lora_op_active(bool active) { g_lora_op_active = active; }
 
 void begin() {
   // Binary protocol doesn't need initialization
@@ -708,6 +711,11 @@ void poll() {
     }
 
     case proto::Cmd::LORA_INFO: {
+      if (g_lora_op_active) {   // periodic join/send already owns the module
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      g_lora_op_active = true;
       String dev_eui = lora::get_dev_eui();
       // get_dev_eui() returns the EUI string, or a diagnostic like
       // "NO_RESP", "PING:...", "PARSE_ERR:..." etc. — pass through as-is.
@@ -715,21 +723,29 @@ void poll() {
       String app_eui = lora::load_app_eui();
       String app_key = lora::load_app_key();
       String payload = dev_eui + "," + app_eui + "," + app_key;
+      g_lora_op_active = false;
       proto::write_message(static_cast<uint8_t>(proto::RespType::LORA_INFO), payload);
       break;
     }
 
     case proto::Cmd::LORA_GEN_KEYS: {
+      if (g_lora_op_active) {   // periodic join/send already owns the module
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      g_lora_op_active = true;
       String dev_eui = lora::get_dev_eui();
       if (dev_eui.length() == 0) dev_eui = "READ_ERROR";
       String app_eui = lora::gen_app_eui();
       String app_key = lora::gen_app_key();
       if (!lora::program_keys(app_eui, app_key)) {
+        g_lora_op_active = false;
         proto::write_error(proto::ErrorCode::INVALID_CMD);
         break;
       }
       lora::save_keys(app_eui, app_key);
       String payload = dev_eui + "," + app_eui + "," + app_key;
+      g_lora_op_active = false;
       proto::write_message(static_cast<uint8_t>(proto::RespType::LORA_INFO), payload);
       break;
     }

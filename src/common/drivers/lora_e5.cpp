@@ -7,6 +7,10 @@ namespace lora {
 
 static HardwareSerial& _uart  = Serial2;
 static Preferences      _prefs;
+static IdlePollFn       s_idle_poll = nullptr;
+
+void set_idle_poll(IdlePollFn fn) { s_idle_poll = fn; }
+static inline void idle_tick() { if (s_idle_poll) s_idle_poll(); }
 
 // ---------------------------------------------------------------------------
 // Internal: send AT command, collect response until "+OK" / "+ERR",
@@ -22,6 +26,7 @@ static String at_cmd(const String& cmd, uint32_t timeout_ms = 2000,
     String resp;
     uint32_t t0 = millis();
     while (millis() - t0 < timeout_ms) {
+        idle_tick();
         if (_uart.available()) {
             resp += (char)_uart.read();
             if (resp.indexOf("+OK")  >= 0) { if (ok_out) *ok_out = true;  return resp; }
@@ -199,6 +204,7 @@ bool join(uint32_t timeout_ms) {
     String resp;
     uint32_t t0 = millis();
     while (millis() - t0 < timeout_ms) {
+        idle_tick();
         if (_uart.available()) resp += (char)_uart.read();
         if (resp.indexOf("+JOIN: Network joined") >= 0) return true;
         if (resp.indexOf("+JOIN: Joined already") >= 0) return true;

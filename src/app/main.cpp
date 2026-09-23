@@ -39,7 +39,7 @@
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
 // Keep this in sync with GUI_VERSION in gui/env_monitor_gui.py — the two are
 // compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.4.0"
+#define FIRMWARE_VERSION "1.4.2"
 
 // Metadata line written above the heading of new CSV log files (built in
 // build_log_metadata_line(), defined further down after the TGS EEPROM and
@@ -1261,9 +1261,17 @@ void setup() {
   pump_apply_output();        // only drives the pump when the switch is latched
 
   lora::begin();
+  // Service LEDs/serial commands while at_cmd()/join() block on the module's
+  // UART response, instead of freezing the whole loop for the AT timeout.
+  lora::set_idle_poll([]() {
+    leds::poll(millis());
+    ui::poll();
+  });
 
   // Attempt LoRaWAN OTAA join (blocks up to 15 s; module retains session across resets).
+  ui::set_lora_op_active(true);
   s_lora_joined = lora::join(15000);
+  ui::set_lora_op_active(false);
   leds::led1_flash(s_lora_joined, 2000);
   ui::proto::write_message(0x02, s_lora_joined ? "LoRa: joined" : "LoRa: join failed (will retry in loop)");
 
@@ -1298,8 +1306,22 @@ void loop() {
   leds::poll(now);
 
   // --- Pump enable switch (GPIO39): the pump only runs while latched ---
+  // Push a PUMP_STATUS frame the moment the debounced state changes, so the
+  // GUI can react instantly instead of waiting for its next poll. Deferred
+  // until the serial menu isn't mid-response, so the push can never land
+  // inside another command's reply.
+  static bool s_pump_push_pending = false;
   if (pump_switch_poll(now)) {
     pump_apply_output();
+    s_pump_push_pending = true;
+  }
+  if (s_pump_push_pending && !ui::is_busy()) {
+    uint8_t pct = (uint8_t)(pump_percent + 0.5f);
+    Serial.write((uint8_t)ui::proto::RespType::PUMP_STATUS);
+    Serial.write((uint8_t)2);
+    Serial.write(pct);
+    Serial.write((uint8_t)(pump_switch_latched() ? 1 : 0));
+    s_pump_push_pending = false;
   }
 
   // --- LoRa periodic uplink (every 60 s) ---
@@ -1309,12 +1331,16 @@ void loop() {
     static uint32_t s_last_lora_join_ms = 0;
     if (!s_lora_joined) {
       if (now - s_last_lora_join_ms >= LORA_JOIN_RETRY) {
+        ui::set_lora_op_active(true);
         s_lora_joined = lora::join(15000);
+        ui::set_lora_op_active(false);
         leds::led1_flash(s_lora_joined, 2000);
         s_last_lora_join_ms = now;
       }
     } else if (now - s_last_lora_send_ms >= LORA_SEND_INTERVAL) {
+      ui::set_lora_op_active(true);
       bool tx_ok = lora_send_reading();
+      ui::set_lora_op_active(false);
       leds::led1_flash(tx_ok);
       if (!tx_ok) s_lora_joined = false;           // failure → re-join next cycle
       s_last_lora_send_ms += LORA_SEND_INTERVAL;   // maintain fixed 60s period

@@ -20,6 +20,13 @@ constexpr int PIN_LORA_RST  = 38;
 // AT-command mode.  Blocks for ~600 ms.  Call once from setup().
 void begin();
 
+// Callback invoked repeatedly while at_cmd()/join() are blocked waiting on
+// the module's UART response, so the rest of the firmware (LED animation,
+// serial command processing) doesn't freeze for the whole AT-command
+// timeout. Set once from setup(); pass nullptr to disable.
+using IdlePollFn = void (*)();
+void set_idle_poll(IdlePollFn fn);
+
 // Read the Device EUI directly from the module via AT+ID.
 // Returns "AA:BB:CC:DD:EE:FF:00:11" on success, "" on failure.
 String get_dev_eui();

@@ -131,12 +131,27 @@ Firmware up to 1.3.x replied with `len=1` and the percent only; a client must
 consume the whole frame it is told about (the GUI treats the missing latched
 byte as "unknown" and keeps working with those revisions).
 
+The firmware also *pushes* a `PUMP_STATUS` frame unsolicited, the moment the
+debounced switch state changes, using the exact same `[type][len=2][percent]
+[latched]` encoding as the `PUMP_GET` reply (deferred until the serial menu
+isn't mid-response, so it can never land inside another command's reply).
+Clients that don't expect unsolicited frames can simply ignore/discard it —
+nothing about the request/response protocol changes — but a client that reads
+the port while idle no longer has to wait for its next poll to learn the
+switch moved.
+
 On the GUI side the Pump Control panel is a speed slider alone — there are no
 Set/Off buttons, so each slider change is sent automatically (debounced by
-`PUMP_SEND_DEBOUNCE_MS`). The panel also polls the switch state every
-`PUMP_POLL_MS` to show whether the pump can run; that poll never moves the
-slider handle, so toggling the switch cannot change the displayed speed. The
-device's stored speed is read into the slider only once, when the GUI connects.
+`PUMP_SEND_DEBOUNCE_MS`). A background listener reads the port whenever no
+command is in flight and applies the pushed `PUMP_STATUS` frame the instant it
+arrives; a slower `PUMP_POLL_MS` poll is kept only as a safety net in case a
+push is ever missed. Neither the push nor the poll ever moves the slider
+handle, so toggling the switch cannot change the displayed speed — the switch
+line shows the slider's own value instead of echoing a still-in-flight device
+reading, and it's greyed out during live streaming since the port is owned by
+the live-data reader then. The device's stored speed is read into the slider
+only once, when the GUI connects.
+
 
 ## TGS Sensor EEPROM Map (calibration timestamp)
 
