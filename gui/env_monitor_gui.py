@@ -70,7 +70,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.3.3"
+GUI_VERSION = "1.4.0"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -88,6 +88,15 @@ VERSION_LEVEL_COLOURS = {
 # The one verdict used when no comparison is possible. Shared by version_compat()
 # and the About read-failure path so the two can never drift apart.
 VERSION_UNKNOWN_TEXT = "Compatibility unknown (firmware protocol unknown)"
+
+
+# Pump control timing.
+#   SEND_DEBOUNCE_MS — a slider move is forwarded after this pause, so a drag
+#                      sends a handful of updates instead of one per pixel.
+#   POLL_MS          — how often the pump speed + enable-switch state is read
+#                      back from the device (picks up switch toggles).
+PUMP_SEND_DEBOUNCE_MS = 250
+PUMP_POLL_MS = 2000
 
 
 # Configure DPI awareness.
@@ -1046,7 +1055,12 @@ class SerialMenuClient:
         return messages
 
     def pump_set(self, percent: int, timeout_s: float = 3.0) -> dict:
-        """Set pump speed (0-100%)."""
+        """Set the pump speed (0-100%).
+
+        The device only drives the pump while its latching enable switch is
+        closed, so this stores the running speed (and applies it immediately
+        when the switch is latched) rather than turning the pump on or off.
+        """
         if not self.is_open:
             raise RuntimeError("Serial port not open")
         pct = max(0, min(100, percent))
@@ -1056,31 +1070,37 @@ class SerialMenuClient:
             self._send_cmd(ProtoCmd.PUMP_SET)
             ser.write(bytes([pct]))
             ser.flush()
-            resp = self._read_byte(timeout_s)
+            resp, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
             if resp == ProtoResp.OK:
                 return {"success": True, "percent": pct}
-            elif resp == ProtoResp.ERROR:
-                code = self._read_byte(timeout_s)
-                return {"success": False, "message": f"Error code {code}"}
-            return {"success": False, "message": f"Unexpected response: {resp}"}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
 
     def pump_get(self, timeout_s: float = 3.0) -> dict:
-        """Get current pump speed."""
+        """Get the current pump speed and enable-switch state.
+
+        PUMP_STATUS payload is [percent] on firmware <= 1.3.x and
+        [percent][switch_latched] from 1.4.0, so `enabled` is None when the
+        device is too old to report the switch state.
+        """
         if not self.is_open:
             raise RuntimeError("Serial port not open")
         with self.lock:
             ser = self._require_open()
             ser.reset_input_buffer()
             self._send_cmd(ProtoCmd.PUMP_GET)
-            resp = self._read_byte(timeout_s)
-            if resp == ProtoResp.PUMP_STATUS:
-                length = self._read_byte(timeout_s)
-                pct = self._read_byte(timeout_s)
-                return {"success": True, "percent": pct}
-            elif resp == ProtoResp.ERROR:
+            resp, _ = self._read_response({ProtoResp.PUMP_STATUS, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.ERROR:
                 code = self._read_byte(timeout_s)
                 return {"success": False, "message": f"Error code {code}"}
-            return {"success": False, "message": f"Unexpected response: {resp}"}
+            length = self._read_byte(timeout_s)
+            pct = self._read_byte(timeout_s) if length >= 1 else 0
+            enabled = None
+            if length >= 2:
+                enabled = bool(self._read_byte(timeout_s))
+            if length > 2:                       # tolerate future extra fields
+                self._read_exact(length - 2, timeout_s)
+            return {"success": True, "percent": pct, "enabled": enabled}
 
     def calib_multipoint(self, channel: int, r2ppm_kohm: float, alpha: float,
                           timeout_s: float = 5.0) -> dict:
@@ -1442,6 +1462,15 @@ class App(tk.Tk):
         self.rtc_poll_timer: int | None = None
         self.rtc_poll_inflight = False
         self.rtc_current_datetime = "0000-00-00 00:00"
+
+        # Pump settings — the slider is a speed control only; the pump is enabled
+        # by the rig's latching switch, whose state the device reports.
+        self.pump_poll_timer: int | None = None
+        self.pump_poll_inflight = False
+        self._pump_pending: int | None = None        # newest slider value, not sent yet
+        self._pump_debounce_id: str | None = None    # pending debounce timer id
+        self._pump_send_inflight = False
+        self._pump_syncing = False                   # true while applying a device value
 
         # LoRa settings
         self.lora_dev_eui_var: tk.StringVar | None = None
@@ -2308,32 +2337,30 @@ class App(tk.Tk):
 
         ttk.Label(slider_row, text="Speed:").pack(side=tk.LEFT)
         self.pump_pct_var = tk.IntVar(value=0)
+        # The slider is the whole control: there are no Set/Off buttons, so
+        # sliding sends the speed automatically (debounced — see
+        # _pump_slider_moved). The pump itself is enabled by the rig's latching
+        # switch, not from here.
         self.pump_slider = ttk.Scale(
             slider_row, from_=0, to=100, orient=tk.HORIZONTAL,
             variable=self.pump_pct_var,
-            command=lambda _: self.pump_label_var.set(f"{int(self.pump_pct_var.get())}%"),
+            command=self._pump_slider_moved,
         )
         self.pump_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
         self.pump_label_var = tk.StringVar(value="0%")
         ttk.Label(slider_row, textvariable=self.pump_label_var, width=5).pack(side=tk.LEFT)
 
-        btn_row = ttk.Frame(pump_frame)
-        btn_row.pack(fill=tk.X, padx=10, pady=(0, 8))
-
-        self.pump_set_btn = ttk.Button(
-            btn_row, text="Set", command=self._pump_set, state=tk.DISABLED, style="Accent.TButton",
+        self.pump_switch_var = tk.StringVar(value="Enable switch: unknown")
+        self.pump_switch_label = ttk.Label(
+            pump_frame, textvariable=self.pump_switch_var, foreground="#888888",
         )
-        self.pump_set_btn.pack(side=tk.LEFT)
+        self.pump_switch_label.pack(anchor="w", padx=10, pady=(0, 2))
 
-        self.pump_off_btn = ttk.Button(
-            btn_row, text="Off", command=self._pump_off, state=tk.DISABLED, style="Accent.TButton",
-        )
-        self.pump_off_btn.pack(side=tk.LEFT, padx=(8, 0))
-
-        self.pump_full_btn = ttk.Button(
-            btn_row, text="100%", command=self._pump_full, state=tk.DISABLED, style="Accent.TButton",
-        )
-        self.pump_full_btn.pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Label(
+            pump_frame,
+            text="The pump only runs while the latching switch is closed; sliding sets the speed used then.",
+            justify=tk.LEFT, foreground="#888888",
+        ).pack(anchor="w", padx=10, pady=(0, 8))
 
         # ---- CH4 Calibration Section ----
         calib_frame = ttk.LabelFrame(_scroll_inner, text="TGS2611 Sensor Calibration")
@@ -2805,6 +2832,8 @@ class App(tk.Tk):
                     self.refresh_ports()
                     # Start RTC polling
                     self._schedule_rtc_poll()
+                    # Start pump speed / enable-switch polling
+                    self._schedule_pump_poll()
                     # Fetch initial WiFi status
                     self._initial_status_fetch()
                     # Check firmware/GUI version compatibility
@@ -2842,6 +2871,7 @@ class App(tk.Tk):
                     self.wifi_current_rssi = ""
                     self._cancel_wifi_poll()
                     self._cancel_rtc_poll()
+                    self._cancel_pump_poll()
                     self._update_wifi_top_bar()
                     self.rtc_current_datetime = "0000-00-00 00:00"
                     self.rtc_time_label.configure(text=self.rtc_current_datetime)
@@ -2850,6 +2880,10 @@ class App(tk.Tk):
                     # stays put).
                     self.fw_version_var.set("\u2014")
                     self.version_status_var.set("")
+                    # Pump: speed and enable-switch state come from the device.
+                    self._pump_pending = None
+                    self._pump_send_inflight = False
+                    self._set_pump_switch_state(None)
                 elif kind == "live_line":
                     self._append_live_line(str(payload))
                 elif kind == "files":
@@ -3042,9 +3076,20 @@ class App(tk.Tk):
                     else:
                         self.status_var.set(f"Device: {msg}")
                 elif kind == "pump_ok":
-                    self.status_var.set(f"Pump set to {payload}%")
+                    self.status_var.set(f"Pump speed set to {payload}%")
+                elif kind == "pump_status":
+                    # Periodic poll: updates the switch line only, never the slider.
+                    self._apply_pump_status(payload)
+                elif kind == "pump_status_init":
+                    # Initial read after connect: the one time the slider is set
+                    # from the device (so it shows the speed the pump will use).
+                    self._apply_pump_status(payload, sync_slider=True)
                 elif kind == "pump_done":
-                    self._update_wifi_controls()
+                    # A send finished; push any newer slider value that arrived
+                    # while it was in flight.
+                    self._pump_send_inflight = False
+                    if self._pump_pending is not None and self._pump_debounce_id is None:
+                        self._pump_flush()
                 elif kind == "calib_r2ppm_ok":
                     ch_disp, r2ppm, alpha, ts_stored = payload
                     note = "" if ts_stored else "  (calib time not stored)"
@@ -3154,10 +3199,6 @@ class App(tk.Tk):
                         self.status_var.set(f"Firmware version read failed: {msg}")
                 elif kind == "about_done":
                     self._update_wifi_controls()
-                elif kind == "pump_init":
-                    pct = int(payload)
-                    self.pump_pct_var.set(pct)
-                    self.pump_label_var.set(f"{pct}%")
                 elif kind == "mqtt_status":
                     self._handle_mqtt_status(str(payload))
                 elif kind == "mqtt_message":
@@ -3222,7 +3263,7 @@ class App(tk.Tk):
         threading.Thread(target=worker, daemon=True).start()
 
     def _initial_status_fetch(self) -> None:
-        """Fetch WiFi status and pump speed after COM connect."""
+        """Fetch WiFi status, pump speed/switch state after COM connect."""
         def worker() -> None:
             # First, drain any unsolicited STATUS messages (e.g. boot errors like missing mux)
             msgs = self.client.drain_status_messages(listen_s=1.5)
@@ -3236,7 +3277,7 @@ class App(tk.Tk):
             try:
                 pump = self.client.pump_get(timeout_s=3.0)
                 if pump.get("success"):
-                    self.events.put(("pump_init", pump["percent"]))
+                    self.events.put(("pump_status_init", pump))
             except Exception:
                 pass
             try:
@@ -4180,18 +4221,17 @@ class App(tk.Tk):
             threading.Thread(target=worker, daemon=True).start()
 
     def _update_wifi_controls(self) -> None:
-        """Enable/disable WiFi and pump buttons based on connection state and live streaming."""
+        """Enable/disable WiFi, pump and device controls by connection/live state."""
         # Disable WiFi controls during live streaming to avoid interference
         wifi_ok = self.connected and not self.live_running
         self.wifi_scan_btn.configure(state=tk.NORMAL if wifi_ok and not self.wifi_scan_inflight else tk.DISABLED)
         self.wifi_saved_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
         self.wifi_reset_btn.configure(state=tk.NORMAL if wifi_ok else tk.DISABLED)
-        # Pump controls
+        # Pump speed slider — the only pump control (there are no Set/Off
+        # buttons); the device gates the pump on its latching switch.
         pump_ok = self.connected and not self.live_running
         pump_st = tk.NORMAL if pump_ok else tk.DISABLED
-        self.pump_set_btn.configure(state=pump_st)
-        self.pump_off_btn.configure(state=pump_st)
-        self.pump_full_btn.configure(state=pump_st)
+        self.pump_slider.configure(state=pump_st)
         # CH4 calibration
         self.calib_r2ppm_btn.configure(state=pump_st)
         MAX_CALIB_POINTS = 5
@@ -4212,36 +4252,39 @@ class App(tk.Tk):
         # About (firmware version query / compatibility check)
         self.about_refresh_btn.configure(state=pump_st)
 
-    def _pump_set(self) -> None:
-        """Set pump to slider value."""
-        pct = int(self.pump_pct_var.get())
+    def _pump_slider_moved(self, value: str) -> None:
+        """Slider callback: update the readout and send the new speed.
+
+        The slider is the only pump control (no Set/Off buttons), so every
+        change is pushed automatically. ``_pump_syncing`` suppresses the echo
+        when the slider is refreshed from a device reading.
+        """
+        pct = int(float(value))
+        self.pump_label_var.set(f"{pct}%")
+        if self._pump_syncing or not self.connected or self.live_running:
+            return
+        self._pump_pending = pct
+        if self._pump_debounce_id is not None:
+            self.after_cancel(self._pump_debounce_id)
+        self._pump_debounce_id = self.after(PUMP_SEND_DEBOUNCE_MS, self._pump_flush)
+
+    def _pump_flush(self) -> None:
+        """Send the latest slider value once the user pauses (debounce timer)."""
+        self._pump_debounce_id = None
+        if self.live_running:
+            # Live streaming owns the serial port; drop the queued value rather
+            # than race its reader (the slider is disabled while streaming).
+            self._pump_pending = None
+            return
+        if self._pump_pending is None or self._pump_send_inflight:
+            return  # an in-flight send picks the newest value up when it finishes
+        pct = self._pump_pending
+        self._pump_pending = None
         self._pump_send(pct)
 
-    def _pump_off(self) -> None:
-        """Turn pump off."""
-        self.pump_pct_var.set(0)
-        self.pump_label_var.set("0%")
-        self._pump_send(0)
-
-    def _pump_full(self) -> None:
-        """Set pump to 100%."""
-        self.pump_pct_var.set(100)
-        self.pump_label_var.set("100%")
-        self._pump_send(100)
-
     def _pump_send(self, pct: int) -> None:
-        """Send pump speed command in background thread."""
-        self.pump_set_btn.configure(state=tk.DISABLED)
-        self.pump_off_btn.configure(state=tk.DISABLED)
-        self.pump_full_btn.configure(state=tk.DISABLED)
-        self.calib_r2ppm_btn.configure(state=tk.DISABLED)
-        self._calib_add_btn.configure(state=tk.DISABLED)
-        self.eeprom_write_btn.configure(state=tk.DISABLED)
-        self.eeprom_read_btn.configure(state=tk.DISABLED)
-        self.eeprom_clear_btn.configure(state=tk.DISABLED)
-        self.board_id_write_btn.configure(state=tk.DISABLED)
-        self.board_id_read_btn.configure(state=tk.DISABLED)
-        self.board_id_clear_btn.configure(state=tk.DISABLED)
+        """Send a pump speed command in a background thread."""
+        self._pump_send_inflight = True
 
         def worker() -> None:
             try:
@@ -4256,6 +4299,43 @@ class App(tk.Tk):
                 self.events.put(("pump_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _set_pump_switch_state(self, latched: bool | None, percent: int = 0) -> None:
+        """Show the enable-switch state the device reported.
+
+        `latched` is True/False for the switch position, or None when the
+        firmware is too old to report it.
+        """
+        if latched is None:
+            text, colour = "Enable switch: unknown", "#888888"
+        elif not latched:
+            text, colour = "Enable switch: open \u2014 pump disabled", "#d97706"
+        elif percent > 0:
+            text, colour = (f"Enable switch: latched \u2014 pump running at {percent}%",
+                            "#16a34a")
+        else:
+            text, colour = "Enable switch: latched \u2014 speed set to 0%", "#16a34a"
+        self.pump_switch_var.set(text)
+        self.pump_switch_label.configure(foreground=colour)
+
+    def _apply_pump_status(self, status: dict, sync_slider: bool = False) -> None:
+        """Reflect the device's pump speed + enable-switch state in the panel.
+
+        The slider is owned by the user: ``sync_slider`` is set only by the
+        initial read after connecting, so the periodic poll — and with it any
+        press of the latching switch — can never move the handle (the polled
+        speed is still shown in the switch line). Values that arrive while the
+        user is mid-drag or while a send is in flight are never applied.
+        """
+        pct = int(status.get("percent", 0))
+        if sync_slider and self._pump_pending is None and not self._pump_send_inflight:
+            self._pump_syncing = True
+            try:
+                self.pump_pct_var.set(pct)
+                self.pump_label_var.set(f"{pct}%")
+            finally:
+                self._pump_syncing = False
+        self._set_pump_switch_state(status.get("enabled"), pct)
 
     def _calib_add_row(self) -> None:
         """Append a new (ppm, raw ADC) entry row to the calibration panel."""
@@ -5046,6 +5126,47 @@ class App(tk.Tk):
             finally:
                 self.rtc_poll_inflight = False
                 self.rtc_poll_timer = self.after(10000, self._rtc_poll_tick)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _schedule_pump_poll(self) -> None:
+        """Schedule periodic pump speed / enable-switch polling."""
+        self._cancel_pump_poll()  # Cancel any existing timer
+        self.pump_poll_timer = self.after(PUMP_POLL_MS, self._pump_poll_tick)
+
+    def _cancel_pump_poll(self) -> None:
+        """Cancel the pump polling timer."""
+        if self.pump_poll_timer is not None:
+            self.after_cancel(self.pump_poll_timer)
+            self.pump_poll_timer = None
+
+    def _pump_poll_tick(self) -> None:
+        """Called periodically to poll the pump speed and enable-switch state."""
+        if not self.connected or self.pump_poll_inflight:
+            # Reschedule for next check
+            self.pump_poll_timer = self.after(PUMP_POLL_MS, self._pump_poll_tick)
+            return
+
+        # During live streaming the live loop owns the serial port; sending
+        # commands would race with its reads and corrupt framing.
+        if self.live_running:
+            self.pump_poll_timer = self.after(PUMP_POLL_MS, self._pump_poll_tick)
+            return
+
+        self.pump_poll_inflight = True
+
+        def worker() -> None:
+            try:
+                result = self.client.pump_get(timeout_s=3.0)
+                if result.get("success"):
+                    self.events.put(("pump_status", result))
+            except Exception:
+                # Silently fail - don't disrupt the user
+                pass
+            finally:
+                self.pump_poll_inflight = False
+                # Reschedule for next check regardless of success/failure
+                self.pump_poll_timer = self.after(PUMP_POLL_MS, self._pump_poll_tick)
 
         threading.Thread(target=worker, daemon=True).start()
 

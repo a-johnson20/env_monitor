@@ -214,6 +214,57 @@ def test_fw_version_error_on_old_firmware():
     expect("Error code 1" in r["message"], f"message mismatch: {r}")
 
 
+def test_pump_get_parses_speed_and_switch_state():
+    """PUMP_STATUS from firmware 1.4.0 is [percent][enable switch latched]."""
+    data = bytes([0x22, 0x02, 65, 0x01])
+    c = make_client(on_reset=data)
+    r = c.pump_get(timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(r["percent"] == 65, f"percent mismatch: {r}")
+    expect(r["enabled"] is True, f"switch state mismatch: {r}")
+    expect(c.ser.written.startswith(bytes([0x22])), f"wrong command sent: {c.ser.written!r}")
+
+
+def test_pump_get_reports_switch_open_as_disabled():
+    """An open (idle-high) enable switch reads back as enabled=False."""
+    c = make_client(on_reset=bytes([0x22, 0x02, 0, 0x00]))
+    r = c.pump_get(timeout_s=2.0)
+    expect(r["percent"] == 0 and r["enabled"] is False, f"mismatch: {r}")
+
+
+def test_pump_get_accepts_older_single_field_reply():
+    """Firmware <= 1.3.x replies with [percent] only — switch state is unknown."""
+    c = make_client(on_reset=bytes([0x22, 0x01, 40]))
+    r = c.pump_get(timeout_s=2.0)
+    expect(r["percent"] == 40, f"percent mismatch: {r}")
+    expect(r["enabled"] is None, f"switch state should be unknown: {r}")
+
+
+def test_pump_get_skips_status_frame_in_front():
+    """An unsolicited STATUS frame before the PUMP_STATUS reply is skipped."""
+    msg = b"[NTP] sync in progress"
+    data = bytes([0x02, len(msg)]) + msg + bytes([0x22, 0x02, 30, 0x01])
+    c = make_client(on_reset=data)
+    r = c.pump_get(timeout_s=2.0)
+    expect(r["percent"] == 30 and r["enabled"] is True, f"mismatch: {r}")
+
+
+def test_pump_set_sends_clamped_percent():
+    """PUMP_SET payload is a single percent byte, clamped to 0-100."""
+    c = make_client(on_reset=bytes([0x00]))
+    r = c.pump_set(250, timeout_s=2.0)
+    expect(r["success"] is True and r["percent"] == 100, f"clamp failed: {r}")
+    expect(c.ser.written.startswith(bytes([0x21, 100])), f"cmd/payload wrong: {c.ser.written!r}")
+
+
+def test_pump_set_error_is_reported_not_raised():
+    """A device ERROR is returned as a failure dict (no exception)."""
+    c = make_client(on_reset=bytes([0x01, 0x04]))
+    r = c.pump_set(50, timeout_s=2.0)
+    expect(r["success"] is False, f"expected failure, got {r}")
+    expect("Error code 4" in r["message"], f"message mismatch: {r}")
+
+
 def test_calib_timestamp_ok():
     """CALIB_TIMESTAMP (0x2A) reply OK → success; payload is [ch][u32 LE epoch]."""
     c = make_client(on_reset=bytes([0x00]))

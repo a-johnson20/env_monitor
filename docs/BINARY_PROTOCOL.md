@@ -33,6 +33,9 @@ All commands are single-byte opcodes:
 0x1D - LOG_GET         (File index as single byte)
 0x1E - RTC_TIME        (No payload)
 0x1F - BACK            (No payload)
+0x21 - PUMP_SET        (Speed percent as single byte; stored as the running speed and
+                        applied only while the pump enable switch is latched)
+0x22 - PUMP_GET        (No payload; replies PUMP_STATUS)
 0x26 - EEPROM_WRITE    (Channel + TGS ID (u16 BE) + length-prefixed lot + length-prefixed board ID)
 0x27 - EEPROM_READ     (Channel as single byte; replies EEPROM_IDS CSV "id,crc,lot,board,calib")
 0x28 - EEPROM_CLEAR    (Channel as single byte; erases the whole EEPROM map — coefficients,
@@ -62,6 +65,7 @@ All commands are single-byte opcodes:
 
 0x20 - LIVE_DATA       (CSV data - raw sensor readings)
 0x21 - RTC_RESPONSE    (Time string with length prefix)
+0x22 - PUMP_STATUS     (Pump speed percent + enable-switch latched flag, 2 bytes)
 0x23 - LORA_INFO       (DevEUI,AppEUI,AppKey CSV string with length prefix)
 0x24 - EEPROM_IDS      (TGS identity CSV "id,crc,lot,board,calib" with length prefix; calib is
                         the decimal Unix time of the last calibration, empty if never
@@ -109,6 +113,30 @@ Some commands require multiple values. They're sent sequentially:
 2. SSID (length-prefixed string)
 3. Username (length-prefixed string)
 4. Password (length-prefixed string)
+
+## Pump Control and Enable Switch
+
+The pump PWM output is gated by the rig's latching enable switch (`PUMP_SWITCH_PIN`,
+GPIO39: idle high, latched = pulled low). The firmware only drives the pump while
+the switch is latched, so a speed can be set at any time but the pump runs only
+with the switch closed — opening the switch stops the pump without forgetting
+the speed, and latching it again resumes that speed.
+
+`0x21` (PUMP_SET) takes one byte, the speed in percent. It stores the value in
+ESP32 NVS (namespace `pump`, key `pct`) and applies it through the switch gate.
+
+`0x22` (PUMP_GET) replies with `PUMP_STATUS` (also `0x22`) as `[type][len=2]
+[percent][latched]`, where `latched` is 1 while the enable switch is closed.
+Firmware up to 1.3.x replied with `len=1` and the percent only; a client must
+consume the whole frame it is told about (the GUI treats the missing latched
+byte as "unknown" and keeps working with those revisions).
+
+On the GUI side the Pump Control panel is a speed slider alone — there are no
+Set/Off buttons, so each slider change is sent automatically (debounced by
+`PUMP_SEND_DEBOUNCE_MS`). The panel also polls the switch state every
+`PUMP_POLL_MS` to show whether the pump can run; that poll never moves the
+slider handle, so toggling the switch cannot change the displayed speed. The
+device's stored speed is read into the slider only once, when the GUI connects.
 
 ## TGS Sensor EEPROM Map (calibration timestamp)
 
