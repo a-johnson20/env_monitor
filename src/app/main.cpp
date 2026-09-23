@@ -39,7 +39,7 @@
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
 // Keep this in sync with GUI_VERSION in gui/env_monitor_gui.py — the two are
 // compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.1.0"
+#define FIRMWARE_VERSION "1.1.1"
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -735,8 +735,9 @@ bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
   return true;
 }
 
-// Erase the identity blocks (sensor ID, calib unix time, lot #, board ID)
-// back to blank 0xFF on TGS2611 channel ch (0-based). Verified by read-back.
+// Erase all stored data (R2ppm/alpha calibration coefficients, calibration
+// unix time, sensor ID, lot #, board ID) back to blank 0xFF on TGS2611
+// channel ch (0-based). Verified by read-back.
 bool tgs2611_clear_ids(uint8_t ch) {
   if (ch >= N_TGS2611) return false;
   if (!select_channel(Wire, hal::Mux::TGS2611[ch], muxStateWire)) return false;
@@ -746,6 +747,10 @@ bool tgs2611_clear_ids(uint8_t ch) {
 
   // 0x00..0x02: sensor ID block (2-byte id + CRC)
   if (!at24_write(hal::I2CAddr::AT24, 0x00, blank, 3)) return false;
+  // 0x03..0x07: R2ppm coefficient block (f32 + CRC)
+  if (!at24_write(hal::I2CAddr::AT24, 0x03, blank, 5)) return false;
+  // 0x08..0x0C: Shah alpha coefficient block (f32 + CRC)
+  if (!at24_write(hal::I2CAddr::AT24, 0x08, blank, 5)) return false;
   // 0x0D..0x11: calibration unix time block (4-byte epoch + CRC)
   if (!at24_write(hal::I2CAddr::AT24, 0x0D, blank, 5)) return false;
   // 0x20..0x30: lot block (len + 15 ASCII + CRC)
@@ -767,6 +772,12 @@ bool tgs2611_clear_ids(uint8_t ch) {
   if (!at24_read(hal::I2CAddr::AT24, 0x0D, ts_rb, 5)) return false;
   for (uint8_t i = 0; i < 5; ++i) {
     if (ts_rb[i] != 0xFF) return false;
+  }
+  // Verify the calibration coefficient blocks are blank too (0x03..0x0C)
+  uint8_t coef_rb[10] = {0};
+  if (!at24_read(hal::I2CAddr::AT24, 0x03, coef_rb, 10)) return false;
+  for (uint8_t i = 0; i < 10; ++i) {
+    if (coef_rb[i] != 0xFF) return false;
   }
   return true;
 }

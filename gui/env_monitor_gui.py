@@ -70,7 +70,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.1.0"
+GUI_VERSION = "1.1.1"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -2962,7 +2962,8 @@ class App(tk.Tk):
                             "Confirm EEPROM Clear",
                             f"Channel {ch_disp} \u2014 values currently stored:\n\n"
                             f"{current}\n\n"
-                            f"This will erase the TGS ID, Lot # and Board ID\n"
+                            f"This will erase the TGS ID, the calibration coefficients\n"
+                            f"(R\u2082ppm/\u03b1), the calibration date, Lot # and Board ID\n"
                             f"from the sensor EEPROM. This cannot be undone.\n\n"
                             f"Are you sure you want to continue?",
                             icon="warning"):

@@ -668,7 +668,8 @@ void poll() {
     }
 
     case proto::Cmd::EEPROM_CLEAR: {
-      // Payload: [ch: u8]; erases ID/lot/board blocks back to blank 0xFF
+      // Payload: [ch: u8]; erases coefficients, calib time and ID/lot/board
+      // blocks back to blank 0xFF (full wipe of the sensor EEPROM)
       uint8_t ch;
       if (!read_byte_timeout(ch)) {
         proto::write_error(proto::ErrorCode::TIMEOUT);

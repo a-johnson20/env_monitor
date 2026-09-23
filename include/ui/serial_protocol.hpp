@@ -29,7 +29,7 @@ enum class Cmd : uint8_t {
   LORA_GEN_KEYS   = 0x25,  // Generate new AppEUI + AppKey, store in NVS, program module
   EEPROM_WRITE    = 0x26,  // Write TGS EEPROM IDs: [ch: u8][tgs_id: u16 BE][lot_len: u8][lot][board_len: u8][board]
   EEPROM_READ     = 0x27,  // Read TGS EEPROM IDs: payload [ch: u8]; reply CSV "id,crc,lot,board"
-  EEPROM_CLEAR    = 0x28,  // Erase TGS EEPROM IDs (ID/lot/board back to blank 0xFF): payload [ch: u8]
+  EEPROM_CLEAR    = 0x28,  // Erase TGS EEPROM (coefficients, calib time, ID/lot/board to blank 0xFF): payload [ch: u8]
   FW_VERSION      = 0x29,  // Get firmware version (reply: FW_VERSION message with version string)
   LOG_MENU        = 0x1B,  // Enter log export menu
   LOG_LIST        = 0x1C,  // List log files

@@ -35,7 +35,8 @@ All commands are single-byte opcodes:
 0x1F - BACK            (No payload)
 0x26 - EEPROM_WRITE    (Channel + TGS ID (u16 BE) + length-prefixed lot + length-prefixed board ID)
 0x27 - EEPROM_READ     (Channel as single byte; replies EEPROM_IDS CSV "id,crc,lot,board,calib")
-0x28 - EEPROM_CLEAR    (Channel as single byte; erases ID/lot/board blocks back to blank 0xFF)
+0x28 - EEPROM_CLEAR    (Channel as single byte; erases the whole EEPROM map — coefficients,
+                        calibration time, ID/lot/board — back to blank 0xFF)
 0x29 - FW_VERSION      (No payload; replies FW_VERSION string, e.g. "1.0.0")
 0x2A - CALIB_TIMESTAMP (Channel + Unix time as u32 LE; stores the calibration
                         date/time in the sensor EEPROM)
@@ -124,7 +125,9 @@ Write path: after `0x23` (CALIB_MULTIPOINT) returns OK, the GUI automatically
 sends `0x2A` (CALIB_TIMESTAMP) with `[ch: u8][unix: u32 LE]`. Older firmware
 that does not know `0x2A` replies `ERROR/1`, which the GUI reports as
 "(calib time not stored)" without failing the calibration itself. `0x28`
-(EEPROM_CLEAR) also erases the timestamp block back to blank 0xFF.
+(EEPROM_CLEAR) performs a full wipe: it erases every block above (including
+the R2ppm/alpha coefficients and the calibration time) back to blank 0xFF,
+so the sensor reads as uncalibrated afterwards.
 
 ## Files Modified
 
