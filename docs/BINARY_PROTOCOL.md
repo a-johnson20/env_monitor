@@ -40,6 +40,9 @@ All commands are single-byte opcodes:
 0x29 - FW_VERSION      (No payload; replies FW_VERSION string, e.g. "1.0.0")
 0x2A - CALIB_TIMESTAMP (Channel + Unix time as u32 LE; stores the calibration
                         date/time in the sensor EEPROM)
+0x2B - BOARD_ID_WRITE  (Length-prefixed board ID string; stored in ESP32 NVS)
+0x2C - BOARD_ID_READ   (No payload; replies BOARD_ID, length-prefixed; empty = not set)
+0x2D - BOARD_ID_CLEAR  (No payload; erases the mainboard ID from ESP32 NVS)
 ```
 
 #### Response Types (Device → Client)
@@ -64,6 +67,7 @@ All commands are single-byte opcodes:
                         the decimal Unix time of the last calibration, empty if never
                         calibrated, "ERR" if its CRC is bad)
 0x25 - FW_VERSION      (Firmware version string "MAJOR.MINOR.PATCH" with length prefix)
+0x26 - BOARD_ID        (Mainboard ID, length-prefixed; empty string = never set)
 ```
 
 #### Error Codes

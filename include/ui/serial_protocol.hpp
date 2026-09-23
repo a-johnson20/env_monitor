@@ -31,6 +31,9 @@ enum class Cmd : uint8_t {
   EEPROM_READ     = 0x27,  // Read TGS EEPROM IDs: payload [ch: u8]; reply CSV "id,crc,lot,board"
   EEPROM_CLEAR    = 0x28,  // Erase TGS EEPROM (coefficients, calib time, ID/lot/board to blank 0xFF): payload [ch: u8]
   FW_VERSION      = 0x29,  // Get firmware version (reply: FW_VERSION message with version string)
+  BOARD_ID_WRITE  = 0x2B,  // Write mainboard ID (length-prefixed string) to ESP32 NVS
+  BOARD_ID_READ   = 0x2C,  // Read mainboard ID from ESP32 NVS (reply: BOARD_ID message, length-prefixed)
+  BOARD_ID_CLEAR  = 0x2D,  // Erase mainboard ID from ESP32 NVS
   LOG_MENU        = 0x1B,  // Enter log export menu
   LOG_LIST        = 0x1C,  // List log files
   LOG_GET         = 0x1D,  // Get log file (followed by uint8_t index)
@@ -59,6 +62,7 @@ enum class RespType : uint8_t {
   LORA_INFO       = 0x23,  // LoRa identifiers: "DevEUI,AppEUI,AppKey" CSV string
   EEPROM_IDS      = 0x24,  // TGS EEPROM IDs: "id,crc,lot,board" CSV string
   FW_VERSION      = 0x25,  // Firmware version string
+  BOARD_ID        = 0x26,  // Mainboard ID (length-prefixed string; empty = not set)
   
   // Prompts
   PROMPT_STRING   = 0x30,  // Request string input (followed by length + prompt_text)

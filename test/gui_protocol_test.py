@@ -256,6 +256,57 @@ def test_format_calib_time_variants():
     expect(f("junk") == "junk", f"unparsable should pass through: {f('junk')!r}")
 
 
+def test_board_id_write_ok():
+    """BOARD_ID_WRITE (0x2B) reply OK → success; payload is [len][ascii id]."""
+    c = make_client(on_reset=bytes([0x00]))
+    r = c.board_id_write("MAIN-01", timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(c.ser.written.startswith(bytes([0x2B, 7])), f"cmd/len wrong: {c.ser.written!r}")
+    expect(b"MAIN-01" in c.ser.written, "board id bytes missing")
+
+
+def test_board_id_read_parses_string():
+    """BOARD_ID_READ (0x2C) reply BOARD_ID (0x26) + length + string parses."""
+    bid = b"MAIN-01"
+    data = bytes([0x26, len(bid)]) + bid
+    c = make_client(on_reset=data)
+    r = c.board_id_read(timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(r["board_id"] == "MAIN-01", f"board_id wrong: {r}")
+
+
+def test_board_id_read_empty_means_not_set():
+    """Length 0 reply = mainboard ID never set; parses to empty string."""
+    c = make_client(on_reset=bytes([0x26, 0x00]))
+    r = c.board_id_read(timeout_s=2.0)
+    expect(r["success"] is True and r["board_id"] == "", f"got {r}")
+
+
+def test_board_id_clear_ok():
+    """BOARD_ID_CLEAR (0x2D) reply OK → success."""
+    c = make_client(on_reset=bytes([0x00]))
+    r = c.board_id_clear(timeout_s=2.0)
+    expect(r["success"] is True, f"expected success, got {r}")
+    expect(c.ser.written.startswith(bytes([0x2D])), f"cmd wrong: {c.ser.written!r}")
+
+
+def test_board_id_error_on_old_firmware():
+    """Older firmware answers ERROR/1 (unknown command) for all three 0x2B..0x2D."""
+    for fn in ("board_id_read", "board_id_clear"):
+        c = make_client(on_reset=bytes([0x01, 0x01]))
+        r = getattr(c, fn)(timeout_s=2.0)
+        expect(r["success"] is False, f"{fn}: expected failure, got {r}")
+    c = make_client(on_reset=bytes([0x01, 0x01]))
+    r = c.board_id_write("X", timeout_s=2.0)
+    expect(r["success"] is False, f"board_id_write: expected failure, got {r}")
+
+
+def test_board_id_in_framed_response_set():
+    """BOARD_ID (0x26) is in the frame-aware reader's length-framed set."""
+    expect(gui.ProtoResp.BOARD_ID in gui.SerialMenuClient._LEN_FRAMED,
+           "BOARD_ID missing from _LEN_FRAMED")
+
+
 def test_parse_version_variants():
     """parse_version tolerates short forms and rejects non-version text."""
     expect(gui.parse_version("1.0.0") == (1, 0, 0), "1.0.0 parse failed")

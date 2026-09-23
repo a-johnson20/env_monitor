@@ -70,7 +70,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.1.1"
+GUI_VERSION = "1.2.1"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -238,6 +238,9 @@ class ProtoCmd:
     EEPROM_CLEAR = 0x28  # payload [ch: u8]; erase ID/lot/board blocks back to blank
     FW_VERSION = 0x29    # no payload; reply FW_VERSION string
     CALIB_TIMESTAMP = 0x2A  # [ch: u8][unix time: 4-byte LE u32]; stores calib date in sensor EEPROM
+    BOARD_ID_WRITE = 0x2B  # [len u8][ascii board id]; stores mainboard ID in ESP32 NVS
+    BOARD_ID_READ = 0x2C   # no payload; reply BOARD_ID (0x26) length-prefixed string
+    BOARD_ID_CLEAR = 0x2D  # no payload; erases the mainboard ID from ESP32 NVS
     LOG_MENU = 0x1B
     LOG_LIST = 0x1C
     LOG_GET = 0x1D
@@ -262,6 +265,7 @@ class ProtoResp:
     LORA_INFO = 0x23   # DevEUI,AppEUI,AppKey CSV string
     EEPROM_IDS = 0x24  # TGS EEPROM IDs: "id,crc,lot,board" CSV string
     FW_VERSION = 0x25  # Firmware version string (MAJOR.MINOR.PATCH)
+    BOARD_ID = 0x26    # Mainboard ID (length-prefixed string; empty = not set)
     PROMPT_STRING = 0x30
     PROMPT_CONFIRM = 0x31
 
@@ -401,7 +405,7 @@ class SerialMenuClient:
     _LEN_FRAMED = frozenset({
         ProtoResp.STATUS, ProtoResp.LIVE_DATA, ProtoResp.RTC_RESPONSE,
         ProtoResp.LORA_INFO, ProtoResp.PUMP_STATUS, ProtoResp.EEPROM_IDS,
-        ProtoResp.FW_VERSION,
+        ProtoResp.FW_VERSION, ProtoResp.BOARD_ID,
     })
 
     def _consume_frame(self, resp: int, timeout_s: float) -> None:
@@ -1218,6 +1222,57 @@ class SerialMenuClient:
                 length = self._read_byte(timeout_s)
                 version = self._read_exact(length, timeout_s).decode("utf-8", errors="replace")
                 return {"success": True, "version": version.strip()}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
+
+    def board_id_write(self, board_id: str, timeout_s: float = 5.0) -> dict:
+        """Send BOARD_ID_WRITE (0x2B): store the mainboard ID in ESP32 NVS."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        bid_b = board_id.encode("ascii", errors="ignore")[:32]
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.BOARD_ID_WRITE)
+            ser.write(bytes([len(bid_b)]))
+            ser.write(bid_b)
+            ser.flush()
+            resp, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.OK:
+                return {"success": True}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
+
+    def board_id_read(self, timeout_s: float = 5.0) -> dict:
+        """Send BOARD_ID_READ (0x2C): read the mainboard ID from ESP32 NVS.
+
+        board_id is "" when the ID has never been set.
+        """
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.BOARD_ID_READ)
+            resp, _ = self._read_response({ProtoResp.BOARD_ID, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.BOARD_ID:
+                length = self._read_byte(timeout_s)
+                board_id = self._read_exact(length, timeout_s).decode("utf-8", errors="replace")
+                return {"success": True, "board_id": board_id}
+            code = self._read_byte(timeout_s)
+            return {"success": False, "message": f"Error code {code}"}
+
+    def board_id_clear(self, timeout_s: float = 5.0) -> dict:
+        """Send BOARD_ID_CLEAR (0x2D): erase the mainboard ID from ESP32 NVS."""
+        if not self.is_open:
+            raise RuntimeError("Serial port not open")
+        with self.lock:
+            ser = self._require_open()
+            ser.reset_input_buffer()
+            self._send_cmd(ProtoCmd.BOARD_ID_CLEAR)
+            resp, _ = self._read_response({ProtoResp.OK, ProtoResp.ERROR}, timeout_s)
+            if resp == ProtoResp.OK:
+                return {"success": True}
             code = self._read_byte(timeout_s)
             return {"success": False, "message": f"Error code {code}"}
 
@@ -2348,7 +2403,7 @@ class App(tk.Tk):
         )
         self._eeprom_advanced_btn.pack(anchor="w", pady=(10, 2))
 
-        self._eeprom_frame = ttk.LabelFrame(_scroll_inner, text="EEPROM Write")
+        self._eeprom_frame = ttk.LabelFrame(_scroll_inner, text="TGS EEPROM")
         # packed/hidden by _toggle_eeprom_advanced
 
         eep_grid = ttk.Frame(self._eeprom_frame)
@@ -2379,25 +2434,64 @@ class App(tk.Tk):
         eep_btn_row.pack(fill=tk.X, padx=10, pady=(4, 8))
 
         self.eeprom_write_btn = ttk.Button(
-            eep_btn_row, text="Write to EEPROM", command=self._eeprom_write_ids,
+            eep_btn_row, text="Write", command=self._eeprom_write_ids,
             state=tk.DISABLED, style="Accent.TButton",
         )
         self.eeprom_write_btn.pack(side=tk.LEFT)
 
         self.eeprom_read_btn = ttk.Button(
-            eep_btn_row, text="Read EEPROM", command=self._eeprom_read_info,
+            eep_btn_row, text="Read", command=self._eeprom_read_info,
             state=tk.DISABLED, style="Accent.TButton",
         )
         self.eeprom_read_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.eeprom_clear_btn = ttk.Button(
-            eep_btn_row, text="Clear EEPROM", command=self._eeprom_clear_clicked,
+            eep_btn_row, text="Erase", command=self._eeprom_clear_clicked,
             state=tk.DISABLED, style="Accent.TButton",
         )
         self.eeprom_clear_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.eeprom_status_var = tk.StringVar(value="")
         ttk.Label(eep_btn_row, textvariable=self.eeprom_status_var, foreground="#888888").pack(
+            side=tk.LEFT, padx=(12, 0)
+        )
+
+        # ---- Mainboard ID (ESP32 NVS) — inside Advanced Settings ----
+        self._board_id_frame = ttk.LabelFrame(_scroll_inner, text="Mainboard NVS")
+        # packed/hidden by _toggle_eeprom_advanced
+
+        bid_grid = ttk.Frame(self._board_id_frame)
+        bid_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
+        bid_grid.columnconfigure(1, weight=1)
+
+        ttk.Label(bid_grid, text="Board ID:").grid(row=0, column=0, sticky="w", pady=2)
+        self.board_id_var = tk.StringVar(value="")
+        ttk.Entry(bid_grid, textvariable=self.board_id_var, width=34).grid(
+            row=0, column=1, sticky="w", padx=(8, 0))
+
+        bid_btn_row = ttk.Frame(self._board_id_frame)
+        bid_btn_row.pack(fill=tk.X, padx=10, pady=(4, 8))
+
+        self.board_id_write_btn = ttk.Button(
+            bid_btn_row, text="Write", command=self._board_id_write_clicked,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.board_id_write_btn.pack(side=tk.LEFT)
+
+        self.board_id_read_btn = ttk.Button(
+            bid_btn_row, text="Read", command=self._board_id_read_clicked,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.board_id_read_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.board_id_clear_btn = ttk.Button(
+            bid_btn_row, text="Erase", command=self._board_id_clear_clicked,
+            state=tk.DISABLED, style="Accent.TButton",
+        )
+        self.board_id_clear_btn.pack(side=tk.LEFT, padx=(8, 0))
+
+        self.board_id_status_var = tk.StringVar(value="")
+        ttk.Label(bid_btn_row, textvariable=self.board_id_status_var, foreground="#888888").pack(
             side=tk.LEFT, padx=(12, 0)
         )
 
@@ -2468,12 +2562,15 @@ class App(tk.Tk):
             foreground=VERSION_LEVEL_COLOURS.get(level, "#888888"))
 
     def _toggle_eeprom_advanced(self) -> None:
-        """Show/hide the EEPROM Write section."""
-        if self._eeprom_frame.winfo_ismapped() or getattr(self, "_eeprom_visible", False):
+        """Show/hide the EEPROM Write + Mainboard ID sections."""
+        visible = self._eeprom_frame.winfo_ismapped() or getattr(self, "_eeprom_visible", False)
+        if visible:
             self._eeprom_frame.pack_forget()
+            self._board_id_frame.pack_forget()
             self._eeprom_visible = False
         else:
             self._eeprom_frame.pack(fill=tk.X, pady=(0, 4), after=self._eeprom_advanced_btn)
+            self._board_id_frame.pack(fill=tk.X, pady=(0, 4), after=self._eeprom_frame)
             self._eeprom_visible = True
 
     def _clear_wifi_form(self) -> None:
@@ -2976,6 +3073,24 @@ class App(tk.Tk):
                     self.eeprom_status_var.set(f"ch{ch_disp}: EEPROM cleared \u2713")
                     self.status_var.set(f"TGS ch{ch_disp} EEPROM erased")
                 elif kind == "eeprom_clear_btn_done":
+                    self._update_wifi_controls()
+                elif kind == "board_id_write_ok":
+                    bid = payload
+                    self.board_id_status_var.set(f"Board ID '{bid}' stored \u2713")
+                    self.status_var.set("Mainboard ID written to ESP32 memory")
+                elif kind == "board_id_read_ok":
+                    result = payload
+                    bid = result.get("board_id") or ""
+                    messagebox.showinfo(
+                        "Mainboard ID",
+                        f"Currently stored values:\n\n"
+                        f"  Board ID: {bid or '(not set)'}")
+                    self.board_id_status_var.set(
+                        f"Board ID: {bid or '(not set)'} \u2713")
+                elif kind == "board_id_clear_ok":
+                    self.board_id_status_var.set("Board ID erased \u2713")
+                    self.status_var.set("Mainboard ID erased from ESP32 memory")
+                elif kind == "board_id_btn_done":
                     self._update_wifi_controls()
                 elif kind == "fw_version_ok":
                     self._apply_fw_version(str(payload))
@@ -3988,6 +4103,10 @@ class App(tk.Tk):
         self.eeprom_write_btn.configure(state=pump_st)
         self.eeprom_read_btn.configure(state=pump_st)
         self.eeprom_clear_btn.configure(state=pump_st)
+        # Mainboard ID (ESP32 NVS) section
+        self.board_id_write_btn.configure(state=pump_st)
+        self.board_id_read_btn.configure(state=pump_st)
+        self.board_id_clear_btn.configure(state=pump_st)
         # About (firmware version query / compatibility check)
         self.about_refresh_btn.configure(state=pump_st)
 
@@ -4018,6 +4137,9 @@ class App(tk.Tk):
         self.eeprom_write_btn.configure(state=tk.DISABLED)
         self.eeprom_read_btn.configure(state=tk.DISABLED)
         self.eeprom_clear_btn.configure(state=tk.DISABLED)
+        self.board_id_write_btn.configure(state=tk.DISABLED)
+        self.board_id_read_btn.configure(state=tk.DISABLED)
+        self.board_id_clear_btn.configure(state=tk.DISABLED)
 
         def worker() -> None:
             try:
@@ -4294,6 +4416,82 @@ class App(tk.Tk):
             return datetime.fromtimestamp(int(s)).strftime("%Y-%m-%d %H:%M")
         except (ValueError, OverflowError, OSError):
             return s
+
+    def _board_id_write_clicked(self) -> None:
+        """Write the mainboard ID to ESP32 NVS after confirmation."""
+        bid = self.board_id_var.get().strip()
+        if not bid:
+            self.board_id_status_var.set("Enter a Board ID first")
+            return
+        if len(bid) > 31 or not all(
+                c.isalnum() and c.isascii() or c in "-_" for c in bid):
+            self.board_id_status_var.set("A-Z a-z 0-9 '_' '-' only, max 31 chars")
+            return
+        if not messagebox.askyesno(
+                "Confirm Board ID Write",
+                f"Write mainboard ID '{bid}' to the ESP32 memory?\n\n"
+                f"It replaces any previously stored Board ID.",
+                icon="warning"):
+            self.board_id_status_var.set("Cancelled")
+            return
+        self.board_id_status_var.set("Writing\u2026")
+        self.board_id_write_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                result = self.client.board_id_write(bid, timeout_s=5.0)
+                if result.get("success"):
+                    self.events.put(("board_id_write_ok", bid))
+                else:
+                    self.events.put(("error", result.get("message", "Board ID write failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("board_id_btn_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _board_id_read_clicked(self) -> None:
+        """Read the mainboard ID from ESP32 NVS and show it in a popup."""
+        self.board_id_status_var.set("Reading\u2026")
+        self.board_id_read_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                result = self.client.board_id_read(timeout_s=5.0)
+                self.events.put(("board_id_read_ok", result))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("board_id_btn_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _board_id_clear_clicked(self) -> None:
+        """Erase the mainboard ID from ESP32 NVS after confirmation."""
+        if not messagebox.askyesno(
+                "Confirm Board ID Erase",
+                "Erase the mainboard ID from the ESP32 memory?\n\n"
+                "This cannot be undone.",
+                icon="warning"):
+            self.board_id_status_var.set("Cancelled")
+            return
+        self.board_id_status_var.set("Erasing\u2026")
+        self.board_id_clear_btn.configure(state=tk.DISABLED)
+
+        def worker() -> None:
+            try:
+                result = self.client.board_id_clear(timeout_s=5.0)
+                if result.get("success"):
+                    self.events.put(("board_id_clear_ok", None))
+                else:
+                    self.events.put(("error", result.get("message", "Board ID erase failed")))
+            except Exception as exc:
+                self.events.put(("error", exc))
+            finally:
+                self.events.put(("board_id_btn_done", None))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _eeprom_values_text(self, current: dict) -> str:
         """Format stored EEPROM values (from eeprom_read_ids) for display."""

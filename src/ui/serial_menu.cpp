@@ -31,6 +31,11 @@ extern bool tgs2611_clear_ids(uint8_t ch);
 // External TGS EEPROM calibration-timestamp write from main.cpp (GUI calibration).
 extern bool tgs2611_write_calib_time(uint8_t ch, uint32_t epoch);
 
+// External mainboard ID storage from main.cpp (GUI "Advanced Settings").
+extern bool board_id_write(const char* board_id);
+extern bool board_id_read(char* out, size_t out_size);
+extern bool board_id_clear();
+
 // External firmware version string from main.cpp (GUI "About" section).
 extern void firmware_version(char* out, size_t out_size);
 
@@ -443,10 +448,11 @@ void poll() {
       return;
     } else if (cmd == proto::Cmd::EEPROM_READ || cmd == proto::Cmd::EEPROM_WRITE ||
                cmd == proto::Cmd::EEPROM_CLEAR || cmd == proto::Cmd::CALIB_TIMESTAMP ||
-               cmd == proto::Cmd::FW_VERSION) {
-      // Identity programming, calibration timestamp and version queries are
-      // safe mid-stream: they only touch the sensor EEPROM / NVS, and the
-      // handler below sets g_busy so the
+               cmd == proto::Cmd::BOARD_ID_WRITE || cmd == proto::Cmd::BOARD_ID_READ ||
+               cmd == proto::Cmd::BOARD_ID_CLEAR || cmd == proto::Cmd::FW_VERSION) {
+      // Identity programming, calibration timestamp, mainboard ID and version
+      // queries are safe mid-stream: they only touch the sensor EEPROM / NVS,
+      // and the handler below sets g_busy so the
       // sensor loop cannot interleave a LIVE_DATA frame with the reply.
       eeprom_during_live = true;  // fall through to normal handler below
     } else {
@@ -718,6 +724,42 @@ void poll() {
       firmware_version(ver, sizeof(ver));
       proto::write_message(static_cast<uint8_t>(proto::RespType::FW_VERSION),
                            ver, strlen(ver));
+      break;
+    }
+
+    case proto::Cmd::BOARD_ID_WRITE: {
+      // Payload: length-prefixed board ID string (sanitized + capped at 31
+      // chars on the firmware side). Stores it in ESP32 NVS namespace "board".
+      String board_id;
+      if (!read_string(board_id)) {
+        proto::write_error(proto::ErrorCode::TIMEOUT);
+        break;
+      }
+      if (board_id_write(board_id.c_str())) {
+        proto::write_response(proto::RespType::OK);
+      } else {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+      }
+      break;
+    }
+
+    case proto::Cmd::BOARD_ID_READ: {
+      // No payload. Replies BOARD_ID (0x26) with a length-prefixed string;
+      // empty string means the mainboard ID has never been set.
+      char bid[32] = {0};
+      const bool present = board_id_read(bid, sizeof(bid));
+      proto::write_message(static_cast<uint8_t>(proto::RespType::BOARD_ID),
+                           bid, present ? strlen(bid) : 0);
+      break;
+    }
+
+    case proto::Cmd::BOARD_ID_CLEAR: {
+      // No payload. Erases the mainboard ID from NVS.
+      if (board_id_clear()) {
+        proto::write_response(proto::RespType::OK);
+      } else {
+        proto::write_error(proto::ErrorCode::INVALID_CMD);
+      }
       break;
     }
 

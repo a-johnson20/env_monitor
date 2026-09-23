@@ -39,7 +39,7 @@
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
 // Keep this in sync with GUI_VERSION in gui/env_monitor_gui.py — the two are
 // compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.1.1"
+#define FIRMWARE_VERSION "1.2.0"
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -803,6 +803,55 @@ void firmware_version(char* out, size_t out_size) {
   }
   String v = fw_prefs.getString("version", FIRMWARE_VERSION);
   strlcpy(out, v.c_str(), out_size);
+}
+
+// ---------------------------------------------------------------------------
+// Mainboard ID (ESP32 NVS-backed) — written/read/erased from the GUI's
+// Advanced Settings, similar in spirit to the TGS sensor board ID but stored
+// on the mainboard itself so it survives re-flashing (NVS is not erased by
+// an application update).
+// ---------------------------------------------------------------------------
+static Preferences board_id_prefs;
+static bool board_id_prefs_open = false;
+
+static void board_id_prefs_begin() {
+  if (!board_id_prefs_open) {
+    board_id_prefs.begin("board", false);
+    board_id_prefs_open = true;
+  }
+}
+
+// Store the mainboard ID (sanitized: A-Z a-z 0-9 '-' '_', max 31 chars).
+bool board_id_write(const char* board_id) {
+  if (!board_id || !*board_id) return false;
+  char clean[32] = {0};
+  uint8_t n = 0;
+  for (const char* p = board_id; *p && n < 31; ++p) {
+    const char c = *p;
+    const bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                    (c >= '0' && c <= '9') || c == '-' || c == '_';
+    if (ok) clean[n++] = c;
+  }
+  if (n == 0) return false;
+  board_id_prefs_begin();
+  return board_id_prefs.putString("id", clean) == n;
+}
+
+// Read the mainboard ID. Returns false if never set / erased; out is "" then.
+bool board_id_read(char* out, size_t out_size) {
+  if (!out || out_size == 0) return false;
+  out[0] = '\0';
+  board_id_prefs_begin();
+  String v = board_id_prefs.getString("id", "");
+  if (v.length() == 0) return false;
+  strlcpy(out, v.c_str(), out_size);
+  return true;
+}
+
+// Erase the mainboard ID from NVS.
+bool board_id_clear() {
+  board_id_prefs_begin();
+  return board_id_prefs.remove("id");
 }
 
 // ---------------------------------------------------------------------------
