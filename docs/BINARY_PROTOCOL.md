@@ -133,6 +133,48 @@ that does not know `0x2A` replies `ERROR/1`, which the GUI reports as
 the R2ppm/alpha coefficients and the calibration time) back to blank 0xFF,
 so the sensor reads as uncalibrated afterwards.
 
+## CSV Log File Metadata
+
+Every new `/logs/*.csv` file starts with a `#META` line above the heading,
+snapshotted once at file creation (one file per RTC day):
+
+```
+#META,mainboard_id=MB-01,tgs2611_1_id=10,tgs2611_1_board=BRD-01,tgs2611_1_lot=462VV,tgs2611_1_cal=2026-09-22 15:04
+timestamp,scd4x_1_co2,...
+```
+
+Fields: the mainboard ID (ESP32 NVS) and, per TGS2611 channel, the sensor ID
+(`?` suffix = CRC mismatch), board ID, lot number and calibration date (UTC,
+from the unix time stored via `0x2A`). Missing values print as `(none)`,
+`(never)`, or `NA` (sensor EEPROM unreadable). The `#` prefix lets CSV tools
+treat the line as a comment; `gui/download_csv.py` transfers it verbatim, and
+the GUI logs viewer skips it when parsing (so the heading stays row 1) while
+preserving the line in Excel-safe exports.
+
+In the GUI the key/value pairs are shown in the muted "Meta:" line directly
+under the preview title (`Preview: /logs/....csv (N bytes)`) when a file is
+selected — the line is packed above the preview/graph pane so it cannot be
+clipped, and is hidden entirely when it has nothing to say. Files with no
+comment row at all display `Meta: (no #META line in this file)`, which
+distinguishes pre-1.3.0 log files from a GUI display problem.
+
+## SD Card Error Handling (`ERROR` / `SD_ERROR` = 0x02)
+
+`0x1C` (LOG_LIST) and `0x1D` (LOG_GET) reply `ERROR` with code `0x02` when the
+card's `/logs` directory cannot be opened. Two safeguards keep this from
+surfacing spuriously during a refresh:
+
+- **Firmware, hot-plug probe** (`sd_logger::poll_hotplug`): the card is only
+  declared removed after 4 consecutive failed presence probes (~2 s at the
+  500 ms poll rate), so a single transient `open()` miss no longer tears down
+  the SDMMC driver.
+- **Firmware, file list** (`refresh_log_files`): mounts on demand if the logger
+  is unmounted (e.g. mid-back-off) and retries once with a fresh mount, so a
+  card that has been re-inserted lists immediately.
+- **GUI** (`SerialMenuClient.list_logs`): on `SD_ERROR` it re-issues `0x1C`
+  once before reporting failure, and error codes are rendered as readable text
+  (`Device error 2 (SD card error ...)`) instead of a bare number.
+
 ## Files Modified
 
 ### Firmware Side

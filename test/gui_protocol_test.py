@@ -28,11 +28,17 @@ class FakeSerial:
     `on_reset` — bytes that magically appear *after* reset_input_buffer() is
                  called. Simulates bytes that were already in flight over USB
                  when the GUI flushed the buffer (the real-world desync case).
+                 Pass a list of byte strings to serve a different payload on
+                 each successive reset (used for retry tests).
     """
 
-    def __init__(self, data: bytes = b"", on_reset: bytes = b""):
+    def __init__(self, data: bytes = b"", on_reset=b""):
         self._buf = bytearray(data)
-        self._on_reset = bytearray(on_reset)
+        if isinstance(on_reset, (bytes, bytearray)):
+            self._resets = [bytearray(on_reset)]
+        else:
+            self._resets = [bytearray(p) for p in on_reset]
+        self._reset_count = 0
         self.written = bytearray()
         self.is_open = True
         self.timeout = 0.1
@@ -53,13 +59,15 @@ class FakeSerial:
 
     def reset_input_buffer(self) -> None:
         self._buf.clear()
-        self._buf.extend(self._on_reset)
+        idx = min(self._reset_count, len(self._resets) - 1)
+        self._buf.extend(self._resets[idx])
+        self._reset_count += 1
 
     def close(self) -> None:
         self.is_open = False
 
 
-def make_client(data: bytes = b"", on_reset: bytes = b"") -> gui.SerialMenuClient:
+def make_client(data: bytes = b"", on_reset=b"") -> gui.SerialMenuClient:
     c = gui.SerialMenuClient()
     c.ser = FakeSerial(data, on_reset)
     return c
@@ -307,6 +315,72 @@ def test_board_id_in_framed_response_set():
            "BOARD_ID missing from _LEN_FRAMED")
 
 
+_META_CSV = (b"#META,mainboard_id=MB-01,tgs2611_1_id=10,tgs2611_1_board=BRD-01,"
+             b"tgs2611_1_lot=462VV,tgs2611_1_cal=2026-09-22 15:04\r\n"
+             b"timestamp,tgs2611_1_raw_avg\r\n"
+             b"2026-09-22 15:05:00,415\r\n"
+             b"2026-09-22 15:05:10,416\r\n")
+
+
+def test_preview_table_skips_meta_line():
+    """_render_preview_table treats the '#META' line as a comment, not a header."""
+    headers, rows, _info = gui.App._render_preview_table(_META_CSV)
+    expect(headers[:2] == ["timestamp", "tgs2611_1_raw_avg"],
+           f"heading row wrong: {headers}")
+    expect(rows[0] == ["2026-09-22 15:05:00", "415"], f"first data row wrong: {rows}")
+    expect(not any("META" in cell for row in rows for cell in row),
+           "META line leaked into the preview body")
+
+
+def test_parse_all_for_graphs_skips_meta_line():
+    """_parse_all_for_graphs must not graph the '#META' line as a heading."""
+    headers, all_rows = gui.App._parse_all_for_graphs(_META_CSV)
+    expect(headers[:2] == ["timestamp", "tgs2611_1_raw_avg"],
+           f"heading row wrong: {headers}")
+    expect(all_rows[0][0] == "2026-09-22 15:05:00", f"first data row wrong: {all_rows}")
+
+
+def test_make_csv_excel_safe_keeps_meta_line_and_fixes_timestamps():
+    """Excel-safe export keeps the '#META' line and still space-prefixes data
+    timestamps so Excel does not reinterpret them."""
+    out = gui.App._make_csv_excel_safe(_META_CSV).decode("utf-8").lstrip("\ufeff")
+    lines = out.splitlines()
+    expect(lines[0].startswith("#META"), f"meta line missing: {lines[0]!r}")
+    expect(lines[1].startswith("timestamp"), f"heading wrong: {lines[1]!r}")
+    expect(lines[2].startswith(" 2026-09-22"), f"timestamp not space-prefixed: {lines[2]!r}")
+
+
+def test_preview_table_empty_comment_only_file():
+    """A file containing only the '#META' line parses to the empty-file message."""
+    headers, rows, _info = gui.App._render_preview_table(b"#META,mainboard_id=MB-01\r\n")
+    expect(headers == ["message"] and rows == [["(empty file)"]],
+           f"expected empty-file message, got {headers} {rows}")
+
+
+def test_preview_table_info_shows_meta_summary():
+    """The preview info line surfaces the '#META' key/value pairs."""
+    _headers, _rows, info = gui.App._render_preview_table(_META_CSV)
+    expect(info.startswith("Meta: mainboard_id=MB-01"), f"meta summary missing: {info!r}")
+    expect("tgs2611_1_cal=2026-09-22 15:04" in info, f"cal missing from summary: {info!r}")
+
+
+def test_preview_table_info_reports_missing_meta_line():
+    """A file with no metadata line says so, rather than showing a blank line.
+
+    Files created before metadata logging (or with the line stripped) must be
+    distinguishable from 'the GUI forgot to show the metadata'.
+    """
+    _headers, _rows, info = gui.App._render_preview_table(
+        b"timestamp,tgs2611_1_raw_avg\r\n2026-09-22 15:05:00,415\r\n")
+    expect("no #META line" in info, f"missing-metadata note absent: {info!r}")
+
+
+def test_preview_table_info_empty_for_empty_file():
+    """A completely empty file reports no info line (nothing to describe)."""
+    _headers, _rows, info = gui.App._render_preview_table(b"")
+    expect(info == "", f"unexpected info for empty file: {info!r}")
+
+
 def test_parse_version_variants():
     """parse_version tolerates short forms and rejects non-version text."""
     expect(gui.parse_version("1.0.0") == (1, 0, 0), "1.0.0 parse failed")
@@ -390,6 +464,126 @@ def test_version_messages_have_no_status_symbols():
         _ok, text, _level = gui.version_compat(gui_v, fw_v)
         expect(not any(sym in text for sym in banned),
                f"glyph left in verdict for {gui_v} vs {fw_v}: {text}")
+
+
+def test_preview_info_line_is_visible_above_expanding_pane():
+    """The metadata info line must be shown *above* the expanding preview pane.
+
+    Regression (reported as "I don't see the metadata"): the line was packed
+    after the preview table — i.e. last inside a pane that also held an
+    expanding widget — so in a short pane it was clipped away entirely. It is
+    now packed before the expanding panedwindow and hidden when empty.
+    """
+    try:
+        import tkinter  # noqa: F401
+        app = gui.App()
+    except Exception:
+        print("      (skipped: Tk unavailable in this environment)")
+        return
+    app.withdraw()
+    try:
+        headers, rows, info = gui.App._render_preview_table(_META_CSV)
+        app._set_preview_table("/logs/env_20260922.csv", headers, rows,
+                               len(_META_CSV), info)
+        expect(app.preview_info_var.get() == info, "info text not set on preview")
+        expect("mainboard_id=MB-01" in app.preview_info_var.get(),
+               f"metadata missing from info line: {app.preview_info_var.get()!r}")
+        expect(app.preview_info_label.winfo_manager() == "pack",
+               "metadata info line is not displayed")
+        siblings = app.preview_info_label.master.pack_slaves()
+        expect(siblings.index(app.preview_info_label) < siblings.index(app.inner_split),
+               "info line packed after the expanding pane (gets clipped)")
+
+        # While a preview is loading the line is hidden, freeing the space.
+        app._set_preview_message("/logs/env_20260922.csv", "Loading preview...", 0)
+        expect(app.preview_info_var.get() == "", "info text not cleared")
+        expect(app.preview_info_label.winfo_manager() == "",
+               "info line still occupies space while loading")
+
+        # ...and can be shown again afterwards (pack/unpack is repeatable).
+        app._set_preview_info(info)
+        expect(app.preview_info_label.winfo_manager() == "pack",
+               "info line did not reappear after being hidden")
+    finally:
+        app.destroy()
+
+
+def _log_list_frame(files: list[tuple[int, str]]) -> bytes:
+    """Build a LOG_LIST (0x13) frame: count + per file [size u32 LE][len][path]."""
+    out = bytearray([0x13, len(files)])
+    for size, path in files:
+        p = path.encode()
+        out += struct.pack("<I", size) + bytes([len(p)]) + p
+    return bytes(out)
+
+
+def test_log_list_parses_files():
+    """LOG_LIST parses size (u32 LE) + length-prefixed path per entry."""
+    c = make_client(on_reset=_log_list_frame([(1234, "/logs/env_20260922.csv")]))
+    files = c.list_logs(timeout_s=2.0)
+    expect(len(files) == 1, f"expected 1 file, got {files}")
+    expect(files[0].path == "/logs/env_20260922.csv", f"path wrong: {files[0].path!r}")
+    expect(files[0].size == 1234, f"size wrong: {files[0].size}")
+    expect(not c.ser.written.startswith(bytes([0x13])), "wrong command sent")
+
+
+def test_log_list_sd_error_retries_then_succeeds():
+    """A transient SD_ERROR (code 2) is retried once; the retry's file list wins.
+
+    This is the 'device error 2 on refresh' report: the card was momentarily
+    unavailable (mid-remount), so the second request succeeds.
+    """
+    resets = [bytes([0x01, 0x02]),                     # ERROR / SD_ERROR
+              _log_list_frame([(99, "/logs/a.csv")])]
+    c = make_client(on_reset=resets)
+    files = c.list_logs(timeout_s=2.0)
+    expect(len(files) == 1 and files[0].size == 99, f"retry did not recover: {files}")
+    expect(c.ser.written.count(0x1C) == 2, f"expected 2 LOG_LIST sends: {c.ser.written!r}")
+
+
+def test_log_list_sd_error_reports_readable_message():
+    """A persistent SD_ERROR raises with a descriptive message, not 'error 2'."""
+    c = make_client(on_reset=bytes([0x01, 0x02]))
+    try:
+        c.list_logs(timeout_s=2.0)
+    except RuntimeError as exc:
+        msg = str(exc)
+        expect("Device error 2" in msg, f"code missing from message: {msg!r}")
+        expect("SD card" in msg, f"message not descriptive: {msg!r}")
+    else:
+        raise AssertionError("expected RuntimeError on persistent SD error")
+
+
+def test_log_list_other_errors_are_not_retried():
+    """Non-SD errors (e.g. invalid index) fail immediately — one request only."""
+    c = make_client(on_reset=bytes([0x01, 0x05]))
+    try:
+        c.list_logs(timeout_s=2.0)
+    except RuntimeError as exc:
+        expect("invalid index" in str(exc), f"message wrong: {exc}")
+    else:
+        raise AssertionError("expected RuntimeError")
+    expect(c.ser.written.count(0x1C) == 1, f"should not retry: {c.ser.written!r}")
+
+
+def test_describe_device_error_mapping():
+    """Every firmware error code maps to a readable label; unknown codes survive."""
+    for code in range(1, 9):
+        msg = gui.SerialMenuClient._describe_device_error(code)
+        expect(msg.startswith(f"Device error {code} ("), f"code {code} unlabelled: {msg!r}")
+    expect(gui.SerialMenuClient._describe_device_error(99) == "Device error 99",
+           "unknown code should still be reported")
+
+
+def test_stale_log_begin_frame_does_not_desync_file_list():
+    """A stale LOG_BEGIN whose payload contains 0x13 must not be mistaken for the
+    LOG_LIST reply (byte-wise draining would read its size byte as the response)."""
+    stale = bytes([0x14]) + struct.pack("<I", 0x13) + bytes([4]) + b"/abc"
+    data = stale + _log_list_frame([(7, "/logs/real.csv")])
+    c = make_client(on_reset=data)
+    files = c.list_logs(timeout_s=2.0)
+    expect(len(files) == 1 and files[0].path == "/logs/real.csv",
+           f"stale frame desynced the list: {files}")
 
 
 def main() -> int:

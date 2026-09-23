@@ -8,6 +8,12 @@ namespace {
   bool g_sd_mounted = false;
   uint32_t g_next_retry_ms = 0;
   constexpr uint32_t RETRY_MS = 2000; // backoff after failures
+  // Consecutive failed presence probes. The card is only declared removed after
+  // PROBE_FAIL_LIMIT misses: a single failed open() can happen transiently (bus
+  // busy mid-write), and unmounting on the first miss tears down the driver so
+  // the next file-list request fails with SD_ERROR.
+  uint8_t g_probe_fails = 0;
+  constexpr uint8_t PROBE_FAIL_LIMIT = 4; // ~2 s of misses at a 500 ms poll
 
   // Board-specific pin-out for SDMMC 4-bit
   constexpr int SD_CLK = 12;
@@ -43,6 +49,7 @@ namespace sd_logger {
   void unmount() {
     SD_MMC.end();
     g_sd_mounted = false;
+    g_probe_fails = 0;
   }
 
   bool try_mount() {
@@ -54,6 +61,8 @@ namespace sd_logger {
     g_sd_mounted = (SD_MMC.cardType() != CARD_NONE);
     if (!g_sd_mounted) {
       SD_MMC.end();
+    } else {
+      g_probe_fails = 0;
     }
     return g_sd_mounted;
   }
@@ -63,12 +72,16 @@ namespace sd_logger {
     if (g_paused) return;
 
     if (g_sd_mounted) {
-      // Cheap probe: if root can't be opened, treat as removal and back off.
+      // Cheap probe: if root can't be opened, back off and retry before
+      // declaring the card removed (a single miss can be transient).
       File root = SD_MMC.open("/");
       if (!root) {
-        unmount();
-        g_next_retry_ms = now_ms + RETRY_MS;
+        if (++g_probe_fails >= PROBE_FAIL_LIMIT) {
+          unmount();
+          g_next_retry_ms = now_ms + RETRY_MS;
+        }
       } else {
+        g_probe_fails = 0;
         root.close();
       }
       return;
@@ -85,14 +98,20 @@ namespace sd_logger {
     return SD_MMC.mkdir(path) || SD_MMC.exists(path);
   }
 
-  bool ensure_header(const String& path, const String& header) {
+  bool ensure_header(const String& path, const String& header, const String& meta) {
     if (!g_sd_mounted) return false;
     if (SD_MMC.exists(path)) return true;
     File f = SD_MMC.open(path, FILE_WRITE);
     if (!f) return false;
+    if (meta.length()) f.println(meta);
     f.println(header);
     f.close();
     return true;
+  }
+
+  bool exists(const String& path) {
+    if (!g_sd_mounted) return false;
+    return SD_MMC.exists(path);
   }
 
   bool append_line(const String& path, const String& csv_line) {

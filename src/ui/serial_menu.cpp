@@ -106,31 +106,43 @@ void begin() {
   // Binary protocol doesn't need initialization
 }
 
-// Refresh log files from SD card
+// Refresh log files from SD card.
+// Retries once with a fresh mount so a transient bus error (or a card that was
+// re-inserted while the logger had backed off) does not surface as SD_ERROR.
 static bool refresh_log_files() {
   g_log_files.clear();
-  
-  File dir = SD_MMC.open("/logs");
-  if (!dir || !dir.isDirectory()) {
-    if (dir) dir.close();
-    return false;
-  }
 
-  for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
-    if (!f.isDirectory()) {
-      LogFileEntry e;
-      String path = f.path();
-      if (path.length() == 0) {
-        path = String("/logs/") + f.name();
-      }
-      e.path = path;
-      e.size = (uint64_t)f.size();
-      g_log_files.push_back(e);
+  for (uint8_t attempt = 0; attempt < 2; ++attempt) {
+    if (!sd_logger::is_mounted()) {
+      // Remount on demand — the hot-plug poll may be mid-backoff.
+      if (!sd_logger::try_mount()) return false;
     }
-    f.close();
+
+    File dir = SD_MMC.open("/logs");
+    if (dir && dir.isDirectory()) {
+      for (File f = dir.openNextFile(); f; f = dir.openNextFile()) {
+        if (!f.isDirectory()) {
+          LogFileEntry e;
+          String path = f.path();
+          if (path.length() == 0) {
+            path = String("/logs/") + f.name();
+          }
+          e.path = path;
+          e.size = (uint64_t)f.size();
+          g_log_files.push_back(e);
+        }
+        f.close();
+      }
+      dir.close();
+      return true;
+    }
+    if (dir) dir.close();
+
+    // Directory unreadable: drop the driver so the retry starts clean.
+    sd_logger::unmount();
+    delay(50);
   }
-  dir.close();
-  return true;
+  return false;
 }
 
 // Send a list of log files

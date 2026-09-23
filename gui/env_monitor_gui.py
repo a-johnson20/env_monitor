@@ -70,7 +70,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.2.1"
+GUI_VERSION = "1.3.3"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -374,14 +374,35 @@ class SerialMenuClient:
         data = self._read_exact(length, timeout_s)
         return data.decode('utf-8', errors='replace')
 
+    # Device error codes (mirrors ui::proto::ErrorCode in the firmware)
+    ERR_SD = 0x02
+
+    @staticmethod
+    def _describe_device_error(code: int) -> str:
+        """Turn a device error code into a human-readable message."""
+        names = {
+            0x01: "invalid command",
+            0x02: "SD card error (card missing, unreadable or mid-remount)",
+            0x03: "WiFi error",
+            0x04: "timeout",
+            0x05: "invalid index",
+            0x06: "no networks found",
+            0x07: "not connected",
+            0x08: "file not found",
+        }
+        if code in names:
+            return f"Device error {code} ({names[code]})"
+        return f"Device error {code}"
+
     def _drain_and_read_response(self, valid_types: set[int], timeout_s: float = 5.0) -> int:
-        """Drain stale bytes and read the first valid response type.
-        
+        """Drain stale frames and read the first valid response type.
+
         After reset_input_buffer(), bytes that were already in transit over USB
         (e.g. LIVE_DATA frames from commit_and_reset_all_windows()) can still arrive.
-        This method discards any bytes that don't match valid response types,
-        returning the first valid one found.
-        
+        Known frames are consumed whole — dropping them byte-by-byte would let a
+        stale reply's payload (e.g. a LOG_LIST file count) be misread as the start
+        of the next response.
+
         Returns the response type byte.
         Raises RuntimeError on timeout.
         """
@@ -395,7 +416,12 @@ class SerialMenuClient:
             resp = b[0]
             if resp in valid_types:
                 return resp
-            # Discard this byte — it's stale data from a previous operation
+            # Stale frame from a previous operation: consume it whole.
+            try:
+                self._consume_frame(resp, max(0.05, deadline - time.time()))
+            except RuntimeError:
+                if deadline - time.time() <= 0:
+                    break
         raise RuntimeError(f"Timeout waiting for valid response (expected one of {valid_types})")
 
     # Frame types that carry a length-prefixed payload ([type][len][payload...])
@@ -499,19 +525,26 @@ class SerialMenuClient:
         
         with self.lock:
             ser = self._require_open()
-            ser.reset_input_buffer()
-            
-            self._send_cmd(ProtoCmd.LOG_LIST)
-            
-            # Read response — drain stale bytes (e.g. in-transit LIVE_DATA frames)
-            # until we see LOG_LIST, ERROR, or timeout.
-            valid = {ProtoResp.LOG_LIST, ProtoResp.ERROR}
-            resp_type = self._drain_and_read_response(valid, timeout_s)
-            
-            if resp_type == ProtoResp.ERROR:
+            resp_type = None
+            # A single SD_ERROR is usually a transient hiccup or a card the
+            # firmware is in the middle of remounting, so ask once more before
+            # reporting failure.
+            for attempt in (1, 2):
+                ser.reset_input_buffer()
+                self._send_cmd(ProtoCmd.LOG_LIST)
+
+                # Read response — drain stale frames (e.g. in-transit LIVE_DATA)
+                # until we see LOG_LIST, ERROR, or timeout.
+                valid = {ProtoResp.LOG_LIST, ProtoResp.ERROR}
+                resp_type = self._drain_and_read_response(valid, timeout_s)
+
+                if resp_type != ProtoResp.ERROR:
+                    break
                 error_code = self._read_byte(timeout_s)
-                raise RuntimeError(f"Device error {error_code}")
-            
+                if error_code != self.ERR_SD or attempt == 2:
+                    raise RuntimeError(self._describe_device_error(error_code))
+                time.sleep(0.6)
+
             # resp_type is guaranteed to be LOG_LIST here
             
             # Read file list
@@ -548,7 +581,7 @@ class SerialMenuClient:
             
             if resp_type == ProtoResp.ERROR:
                 error_code = self._read_byte(timeout_s)
-                raise RuntimeError(f"Device error {error_code}")
+                raise RuntimeError(self._describe_device_error(error_code))
             
             # resp_type is guaranteed to be LOG_BEGIN here
             
@@ -2050,11 +2083,23 @@ class App(tk.Tk):
 
         ttk.Label(bottom, textvariable=self.preview_title_var, style="Section.TLabel").pack(anchor="w")
 
-        inner_split = ttk.Panedwindow(bottom, orient=tk.VERTICAL)
-        inner_split.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+        # Metadata / truncation info line. Packed here — *before* the expanding
+        # panedwindow below — because a widget packed after an expanding sibling
+        # gets clipped first when the pane is short. It is packed on demand (see
+        # _set_preview_info) so an empty line costs no vertical space.
+        self.preview_info_label = ttk.Label(
+            bottom, textvariable=self.preview_info_var, style="Muted.TLabel",
+            anchor="w", justify="left")
+        self.preview_info_label.bind(
+            "<Configure>",
+            lambda e: e.widget.configure(wraplength=max(200, e.width - 4)),
+        )
 
-        graphs_frame = ttk.Frame(inner_split)
-        inner_split.add(graphs_frame, weight=3)
+        self.inner_split = ttk.Panedwindow(bottom, orient=tk.VERTICAL)
+        self.inner_split.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
+
+        graphs_frame = ttk.Frame(self.inner_split)
+        self.inner_split.add(graphs_frame, weight=3)
 
         self.log_graphs_canvas = tk.Canvas(graphs_frame, highlightthickness=0, bg=self.c_bg)
         self.log_graphs_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -2087,8 +2132,8 @@ class App(tk.Tk):
         self.log_graph_canvases: list[tk.Canvas] = []
         self.log_graph_series: dict = {}
 
-        table_frame = ttk.Frame(inner_split)
-        inner_split.add(table_frame, weight=1)
+        table_frame = ttk.Frame(self.inner_split)
+        self.inner_split.add(table_frame, weight=1)
 
         ttk.Label(table_frame, text="Raw Data Log", style="Section.TLabel").pack(anchor="w")
 
@@ -2105,8 +2150,6 @@ class App(tk.Tk):
         pv_x = ttk.Scrollbar(preview_wrap, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
         pv_x.grid(row=1, column=0, sticky="ew")
         self.preview_tree.configure(yscrollcommand=pv_y.set, xscrollcommand=pv_x.set)
-
-        ttk.Label(table_frame, textvariable=self.preview_info_var, style="Muted.TLabel").pack(anchor="w", pady=(4, 0))
 
     def _render_log_graphs(self, graph_headers: list[str], graph_all_rows: list[list[str]]) -> None:
         for child in self.log_graphs_content.winfo_children():
@@ -3291,25 +3334,61 @@ class App(tk.Tk):
         return datetime.now().strftime("%Y%m%d")
 
     @staticmethod
+    def _drop_csv_comment_rows(parsed: list[list[str]]) -> list[list[str]]:
+        """Remove '#' prefixed comment lines from parsed CSV rows.
+
+        The firmware writes a '#META,...' metadata line above the heading of
+        every log file; without this it would be mistaken for the heading row
+        and break the preview/graph column matching.
+        """
+        return [r for r in parsed if not (r and r[0].lstrip().startswith("#"))]
+
+    @staticmethod
+    def _csv_meta_summary(parsed: list[list[str]]) -> str:
+        """Human-readable summary of '#'-prefixed metadata comment rows.
+
+        The firmware writes '#META,key=value,...' as the first line of every log
+        file. The key/value pairs are shown in the preview's info line so the
+        metadata (board ID, TGS identity, calibration date) is visible without
+        downloading the file. Returns "" when the file has no metadata line.
+        """
+        pairs: list[str] = []
+        for row in parsed:
+            if not (row and row[0].lstrip().startswith("#")):
+                continue
+            for cell in row[1:]:
+                cell = cell.strip()
+                if cell and "=" in cell:
+                    pairs.append(cell)
+        return " | ".join(pairs)
+
+    @staticmethod
     def _make_csv_excel_safe(raw_bytes: bytes) -> bytes:
         import re
         text = raw_bytes.decode("utf-8", errors="replace").lstrip("\ufeff")
         reader = csv.reader(io.StringIO(text))
-        rows = list(reader)
-        if not rows:
+        parsed = list(reader)
+        # Firmware writes '#'-prefixed metadata lines (e.g. '#META,...') above
+        # the heading. Keep them verbatim in the export; only the heading row
+        # and below are treated as table data for the timestamp fix.
+        body_start = 0
+        while (body_start < len(parsed) and parsed[body_start]
+               and parsed[body_start][0].lstrip().startswith("#")):
+            body_start += 1
+        if body_start >= len(parsed):
             return raw_bytes
-        header = rows[0]
+        header = parsed[body_start]
         try:
             ts_col = header.index("timestamp")
         except ValueError:
             return raw_bytes
         ts_pattern = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
-        for row in rows[1:]:
+        for row in parsed[body_start + 1:]:
             if ts_col < len(row) and ts_pattern.match(row[ts_col].strip()):
                 row[ts_col] = " " + row[ts_col].strip()
         out = io.StringIO()
         writer = csv.writer(out, lineterminator="\r\n")
-        writer.writerows(rows)
+        writer.writerows(parsed)
         return ("\ufeff" + out.getvalue()).encode("utf-8")
 
     @staticmethod
@@ -3321,7 +3400,9 @@ class App(tk.Tk):
     ) -> tuple[list[str], list[list[str]], str]:
         text = payload.decode("utf-8", errors="replace")
         reader = csv.reader(io.StringIO(text))
-        parsed = list(reader)
+        parsed_all = list(reader)
+        meta_summary = App._csv_meta_summary(parsed_all)
+        parsed = App._drop_csv_comment_rows(parsed_all)
         if not parsed:
             return ["message"], [["(empty file)"]], ""
 
@@ -3367,6 +3448,12 @@ class App(tk.Tk):
 
         extra_cols = max(0, width - col_n)
         info_parts: list[str] = []
+        if meta_summary:
+            info_parts.append(f"Meta: {meta_summary}")
+        else:
+            # No comment row at all: files written before metadata logging (or
+            # with the line stripped) — say so instead of showing nothing.
+            info_parts.append("Meta: (no #META line in this file)")
         if show_split:
             info_parts.append(f"showing first {head_rows} and last {tail_rows} data rows")
         if extra_cols:
@@ -3378,11 +3465,26 @@ class App(tk.Tk):
     def _parse_all_for_graphs(payload: bytes) -> tuple[list[str], list[list[str]]]:
         text = payload.decode("utf-8", errors="replace")
         reader = csv.reader(io.StringIO(text))
-        parsed = list(reader)
+        parsed = App._drop_csv_comment_rows(list(reader))
         if len(parsed) < 2:
             return [], []
         header = [h.strip() for h in parsed[0]]
         return header, parsed[1:]
+
+    def _set_preview_info(self, info: str) -> None:
+        """Show/hide the metadata (info) line under the preview title.
+
+        The line is packed on demand and placed before the expanding pane so it
+        is always visible: when it carried no text it used to sit after the
+        preview table and was clipped away in a short pane.
+        """
+        self.preview_info_var.set(info)
+        if info:
+            if not self.preview_info_label.winfo_manager():
+                self.preview_info_label.pack(anchor="w", fill="x", pady=(2, 0),
+                                             before=self.inner_split)
+        else:
+            self.preview_info_label.pack_forget()
 
     def _set_preview_message(self, path: str, message: str, nbytes: int) -> None:
         if path:
@@ -3394,7 +3496,7 @@ class App(tk.Tk):
         self.preview_tree.heading("message", text="Preview")
         self.preview_tree.column("message", width=760, anchor="w", stretch=True)
         self.preview_tree.insert("", tk.END, values=(message,))
-        self.preview_info_var.set("")
+        self._set_preview_info("")
 
     def _set_preview_table(
         self,
@@ -3426,7 +3528,7 @@ class App(tk.Tk):
         striped_rows = [tuple(row) for row in display_rows]
         self._apply_tree_stripes(self.preview_tree, striped_rows)
 
-        self.preview_info_var.set(info)
+        self._set_preview_info(info)
 
     def on_file_selected(self, _event=None) -> None:
         if self.files_refresh_inflight:

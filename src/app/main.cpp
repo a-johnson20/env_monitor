@@ -39,7 +39,12 @@
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
 // Keep this in sync with GUI_VERSION in gui/env_monitor_gui.py — the two are
 // compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.2.0"
+#define FIRMWARE_VERSION "1.3.1"
+
+// Metadata line written above the heading of new CSV log files (built in
+// build_log_metadata_line(), defined further down after the TGS EEPROM and
+// mainboard-ID helpers it needs).
+static String build_log_metadata_line();
 
 // Namespaces using
 using hal::Mux::Ch;
@@ -394,7 +399,20 @@ static void commit_and_reset_all_windows() {
   // Only SD work is gated
   if (sd_logger::is_mounted() && !sd_logger::paused()) {
     const String path = logfmt::current_log_path(rtc_present, rtc);
-    sd_logger::ensure_header(path, logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true, N_SFM3505));
+    const String header = logfmt::make_header(N_SCD4X, N_TRHP, N_TGS2611, N_TGS2616, true, N_SFM3505);
+    // The metadata line is a creation-time snapshot that needs NVS + I2C reads,
+    // so build it once per log file (not on every commit) and let ensure_header
+    // decide whether it actually needs writing. Caching also keeps this path at
+    // one filesystem probe per commit — no extra SD traffic during logging.
+    static String meta_path;
+    if (path != meta_path) {
+      const String candidate = build_log_metadata_line();
+      if (sd_logger::ensure_header(path, header, candidate)) {
+        meta_path = path;
+      }
+    } else {
+      sd_logger::ensure_header(path, header);
+    }
     sd_logger::append_line(path, line);
   }
 
@@ -852,6 +870,75 @@ bool board_id_read(char* out, size_t out_size) {
 bool board_id_clear() {
   board_id_prefs_begin();
   return board_id_prefs.remove("id");
+}
+
+// ---------------------------------------------------------------------------
+// CSV log metadata line
+// ---------------------------------------------------------------------------
+// Written as the first line of a new /logs/*.csv file, above the heading.
+// Format (single CSV line, '#' prefix so CSV tools can treat it as a comment):
+//   #META,mainboard_id=MB-01,tgs2611_1_id=10,tgs2611_1_board=BRD-01,
+//         tgs2611_1_lot=462VV,tgs2611_1_cal=2026-09-22 15:04,...
+// Values come from the mainboard NVS and each TGS2611 sensor EEPROM at file
+// creation time. Missing values print as (none)/(never)/NA. The calibration
+// date is rendered as UTC from the stored unix time.
+static String build_log_metadata_line() {
+  String m = "#META";
+
+  char bid[32] = {0};
+  m += ",mainboard_id=";
+  m += board_id_read(bid, sizeof(bid)) ? bid : "(none)";
+
+  size_t i = 0;
+  for (auto ch : hal::Mux::TGS2611) {
+    (void)ch;
+    char tag[16];
+    snprintf(tag, sizeof(tag), "tgs2611_%u", (unsigned)(i + 1));
+
+    uint16_t tgs_id = 0;
+    bool crc_ok = false;
+    char lot[17] = {0}, board[33] = {0};
+    uint32_t calib_epoch = 0;
+    bool calib_ok = false;
+
+    if (!tgs2611_read_ids((uint8_t)i, tgs_id, crc_ok,
+                          lot, sizeof(lot), board, sizeof(board),
+                          calib_epoch, calib_ok)) {
+      // Sensor EEPROM unreadable on this channel.
+      m += ','; m += tag; m += "_id=NA";
+      m += ','; m += tag; m += "_board=NA";
+      m += ','; m += tag; m += "_lot=NA";
+      m += ','; m += tag; m += "_cal=NA";
+      ++i;
+      continue;
+    }
+
+    // Sensor ID (blank 0xFFFF = never written; '?' suffix = CRC mismatch).
+    char idbuf[12];
+    if (tgs_id == 0xFFFF) {
+      snprintf(idbuf, sizeof(idbuf), "(none)");
+    } else {
+      snprintf(idbuf, sizeof(idbuf), "%u%s", (unsigned)tgs_id, crc_ok ? "" : "?");
+    }
+
+    // Calibration date from the stored unix time (UTC).
+    char calbuf[24] = "(never)";
+    if (calib_ok && calib_epoch != 0 && calib_epoch != 0xFFFFFFFFu) {
+      const time_t t = (time_t)calib_epoch;
+      struct tm tm_utc;
+      if (gmtime_r(&t, &tm_utc) &&
+          strftime(calbuf, sizeof(calbuf), "%Y-%m-%d %H:%M", &tm_utc) == 0) {
+        snprintf(calbuf, sizeof(calbuf), "%lu", (unsigned long)calib_epoch);
+      }
+    }
+
+    m += ','; m += tag; m += "_id=";   m += idbuf;
+    m += ','; m += tag; m += "_board="; m += (board[0] ? board : "(none)");
+    m += ','; m += tag; m += "_lot=";   m += (lot[0] ? lot : "(none)");
+    m += ','; m += tag; m += "_cal=";   m += calbuf;
+    ++i;
+  }
+  return m;
 }
 
 // ---------------------------------------------------------------------------
