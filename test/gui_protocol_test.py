@@ -214,39 +214,29 @@ def test_fw_version_error_on_old_firmware():
     expect("Error code 1" in r["message"], f"message mismatch: {r}")
 
 
-def test_pump_get_parses_speed_and_switch_state():
-    """PUMP_STATUS from firmware 1.4.0 is [percent][enable switch latched]."""
-    data = bytes([0x22, 0x02, 65, 0x01])
+def test_pump_get_parses_speed():
+    """PUMP_STATUS is [type][len=1][percent]."""
+    data = bytes([0x22, 0x01, 65])
     c = make_client(on_reset=data)
     r = c.pump_get(timeout_s=2.0)
-    expect(r["success"] is True, f"expected success, got {r}")
-    expect(r["percent"] == 65, f"percent mismatch: {r}")
-    expect(r["enabled"] is True, f"switch state mismatch: {r}")
+    expect(r == {"success": True, "percent": 65}, f"unexpected result: {r}")
     expect(c.ser.written.startswith(bytes([0x22])), f"wrong command sent: {c.ser.written!r}")
 
 
-def test_pump_get_reports_switch_open_as_disabled():
-    """An open (idle-high) enable switch reads back as enabled=False."""
-    c = make_client(on_reset=bytes([0x22, 0x02, 0, 0x00]))
+def test_pump_get_tolerates_extra_fields():
+    """Future PUMP_STATUS fields are consumed without affecting the speed."""
+    c = make_client(on_reset=bytes([0x22, 0x03, 40, 0xAA, 0xBB]))
     r = c.pump_get(timeout_s=2.0)
-    expect(r["percent"] == 0 and r["enabled"] is False, f"mismatch: {r}")
-
-
-def test_pump_get_accepts_older_single_field_reply():
-    """Firmware <= 1.3.x replies with [percent] only — switch state is unknown."""
-    c = make_client(on_reset=bytes([0x22, 0x01, 40]))
-    r = c.pump_get(timeout_s=2.0)
-    expect(r["percent"] == 40, f"percent mismatch: {r}")
-    expect(r["enabled"] is None, f"switch state should be unknown: {r}")
+    expect(r == {"success": True, "percent": 40}, f"unexpected result: {r}")
 
 
 def test_pump_get_skips_status_frame_in_front():
-    """An unsolicited STATUS frame before the PUMP_STATUS reply is skipped."""
+    """A STATUS frame before the PUMP_STATUS reply is skipped."""
     msg = b"[NTP] sync in progress"
-    data = bytes([0x02, len(msg)]) + msg + bytes([0x22, 0x02, 30, 0x01])
+    data = bytes([0x02, len(msg)]) + msg + bytes([0x22, 0x01, 30])
     c = make_client(on_reset=data)
     r = c.pump_get(timeout_s=2.0)
-    expect(r["percent"] == 30 and r["enabled"] is True, f"mismatch: {r}")
+    expect(r["percent"] == 30, f"percent mismatch: {r}")
 
 
 def test_pump_set_sends_clamped_percent():

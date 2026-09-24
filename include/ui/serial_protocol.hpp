@@ -21,8 +21,8 @@ enum class Cmd : uint8_t {
   WIFI_FORGET     = 0x19,  // Forget network by index
   WIFI_STATUS     = 0x1A,  // Get WiFi status
   WIFI_CONNECT_SAVED = 0x20, // Connect to saved network by SSID
-  PUMP_SET        = 0x21,  // Set pump speed (followed by uint8_t percent); only runs while the enable switch is latched
-  PUMP_GET        = 0x22,  // Get current pump speed + enable-switch state
+  PUMP_SET        = 0x21,  // Set pump speed (followed by uint8_t percent)
+  PUMP_GET        = 0x22,  // Get current pump speed
   CALIB_MULTIPOINT = 0x23, // Calibrate TGS2611: [ch: u8][r2ppm: 4-byte LE float][alpha: 4-byte LE float]
   CALIB_TIMESTAMP  = 0x2A, // Store calibration date/time in TGS EEPROM: [ch: u8][unix time: 4-byte LE u32]
   LORA_INFO       = 0x24,  // Read LoRa DevEUI + stored AppEUI/AppKey
@@ -58,7 +58,7 @@ enum class RespType : uint8_t {
   LOG_END         = 0x16,  // Log file transfer end
   LIVE_DATA       = 0xFE,  // Live sensor data (binary encoded) — 0xFE avoids collision with ASCII space (0x20) in timestamps
   RTC_RESPONSE    = 0x21,  // RTC time response
-  PUMP_STATUS     = 0x22,  // Pump status: [uint8_t percent][uint8_t enable switch latched]
+  PUMP_STATUS     = 0x22,  // Pump status: [uint8_t percent]
   LORA_INFO       = 0x23,  // LoRa identifiers: "DevEUI,AppEUI,AppKey" CSV string
   EEPROM_IDS      = 0x24,  // TGS EEPROM IDs: "id,crc,lot,board" CSV string
   FW_VERSION      = 0x25,  // Firmware version string

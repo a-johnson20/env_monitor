@@ -14,8 +14,6 @@ extern void get_rtc_time_string(char* out, size_t n);
 // External pump control from main.cpp
 extern float pump_percent;
 extern void pump_set_percent(float pct);   // raw PWM duty (0..100 %)
-extern void pump_apply_output();           // drive PWM for the current switch state
-extern bool pump_switch_latched();         // true while the enable switch is latched
 void pump_save_percent(float pct);
 
 // External TGS2611 multipoint calibration from main.cpp
@@ -559,11 +557,9 @@ void poll() {
       uint8_t pct;
       if (read_byte_timeout(pct)) {
         if (pct > 100) pct = 100;
-        // Store the speed regardless of the enable switch, so the operator can
-        // preset it; pump_apply_output() only drives the pump while latched.
         pump_percent = (float)pct;
         pump_save_percent(pump_percent);
-        pump_apply_output();
+        pump_set_percent(pump_percent);
         proto::write_response(proto::RespType::OK);
       } else {
         proto::write_error(proto::ErrorCode::TIMEOUT);
@@ -572,12 +568,10 @@ void poll() {
     }
 
     case proto::Cmd::PUMP_GET: {
-      // Payload: [percent][enabled]; enabled = enable switch latched.
       uint8_t pct = (uint8_t)(pump_percent + 0.5f);
       Serial.write((uint8_t)proto::RespType::PUMP_STATUS);
-      Serial.write((uint8_t)2);
+      Serial.write((uint8_t)1);
       Serial.write(pct);
-      Serial.write((uint8_t)(pump_switch_latched() ? 1 : 0));
       break;
     }
 

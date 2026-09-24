@@ -37,9 +37,9 @@
 // FIRMWARE VERSION  —  bump this on every firmware change
 // ===========================================================================
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
-// Keep this in sync with GUI_VERSION in gui/env_monitor_gui.py — the two are
-// compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.4.2"
+// Keep this version independent of GUI_VERSION in gui/env_monitor_gui.py; both
+// are compared on connect and shown in the GUI's Settings > About section.
+#define FIRMWARE_VERSION "1.4.4"
 
 // Metadata line written above the heading of new CSV log files (built in
 // build_log_metadata_line(), defined further down after the TGS EEPROM and
@@ -83,12 +83,6 @@ TwoWire WireRTC = TwoWire(1);    // RTC + OLED on I2C1 (GPIO 15/16); sensors sta
 #define PUMP_LEDC_MODE   LEDC_LOW_SPEED_MODE
 #define PUMP_LEDC_TIMER  LEDC_TIMER_0
 #define PUMP_LEDC_CH     LEDC_CHANNEL_0
-
-// ---------- Pump enable switch ----------
-// Latching switch: idle = HIGH, latched (closed to GND) = LOW. The pump is only
-// enabled while this switch is latched; the saved speed is used when it is.
-#define PUMP_SWITCH_PIN         39
-#define PUMP_SWITCH_DEBOUNCE_MS 50
 
 // ---------- Error Definition ----------
 #ifdef NO_ERROR
@@ -218,11 +212,6 @@ uint8_t crc8(const uint8_t* data, int len) {
 float pump_percent = 0.0f;      // current setting (0..100)
 static Preferences pump_prefs;
 
-// Latching enable switch (GPIO39): idle = HIGH, latched = LOW (pulled to GND).
-static bool     s_pump_switch_latched = false;  // debounced state
-static bool     s_pump_switch_raw     = false;  // last raw sample
-static uint32_t s_pump_switch_raw_ms  = 0;      // when the raw sample last changed
-
 // Init PWM on GPIO21
 static void pump_begin() {
   ledc_timer_config_t tcfg = {};
@@ -254,47 +243,6 @@ void pump_set_percent(float pct) {
   uint32_t duty = (uint32_t)((pct / 100.0f) * maxDuty + 0.5f);
   ledc_set_duty(PUMP_LEDC_MODE, PUMP_LEDC_CH, duty);
   ledc_update_duty(PUMP_LEDC_MODE, PUMP_LEDC_CH);
-}
-
-static inline void pump_off() { pump_set_percent(0); }
-static inline void pump_on()  { pump_set_percent(100); }
-
-// True while the latching enable switch is closed (GPIO39 low). Non-static so
-// serial_menu can report the state in the PUMP_STATUS reply.
-bool pump_switch_latched() { return s_pump_switch_latched; }
-
-// Drive the PWM output for the current switch state: the operator's speed
-// setting while the switch is latched, hard off (0 %) while it is open.
-// pump_percent always keeps the operator's setting, so opening the switch stops
-// the pump without losing the speed and latching it again restores that speed.
-// Non-static so serial_menu can call it.
-void pump_apply_output() {
-  pump_set_percent(s_pump_switch_latched ? pump_percent : 0.0f);
-}
-
-// Configure the enable switch input and latch its position at boot.
-// The switch is high when idle and pulled low when latched; the internal
-// pull-up keeps the input defined high if nothing (or an open contact) drives it.
-static void pump_switch_begin() {
-  pinMode(PUMP_SWITCH_PIN, INPUT_PULLUP);
-  s_pump_switch_latched = (digitalRead(PUMP_SWITCH_PIN) == LOW);
-  s_pump_switch_raw     = s_pump_switch_latched;
-  s_pump_switch_raw_ms  = millis();
-}
-
-// Debounced switch read. Returns true when the stable state changed, so the
-// caller can re-apply the PWM output.
-static bool pump_switch_poll(uint32_t now) {
-  const bool raw = (digitalRead(PUMP_SWITCH_PIN) == LOW);
-  if (raw != s_pump_switch_raw) {
-    s_pump_switch_raw    = raw;
-    s_pump_switch_raw_ms = now;
-    return false;
-  }
-  if (raw == s_pump_switch_latched) return false;
-  if (now - s_pump_switch_raw_ms < PUMP_SWITCH_DEBOUNCE_MS) return false;
-  s_pump_switch_latched = raw;
-  return true;
 }
 
 void pump_save_percent(float pct) {
@@ -1257,8 +1205,7 @@ void setup() {
   pump_begin();
   pump_prefs.begin("pump", false);
   pump_percent = pump_prefs.getFloat("pct", 0.0f);
-  pump_switch_begin();        // latch the enable-switch position before driving PWM
-  pump_apply_output();        // only drives the pump when the switch is latched
+  pump_set_percent(pump_percent);
 
   lora::begin();
   // Service LEDs/serial commands while at_cmd()/join() block on the module's
@@ -1294,35 +1241,17 @@ void setup() {
 }
 
 void loop() {
+  const uint32_t now = millis();
+
   rtc_sync::poll();
   ui::poll();
 
   // --- Send CSV header periodically (every ~10 seconds) when live streaming ---
   // This ensures the GUI always has a fresh header, even if it connects after startup
   static uint32_t last_header_sent_ms = 0;
-  uint32_t now = millis();
 
   // --- LED1: turn off after flash duration ---
   leds::poll(now);
-
-  // --- Pump enable switch (GPIO39): the pump only runs while latched ---
-  // Push a PUMP_STATUS frame the moment the debounced state changes, so the
-  // GUI can react instantly instead of waiting for its next poll. Deferred
-  // until the serial menu isn't mid-response, so the push can never land
-  // inside another command's reply.
-  static bool s_pump_push_pending = false;
-  if (pump_switch_poll(now)) {
-    pump_apply_output();
-    s_pump_push_pending = true;
-  }
-  if (s_pump_push_pending && !ui::is_busy()) {
-    uint8_t pct = (uint8_t)(pump_percent + 0.5f);
-    Serial.write((uint8_t)ui::proto::RespType::PUMP_STATUS);
-    Serial.write((uint8_t)2);
-    Serial.write(pct);
-    Serial.write((uint8_t)(pump_switch_latched() ? 1 : 0));
-    s_pump_push_pending = false;
-  }
 
   // --- LoRa periodic uplink (every 60 s) ---
   {
