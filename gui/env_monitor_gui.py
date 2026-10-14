@@ -1339,6 +1339,9 @@ class App(tk.Tk):
         "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
     }
 
+    # A gas card greys out if it has had no valid reading for this long
+    GAS_CARD_STALE_S = 30
+
     C_CARD_NA = "#6b7280"
     C_CARD_NEUTRAL = "#2563eb"
     C_CARD_BG = "#ffffff"
@@ -1409,6 +1412,9 @@ class App(tk.Tk):
         self.live_autoscroll = tk.BooleanVar(value=True)
         self.gas_card_stats: dict[str, list[float]] = {}
         self.gas_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
+        self.gas_card_age_labels: dict[str, tk.Label] = {}
+        # time.monotonic() of each card's last valid reading
+        self.gas_card_last_update: dict[str, float] = {}
 
         # TTN / MQTT (LoRaWAN cloud) state
         self.mqtt_client = None
@@ -1826,7 +1832,19 @@ class App(tk.Tk):
             )
             stats_label.pack(anchor="w", pady=(2, 0))
 
+            age_label = tk.Label(
+                card,
+                text="No data yet",
+                font=("Segoe UI", 9),
+                bg=self.C_CARD_BG,
+                fg="#9ca3af",
+            )
+            age_label.pack(anchor="w", pady=(2, 0))
+
             self.gas_card_widgets[col_name] = (val_label, unit_label, card, stats_label)
+            self.gas_card_age_labels[col_name] = age_label
+
+        self.after(1000, self._tick_gas_card_ages)
 
         # Create split pane: graphs on top, table on bottom
         split = ttk.Panedwindow(self.live_tab, orient=tk.VERTICAL)
@@ -3913,13 +3931,15 @@ class App(tk.Tk):
         self.live_series = []
         self.live_last_values.clear()
         self.gas_card_stats.clear()
+        self.gas_card_last_update.clear()
 
         for col_name, (val_lbl, unit_lbl, card, stats_lbl) in self.gas_card_widgets.items():
             val_lbl.configure(text="N/A", fg=self.C_CARD_NA)
             unit_lbl.configure(fg="#9ca3af")
             card.configure(highlightbackground=self.C_CARD_BORDER_NA)
             stats_lbl.configure(text="")
-        
+            self.gas_card_age_labels[col_name].configure(text="No data yet", fg="#9ca3af")
+
         self._refresh_live_graphs()
 
     def _update_gas_cards(self, fields: list[str]) -> None:
@@ -3959,6 +3979,35 @@ class App(tk.Tk):
                 val_lbl.configure(text=display, fg=text_col)
                 unit_lbl.configure(fg=text_col)
                 card.configure(highlightbackground=border_col)
+
+                self.gas_card_last_update[col_name] = time.monotonic()
+                self.gas_card_age_labels[col_name].configure(text="Updated just now", fg="#9ca3af")
+
+    @staticmethod
+    def _format_age(seconds: float) -> str:
+        if seconds < 2:
+            return "just now"
+        if seconds < 60:
+            return f"{int(seconds)}s ago"
+        if seconds < 3600:
+            return f"{int(seconds // 60)}m {int(seconds % 60)}s ago"
+        return f"{int(seconds // 3600)}h {int(seconds % 3600 // 60)}m ago"
+
+    def _tick_gas_card_ages(self) -> None:
+        """Refresh each gas card's "Updated … ago" text and grey out stale cards."""
+        now = time.monotonic()
+        for col_name, last in self.gas_card_last_update.items():
+            val_lbl, unit_lbl, card, _stats_lbl = self.gas_card_widgets[col_name]
+            age = now - last
+            age_lbl = self.gas_card_age_labels[col_name]
+            if age >= self.GAS_CARD_STALE_S:
+                age_lbl.configure(text=f"updated {self._format_age(age)}", fg="#b45309")
+                val_lbl.configure(fg=self.C_CARD_NA)
+                unit_lbl.configure(fg="#9ca3af")
+                card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+            else:
+                age_lbl.configure(text=f"Updated {self._format_age(age)}", fg="#9ca3af")
+        self.after(1000, self._tick_gas_card_ages)
 
     def _ensure_live_series_shape(self, n_vars: int) -> None:
         if n_vars <= 0:
