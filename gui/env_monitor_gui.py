@@ -1777,7 +1777,11 @@ class App(tk.Tk):
         cards_row = tk.Frame(cards_outer, bg=self.c_bg)
         cards_row.pack(fill=tk.X)
 
-        for col_name, (label, unit) in self.GAS_COLS.items():
+        cards_per_row = 4
+        for c in range(cards_per_row):
+            cards_row.columnconfigure(c, weight=1, uniform="gas_cards")
+
+        for i, (col_name, (label, unit)) in enumerate(self.GAS_COLS.items()):
             card = tk.Frame(
                 cards_row,
                 bg=self.C_CARD_BG,
@@ -1785,7 +1789,8 @@ class App(tk.Tk):
                 highlightthickness=1,
                 relief="flat",
             )
-            card.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 10), ipady=10, ipadx=14)
+            row, col = divmod(i, cards_per_row)
+            card.grid(row=row, column=col, sticky="nsew", padx=(0 if col == 0 else 8, 0), pady=(0 if row == 0 else 8, 0))
 
             tk.Label(
                 card,
@@ -3076,8 +3081,9 @@ class App(tk.Tk):
                     self._eeprom_confirm_write(result)
                 elif kind == "eeprom_write_ok":
                     ch_disp, tgs_id, lot, board = payload
+                    dash = "\u2014"
                     self.eeprom_status_var.set(
-                        f"ch{ch_disp}: ID={tgs_id}, Lot={lot or '\u2014'}, Board={board or '\u2014'} \u2713")
+                        f"ch{ch_disp}: ID={tgs_id}, Lot={lot or dash}, Board={board or dash} \u2713")
                     self.status_var.set(f"TGS ch{ch_disp} EEPROM written")
                 elif kind == "eeprom_write_done":
                     self._update_wifi_controls()
