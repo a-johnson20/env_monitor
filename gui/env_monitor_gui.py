@@ -1572,6 +1572,7 @@ class App(tk.Tk):
             background=self.c_accent,
             borderwidth=0,
         )
+        
         self.style.map(
             "Accent.TButton",
             background=[
@@ -1649,11 +1650,6 @@ class App(tk.Tk):
 
         self.connect_btn = ttk.Button(top, text="🔗  Connect", command=self.toggle_connection, style="Accent.TButton")
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-        # Connection circle indicator
-        self.conn_indicator = tk.Canvas(top, width=14, height=14, highlightthickness=0, bg=self.c_bg)
-        self.conn_circle = self.conn_indicator.create_oval(1, 1, 13, 13, fill="#9ca3af")
-        self.conn_indicator.pack(side=tk.LEFT, padx=(4, 8))
 
         ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1894,12 +1890,6 @@ class App(tk.Tk):
         
         self.live_table_columns = []
         self.live_table_col_indices: list[int] = []
-
-    def _set_live_indicator(self, active: bool) -> None:
-        self.conn_indicator.itemconfig(
-            self.conn_circle,
-            fill="#22c55e" if active else "#3b82fb"
-        )
 
     def _on_graphs_content_configure(self, _event=None) -> None:
         self.graphs_canvas.configure(scrollregion=self.graphs_canvas.bbox("all"))
@@ -2787,7 +2777,6 @@ class App(tk.Tk):
                     messagebox.showerror("Error", str(payload))
                 elif kind == "connected":
                     self.connected = True
-                    self.conn_indicator.itemconfig(self.conn_circle, fill="#3b82f6") # blue = connected to port
                     self.connected_port = str(payload)
                     self.status_var.set(f"Connected: {payload}")
                     self.connect_btn.configure(text="✖  Disconnect")
@@ -2809,9 +2798,7 @@ class App(tk.Tk):
                     # Check firmware/GUI version compatibility
                     self._about_refresh()
                 elif kind == "disconnected":
-                    self._set_live_indicator(False)
                     self.connected = False
-                    self.conn_indicator.itemconfig(self.conn_circle, fill="#9ca3af")
                     self.connected_port = None
                     self.live_running = False
                     self.files_refresh_inflight = False
@@ -2884,7 +2871,6 @@ class App(tk.Tk):
                         self.preview_loading_index = None
                 elif kind == "live_started":
                     self.live_running = True
-                    self._set_live_indicator(True)
                     self._reset_live_history()
                     self.status_var.set("Live stream running")
                     self.live_start_btn.configure(state=tk.DISABLED)
@@ -2893,7 +2879,6 @@ class App(tk.Tk):
                     self._update_files_controls()
                 elif kind == "live_stopped":
                     self.live_running = False
-                    self._set_live_indicator(False)
                     self.status_var.set("Connected")
                     self.live_start_btn.configure(state=tk.NORMAL)
                     self.live_stop_btn.configure(state=tk.DISABLED)
