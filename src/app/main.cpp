@@ -146,6 +146,10 @@ constexpr size_t N_TRHP  =    hal::Mux::TRHP.size();
 constexpr size_t N_TGS2611 =  hal::Mux::TGS2611.size();
 constexpr size_t N_TGS2616 =  hal::Mux::TGS2616.size();
 
+enum class AdsVariant : uint8_t { Unknown, ADS1113, ADS1114 };
+std::array<AdsVariant, N_TGS2611> tgs2611_ads_variants{};
+std::array<AdsVariant, N_TGS2616> tgs2616_ads_variants{};
+
 // Per-SCD4x instance readings (one struct per node)
 std::array<Scd4xReading, N_SCD4X> scd4x_nodes{};
 std::array<Sfm3505Reading, N_SFM3505> sfm3505_nodes{};
@@ -569,14 +573,15 @@ bool lps22df_read_with_autorecover(Lps22dfReading &st) {
   st.p_ready = st.t_ready = false; return lps22df_read(st);
 }
 
-// ---------- ADS1113 ----------
-// ADS1113 has NO programmable gain amplifier — PGA bits are ignored.
-// Fixed internal reference gives FSR = ±2.048 V, LSB = 62.5 µV.
+// ---------- ADS1113 / ADS1114 ----------
+// Both ADC variants use the ±2.048 V range here, giving 62.5 µV/LSB.
 // V_RL must be kept below ~1.8 V via the digipot R_L setting to avoid saturation.
-static const float    ADS1113_LSB_V = 0.0000625f;  // 62.5 µV/LSB, fixed ±2.048 V FSR
-bool ads1113_single_shot(int16_t &raw) {
+static const float    ADS_LSB_V = 0.0000625f;
+bool ads_single_shot(int16_t &raw, AdsVariant variant) {
   const uint8_t a = hal::I2CAddr::ADS1113;
-  uint16_t cfg = (1u<<15)|(0b100<<12)|(0b001<<9)|(1u<<8)|(0b100<<5)|(0b11);  // PGA bits ignored by ADS1113
+  const uint16_t pga = variant == AdsVariant::ADS1114 ? (0b010u << 9) : 0;
+  const uint16_t cfg = (1u << 15) | (0b100u << 12) | pga |
+                       (1u << 8) | (0b100u << 5) | 0b11u;
   Wire.beginTransmission(a); Wire.write(0x01); Wire.write((uint8_t)(cfg>>8)); Wire.write((uint8_t)(cfg&0xFF));
   if (Wire.endTransmission()!=0) return false;
   delay(9);
@@ -707,6 +712,64 @@ static bool tgs_eeprom_read_plain_ascii_block(uint8_t block_off, uint8_t max_len
   return true;
 }
 
+static bool tgs_eeprom_read_board_id_on_selected(char* board_id, uint8_t board_size) {
+  if (!board_id || board_size == 0) return false;
+  board_id[0] = '\0';
+  // v2 (31 chars, CRC at 0x60), then v1 (15 chars, CRC at 0x50), then plain.
+  return tgs_eeprom_read_crc_ascii_block(0x40, 31, 0x60, board_id, board_size) ||
+         tgs_eeprom_read_crc_ascii_block(0x40, 15, 0x50, board_id, board_size) ||
+         tgs_eeprom_read_plain_ascii_block(0x40, 31, board_id, board_size);
+}
+
+static AdsVariant ads_variant_from_board_id(const char* board_id) {
+  if (!board_id || strncmp(board_id, "FIG_v", 5) != 0) return AdsVariant::Unknown;
+
+  const char* version = board_id + 5;
+  if (*version < '0' || *version > '9') return AdsVariant::Unknown;
+  unsigned major = 0;
+  do {
+    major = major * 10 + static_cast<unsigned>(*version - '0');
+    ++version;
+  } while (*version >= '0' && *version <= '9');
+  if (*version != '_') return AdsVariant::Unknown;
+
+  if (major == 5) return AdsVariant::ADS1113;
+  if (major >= 6) return AdsVariant::ADS1114;
+  return AdsVariant::Unknown;
+}
+
+template <size_t N>
+static void detect_ads_variants(const std::array<Ch, N>& channels,
+                                std::array<AdsVariant, N>& variants,
+                                const char* family) {
+  for (size_t i = 0; i < N; ++i) {
+    variants[i] = AdsVariant::Unknown;
+    char board_id[32] = {0};
+    if (!select_channel(Wire, channels[i], muxStateWire)) {
+      char message[64];
+      snprintf(message, sizeof(message), "%s[%u] mux selection failed; ADS variant unknown",
+               family, static_cast<unsigned>(i + 1));
+      ui::proto::write_message(0x02, message);
+      continue;
+    }
+    if (!tgs_eeprom_read_board_id_on_selected(board_id, sizeof(board_id))) {
+      char message[64];
+      snprintf(message, sizeof(message), "%s[%u] board ID unreadable; ADS variant unknown",
+               family, static_cast<unsigned>(i + 1));
+      ui::proto::write_message(0x02, message);
+      continue;
+    }
+
+    variants[i] = ads_variant_from_board_id(board_id);
+    const char* ads_name = variants[i] == AdsVariant::ADS1113 ? "ADS1113" :
+                           variants[i] == AdsVariant::ADS1114 ? "ADS1114" : "unknown ADS";
+    char message[96];
+    snprintf(message, sizeof(message), "%s[%u] board=%s -> %s",
+             family, static_cast<unsigned>(i + 1), board_id, ads_name);
+    ui::proto::write_message(0x02, message);
+  }
+}
+
 // Write TGS sensor ID, lot number and board ID to the EEPROM on TGS2611
 // channel ch (0-based). Called by serial_menu from the GUI.
 bool tgs2611_write_ids(uint8_t ch, uint16_t tgs_id, const char* lot, const char* board_id) {
@@ -737,11 +800,7 @@ bool tgs2611_read_ids(uint8_t ch, uint16_t &tgs_id, bool &crc_ok,
     }
   }
   if (board_id && board_size) {
-    // v2 (31 chars, CRC at 0x60), then v1 (15 chars, CRC at 0x50), then plain.
-    if (!tgs_eeprom_read_crc_ascii_block(0x40, 31, 0x60, board_id, board_size) &&
-        !tgs_eeprom_read_crc_ascii_block(0x40, 15, 0x50, board_id, board_size)) {
-      tgs_eeprom_read_plain_ascii_block(0x40, 31, board_id, board_size);
-    }
+    tgs_eeprom_read_board_id_on_selected(board_id, board_size);
   }
   // Calibration unix time (blank / CRC-bad leaves calib_ok=false).
   calib_epoch = 0;
@@ -1013,7 +1072,7 @@ static void lora_build_payload(uint8_t* buf) {
   buf[10] = pres_enc >> 8;           buf[11] = pres_enc & 0xFF;
   buf[12] = ch4_enc >> 8;            buf[13] = ch4_enc & 0xFF;
 
-  // TGS2611 raw ADC (raw 12-bit reading from ADS1113)
+  // TGS2611 raw ADC reading from the board's ADS111x.
   float raw_avg = lora_raw_adc.mean();
   uint16_t raw_adc = 0xFFFF;
   if (!isnan(raw_avg)) {
@@ -1113,6 +1172,10 @@ void setup() {
     }
   }
   ui::proto::write_message(0x02, "TCA9548A connected");
+
+  // Identify each daughterboard from its EEPROM board ID before ADC sampling.
+  detect_ads_variants(hal::Mux::TGS2611, tgs2611_ads_variants, "TGS2611");
+  detect_ads_variants(hal::Mux::TGS2616, tgs2616_ads_variants, "TGS2616");
 
   // Calibrate TGS2611 channels
   app::calibrate_all_tgs2611(muxStateWire);
@@ -1503,9 +1566,9 @@ void loop() {
 
       readings.ads.valid = false;
       int16_t raw;
-      if (ads1113_single_shot(raw)) {
+      if (ads_single_shot(raw, tgs2611_ads_variants[i])) {
         readings.ads.raw   = raw;
-        readings.ads.volts = raw * ADS1113_LSB_V;
+        readings.ads.volts = raw * ADS_LSB_V;
         readings.ads.valid = true;
         win_tgs2611_raw[i].add((float)raw);
         win_tgs2611_v[i].add(readings.ads.volts);
@@ -1530,9 +1593,9 @@ void loop() {
 
       readings.ads.valid = false;
       int16_t raw;
-      if (ads1113_single_shot(raw)) {
+      if (ads_single_shot(raw, tgs2616_ads_variants[i])) {
         readings.ads.raw   = raw;
-        readings.ads.volts = raw * ADS1113_LSB_V;
+        readings.ads.volts = raw * ADS_LSB_V;
         readings.ads.valid = true;
         win_tgs2616_raw[i].add((float)raw);
         win_tgs2616_v[i].add(readings.ads.volts);

@@ -4305,7 +4305,7 @@ class App(tk.Tk):
             return
 
         # --- Parse data points (skip empty rows) ---
-        ADS1113_LSB_V = 62.5e-6
+        ADS_LSB_V = 62.5e-6
         VS_V = 5.0
         R_L_KOHM = 1.0
         SHAH_A = 24.7
@@ -4332,7 +4332,7 @@ class App(tk.Tk):
             if ppm < 2.0:
                 self.calib_r2ppm_status_var.set(f"Row {i+1}: ppm must be \u2265 2.0")
                 return
-            v_rl = raw * ADS1113_LSB_V
+            v_rl = raw * ADS_LSB_V
             if v_rl <= 0 or v_rl >= VS_V:
                 self.calib_r2ppm_status_var.set(f"Row {i+1}: ADC out of valid voltage range")
                 return
@@ -5270,5 +5270,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
 

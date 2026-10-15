@@ -55,5 +55,5 @@ function decodeUplink(input) {
 - `0x8000` (-32768) marks temperature as unavailable (signed int16 — the only field that can be negative).
 - Temperature example: `2500` → 25.00 °C, `-500` → -5.00 °C.
 - Air flow example: `1500` → 15.00 SLM (standard litres per minute).
-- Raw ADC is the 12-bit value from the ADS1113 (range 0–2047 typically, fits in uint16).
+- Raw ADC is the conversion value from the board's ADS1113 or ADS1114 (fits in uint16).
 - N₂O example: `4423` → 44.23 ppm.

@@ -11,6 +11,6 @@ namespace hal::Mux { // nested namespace
   inline constexpr std::array<Ch, 1> SFM3505 { Ch::C0 }; // SFM3505-300 gas flow meter
   inline constexpr std::array<Ch, 1> TRHP    { Ch::C1 }; // SHT45 + TMP117 + LPS22DF
   inline constexpr std::array<Ch, 1> SCD4x   { Ch::C2 }; // SCD41 / SCD40
-  inline constexpr std::array<Ch, 1> TGS2611 { Ch::C4 }; // TGS2611 with ADS1113 + (future) digipot/EEPROM
-  inline constexpr std::array<Ch, 0> TGS2616 {  }; // TGS2616 with ADS1113 + (future) digipot/EEPROM
+  inline constexpr std::array<Ch, 2> TGS2611 { Ch::C4, Ch::C5 }; // FIG daughterboard: ADS1113 (v5) or ADS1114 (v6+)
+  inline constexpr std::array<Ch, 0> TGS2616 {  }; // FIG daughterboard: ADS1113 (v5) or ADS1114 (v6+)
 }
