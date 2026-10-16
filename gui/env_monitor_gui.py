@@ -67,7 +67,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.5.0"
+GUI_VERSION = "1.5.1"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -105,8 +105,8 @@ C_BG = "#eef2f8"
 C_SURFACE = "#ffffff"
 C_TEXT = "#1f2937"
 C_MUTED = "#5b6678"
-C_ACCENT = "#0b66d6"
-C_ACCENT_HOVER = "#0a58bc"
+C_ACCENT = "#006680"
+C_ACCENT_HOVER = "#005366"
 C_ACCENT_DISABLED = "#a8b5cc"
 C_BORDER = "#d4dbe6"
 C_ROW_ALT = "#f7f9fc"
@@ -1580,7 +1580,7 @@ class App(ctk.CTk):
             padding=(6, 6),
             font=("Segoe UI Semibold", 10),
         )
-        self.style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", "#111827")])
+        self.style.map("Treeview", background=[("selected", C_ACCENT)], foreground=[("selected", "#ffffff")])
         self.style.map("Treeview.Heading", background=[("active", "#dce5f2")])
 
     def _make_paned(self, master, orient: str) -> tk.PanedWindow:
@@ -1625,6 +1625,7 @@ class App(ctk.CTk):
         self.port_combo = ctk.CTkComboBox(
             top, variable=self.port_var, values=[], width=170, state="readonly",
             font=ui_font(13), dropdown_font=ui_font(13), command=self._on_port_selected,
+            button_color=C_ACCENT, button_hover_color=C_ACCENT_HOVER,
         )
         self.port_combo.pack(side=tk.LEFT, padx=(6, 10))
 
@@ -1635,6 +1636,7 @@ class App(ctk.CTk):
         self.baud_combo = ctk.CTkComboBox(
             top, variable=self.baud_var, values=_baud_rates, width=100, state="readonly",
             font=ui_font(13), dropdown_font=ui_font(13),
+            button_color=C_ACCENT, button_hover_color=C_ACCENT_HOVER,
         )
         self.baud_combo.pack(side=tk.LEFT, padx=(6, 10))
 
@@ -1837,6 +1839,8 @@ class App(ctk.CTk):
             text_color=self.c_text,
             checkbox_width=20,
             checkbox_height=20,
+            fg_color=C_ACCENT,
+            hover_color=C_ACCENT_HOVER,
         ).pack(side=tk.LEFT, padx=(12, 0))
 
         table_inner = make_frame(table_frame)
@@ -1910,6 +1914,7 @@ class App(ctk.CTk):
             status_row, variable=self.mqtt_selected_device, state="readonly", width=200, values=[],
             font=ui_font(13), dropdown_font=ui_font(13),
             command=lambda _v: self._refresh_mqtt_display(),
+            button_color=C_ACCENT, button_hover_color=C_ACCENT_HOVER,
         )
         self.mqtt_device_combo.pack(side=tk.LEFT)
 
@@ -2304,6 +2309,7 @@ class App(ctk.CTk):
             lora_btn_row, text="Colon separators", variable=self._lora_colon_var,
             command=self._toggle_eui_colons, font=ui_font(13), text_color=self.c_text,
             checkbox_width=20, checkbox_height=20,
+            fg_color=C_ACCENT, hover_color=C_ACCENT_HOVER,
         ).pack(side=tk.LEFT, padx=(8, 0))
 
         make_label(lora_btn_row, textvariable=self.lora_status_var, hint=True).pack(
@@ -2574,6 +2580,7 @@ class App(ctk.CTk):
             state="readonly",
             font=ui_font(13), dropdown_font=ui_font(13),
             command=self._on_other_security_changed,
+            button_color=C_ACCENT, button_hover_color=C_ACCENT_HOVER,
         )
         self.wifi_form_security.set("")
         self.wifi_form_security.pack(fill=tk.X, pady=(4, 8))
