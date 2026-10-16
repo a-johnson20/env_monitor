@@ -67,7 +67,7 @@ except Exception:
 #   Compatible (protocol 1, minor version differs)
 #   Incompatible (GUI protocol 2, firmware protocol 1)
 #   Compatibility unknown (firmware protocol unknown)
-GUI_VERSION = "1.4.3"
+GUI_VERSION = "1.5.0"
 
 # Version-check levels — drive the colour of the Settings > About status line.
 VERSION_LEVEL_OK = "ok"            # green — exact protocol revision match
@@ -2680,8 +2680,12 @@ class App(ctk.CTk):
                     # Fetch the stored pump speed once so the slider starts
                     # from the device's persisted setting.
                     self._initial_status_fetch()
-                    # Check firmware/GUI version compatibility
-                    self._about_refresh()
+                    # Version check runs at the end of _initial_status_fetch; a
+                    # second concurrent query used to race and overwrite a good
+                    # result with "unknown".
+                    self.fw_version_var.set("\u2026")
+                    self.version_status_var.set("Reading\u2026")
+                    self.version_status_label.configure(text_color=C_HINT)
                 elif kind == "disconnected":
                     self.connected = False
                     self.connected_port = None
@@ -3124,14 +3128,18 @@ class App(ctk.CTk):
             except Exception:
                 pass
             # Firmware version for Settings > About (compatibility check).
-            try:
-                ver = self.client.fw_version(timeout_s=5.0)
+            ver: dict = {}
+            for attempt in range(2):
+                try:
+                    ver = self.client.fw_version(timeout_s=5.0)
+                except Exception as exc:
+                    ver = {"success": False, "message": str(exc)}
                 if ver.get("success"):
-                    self.events.put(("fw_version_ok", ver["version"]))
-                else:
-                    self.events.put(("fw_version_failed", ver.get("message", "")))
-            except Exception as exc:
-                self.events.put(("fw_version_failed", str(exc)))
+                    break
+            if ver.get("success"):
+                self.events.put(("fw_version_ok", ver["version"]))
+            else:
+                self.events.put(("fw_version_failed", ver.get("message", "")))
             self.events.put(("initial_status_done", None))
 
         threading.Thread(target=worker, daemon=True).start()
