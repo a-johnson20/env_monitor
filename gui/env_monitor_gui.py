@@ -1309,6 +1309,46 @@ class SerialMenuClient:
 
 # ============ GUI APPLICATION ============
 
+class _StatsRow(tk.Frame):
+    """Min/avg/max readout: one row when it fits, stacked when the card is narrow."""
+
+    def __init__(self, master, bg: str) -> None:
+        super().__init__(master, bg=bg)
+        self._labels = [
+            tk.Label(self, text="", font=("Segoe UI", 9), bg=bg, fg="#6b7280", anchor="w")
+            for _ in range(3)
+        ]
+        self._stacked: bool | None = None
+        self._layout(False)
+        self.bind("<Configure>", self._on_resize)
+
+    def _layout(self, stacked: bool) -> None:
+        if stacked == self._stacked:
+            return
+        self._stacked = stacked
+        for i, lbl in enumerate(self._labels):
+            lbl.grid_forget()
+            if stacked:
+                lbl.grid(row=i, column=0, sticky="w")
+            else:
+                lbl.grid(row=0, column=i, sticky="w", padx=(0 if i == 0 else 10, 0))
+
+    def _on_resize(self, event) -> None:
+        needed = sum(lbl.winfo_reqwidth() for lbl in self._labels) + 20
+        if self._stacked and event.width >= needed + 12:
+            self._layout(False)
+        elif not self._stacked and event.width < needed:
+            self._layout(True)
+
+    def set_stats(self, lo: str, avg: str, hi: str) -> None:
+        for lbl, text in zip(self._labels, (f"min {lo}", f"avg {avg}", f"max {hi}")):
+            lbl.configure(text=text)
+
+    def clear(self) -> None:
+        for lbl in self._labels:
+            lbl.configure(text="")
+
+
 class App(tk.Tk):
 
     # Choose which readings to hide from the raw data log table
@@ -1745,7 +1785,26 @@ class App(tk.Tk):
 
 
     def _build_live_tab(self) -> None:
-        btns = ttk.Frame(self.live_tab)
+        # The whole page scrolls so cards, graphs and the log keep a readable size.
+        self.live_page_canvas = tk.Canvas(self.live_tab, highlightthickness=0, bg=self.c_bg)
+        live_vsb = ttk.Scrollbar(self.live_tab, orient=tk.VERTICAL, command=self.live_page_canvas.yview)
+        self.live_page_canvas.configure(yscrollcommand=live_vsb.set)
+        live_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self.live_page_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        live_page = ttk.Frame(self.live_page_canvas)
+        live_page_id = self.live_page_canvas.create_window((0, 0), window=live_page, anchor="nw")
+        live_page.bind(
+            "<Configure>",
+            lambda _e: self.live_page_canvas.configure(scrollregion=self.live_page_canvas.bbox("all")),
+        )
+        self.live_page_canvas.bind(
+            "<Configure>",
+            lambda e: self.live_page_canvas.itemconfigure(live_page_id, width=e.width),
+        )
+        self.bind("<MouseWheel>", self._on_live_page_mousewheel, add="+")
+
+        btns = ttk.Frame(live_page)
         btns.pack(fill=tk.X)
         self.live_start_btn = ttk.Button(
             btns,
@@ -1759,7 +1818,7 @@ class App(tk.Tk):
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         # Gas reading cards
-        cards_outer = tk.Frame(self.live_tab, bg=self.c_bg)
+        cards_outer = tk.Frame(live_page, bg=self.c_bg)
         cards_outer.pack(fill=tk.X, pady=(0, 12))
 
         tk.Label(
@@ -1791,12 +1850,12 @@ class App(tk.Tk):
             tk.Label(
                 card,
                 text=label,
-                font=("Segoe UI", 9),
+                font=("Segoe UI Semibold", 9),
                 bg=self.C_CARD_BG,
-                fg="#6b7280").pack(anchor="w")
+                fg="#6b7280").pack(anchor="w", padx=12, pady=(10, 0))
             
             val_frame = tk.Frame(card, bg=self.C_CARD_BG)
-            val_frame.pack(anchor="w")
+            val_frame.pack(anchor="w", padx=12)
 
             val_label = tk.Label(
                 val_frame,
@@ -1817,14 +1876,8 @@ class App(tk.Tk):
             )
             unit_label.pack(side=tk.LEFT, anchor="s", pady=(0, 4))
 
-            stats_label = tk.Label(
-                card,
-                text="",
-                font=("Segoe UI", 10),
-                bg=self.C_CARD_BG,
-                fg="#9ca3af",
-            )
-            stats_label.pack(anchor="w", pady=(2, 0))
+            stats_label = _StatsRow(card, self.C_CARD_BG)
+            stats_label.pack(fill=tk.X, padx=12, pady=(2, 0))
 
             age_label = tk.Label(
                 card,
@@ -1833,46 +1886,30 @@ class App(tk.Tk):
                 bg=self.C_CARD_BG,
                 fg="#9ca3af",
             )
-            age_label.pack(anchor="w", pady=(2, 0))
+            age_label.pack(anchor="w", padx=12, pady=(2, 10))
 
             self.gas_card_widgets[col_name] = (val_label, unit_label, card, stats_label)
             self.gas_card_age_labels[col_name] = age_label
 
         self.after(1000, self._tick_gas_card_ages)
 
-        # Create split pane: graphs on top, table on bottom
-        split = ttk.Panedwindow(self.live_tab, orient=tk.VERTICAL)
-        split.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
+        # Graphs on top, table below; the page scrolls instead of a split pane
+        graphs_frame = ttk.Frame(live_page)
+        graphs_frame.pack(fill=tk.X, pady=(10, 0))
 
-        # Top: Graphs
-        graphs_frame = ttk.Frame(split)
-        split.add(graphs_frame, weight=3)
-        
         ttk.Label(graphs_frame, text="Live Graphs", style="Section.TLabel").pack(anchor="w")
-        
-        # Create scrollable canvas for graphs
-        self.graphs_canvas = tk.Canvas(graphs_frame, highlightthickness=0, bg=self.c_bg)
-        self.graphs_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        graphs_vsb = ttk.Scrollbar(graphs_frame, orient=tk.VERTICAL, command=self.graphs_canvas.yview)
-        graphs_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.graphs_canvas.configure(yscrollcommand=graphs_vsb.set)
+        self.graphs_content = ttk.Frame(graphs_frame)
+        self.graphs_content.pack(fill=tk.X, expand=True)
 
-        self.graphs_content = ttk.Frame(self.graphs_canvas)
-        self.graphs_content_id = self.graphs_canvas.create_window((0, 0), window=self.graphs_content, anchor="nw")
-        self.graphs_content.bind("<Configure>", self._on_graphs_content_configure)
-        self.graphs_canvas.bind("<Configure>", self._on_graphs_canvas_configure)
-        self.graphs_canvas.bind("<Enter>", lambda _: self.graphs_canvas.bind_all("<MouseWheel>", self._on_graphs_mousewheel))
-        self.graphs_canvas.bind("<Leave>", lambda _: self.graphs_canvas.unbind_all("<MouseWheel>"))
-        
         self.graph_names: list[str] = []
         self.graph_canvases: list[tk.Canvas] = []
         self.graph_hover_data: dict = {}
         self._graph_redraw_pending = False
 
         # Bottom: Table
-        table_frame = ttk.Frame(split)
-        split.add(table_frame, weight=1)
+        table_frame = ttk.Frame(live_page)
+        table_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
         table_header = ttk.Frame(table_frame)
         table_header.pack(fill=tk.X)
@@ -1890,7 +1927,7 @@ class App(tk.Tk):
         table_inner.columnconfigure(0, weight=1)
         
         # Create Treeview for live data table
-        self.live_table = ttk.Treeview(table_inner, show="headings")
+        self.live_table = ttk.Treeview(table_inner, show="headings", height=10)
         self.live_table.grid(row=0, column=0, sticky="nsew")
         
         # Add scrollbars
@@ -1903,14 +1940,15 @@ class App(tk.Tk):
         self.live_table_columns = []
         self.live_table_col_indices: list[int] = []
 
-    def _on_graphs_content_configure(self, _event=None) -> None:
-        self.graphs_canvas.configure(scrollregion=self.graphs_canvas.bbox("all"))
-
-    def _on_graphs_canvas_configure(self, event) -> None:
-        self.graphs_canvas.itemconfigure(self.graphs_content_id, width=event.width)
-
-    def _on_graphs_mousewheel(self, event) -> None:
-        self.graphs_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    def _on_live_page_mousewheel(self, event) -> None:
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        while widget is not None:
+            if widget is self.live_page_canvas:
+                break
+            widget = widget.master
+        else:
+            return
+        self.live_page_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _on_mqtt_graphs_content_configure(self, _event=None) -> None:
         self.mqtt_graphs_canvas.configure(scrollregion=self.mqtt_graphs_canvas.bbox("all"))
@@ -3750,7 +3788,7 @@ class App(tk.Tk):
             pane = ttk.LabelFrame(self.graphs_content, text=f"{graph_title} ({unit})" if unit else graph_title)
             pane.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
 
-            canvas = tk.Canvas(pane, bg=self.c_surface, highlightthickness=1, highlightbackground=self.c_border)
+            canvas = tk.Canvas(pane, bg=self.c_surface, height=220, highlightthickness=1, highlightbackground=self.c_border)
             canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
             canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
             canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
@@ -3938,7 +3976,7 @@ class App(tk.Tk):
             val_lbl.configure(text="N/A", fg=self.C_CARD_NA)
             unit_lbl.configure(fg="#9ca3af")
             card.configure(highlightbackground=self.C_CARD_BORDER_NA)
-            stats_lbl.configure(text="")
+            stats_lbl.clear()
             self.gas_card_age_labels[col_name].configure(text="No data yet", fg="#9ca3af")
 
         self._refresh_live_graphs()
@@ -3970,9 +4008,7 @@ class App(tk.Tk):
                     self.gas_card_stats[col_name] = []
                 self.gas_card_stats[col_name].append(parsed)
                 s = self.gas_card_stats[col_name]
-                stats_lbl.configure(
-                    text=f"min: {min(s):.1f} | avg: {sum(s)/len(s):.1f} | max: {max(s):.1f}"
-                )
+                stats_lbl.set_stats(f"{min(s):.1f}", f"{sum(s)/len(s):.1f}", f"{max(s):.1f}")
 
                 text_col = self.C_CARD_NEUTRAL
                 border_col = self.C_CARD_BORDER_NEUTRAL
