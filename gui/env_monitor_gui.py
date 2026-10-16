@@ -1333,6 +1333,9 @@ class App(tk.Tk):
         "n2o_uart_ppm_avg":     ("N\u2082O",    "ppm"),
     }
 
+    # A gas card greys out if it has had no valid reading for this long
+    GAS_CARD_STALE_S = 30
+
     C_CARD_NA = "#6b7280"
     C_CARD_NEUTRAL = "#2563eb"
     C_CARD_BG = "#ffffff"
@@ -1403,6 +1406,9 @@ class App(tk.Tk):
         self.live_autoscroll = tk.BooleanVar(value=True)
         self.gas_card_stats: dict[str, list[float]] = {}
         self.gas_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
+        self.gas_card_age_labels: dict[str, tk.Label] = {}
+        # time.monotonic() of each card's last valid reading
+        self.gas_card_last_update: dict[str, float] = {}
 
         # TTN / MQTT (LoRaWAN cloud) state
         self.mqtt_client = None
@@ -1566,6 +1572,7 @@ class App(tk.Tk):
             background=self.c_accent,
             borderwidth=0,
         )
+        
         self.style.map(
             "Accent.TButton",
             background=[
@@ -1643,11 +1650,6 @@ class App(tk.Tk):
 
         self.connect_btn = ttk.Button(top, text="🔗  Connect", command=self.toggle_connection, style="Accent.TButton")
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
-
-        # Connection circle indicator
-        self.conn_indicator = tk.Canvas(top, width=14, height=14, highlightthickness=0, bg=self.c_bg)
-        self.conn_circle = self.conn_indicator.create_oval(1, 1, 13, 13, fill="#9ca3af")
-        self.conn_indicator.pack(side=tk.LEFT, padx=(4, 8))
 
         ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
 
@@ -1771,7 +1773,11 @@ class App(tk.Tk):
         cards_row = tk.Frame(cards_outer, bg=self.c_bg)
         cards_row.pack(fill=tk.X)
 
-        for col_name, (label, unit) in self.GAS_COLS.items():
+        cards_per_row = 4
+        for c in range(cards_per_row):
+            cards_row.columnconfigure(c, weight=1, uniform="gas_cards")
+
+        for i, (col_name, (label, unit)) in enumerate(self.GAS_COLS.items()):
             card = tk.Frame(
                 cards_row,
                 bg=self.C_CARD_BG,
@@ -1779,7 +1785,8 @@ class App(tk.Tk):
                 highlightthickness=1,
                 relief="flat",
             )
-            card.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 10), ipady=10, ipadx=14)
+            row, col = divmod(i, cards_per_row)
+            card.grid(row=row, column=col, sticky="nsew", padx=(0 if col == 0 else 8, 0), pady=(0 if row == 0 else 8, 0))
 
             tk.Label(
                 card,
@@ -1819,7 +1826,19 @@ class App(tk.Tk):
             )
             stats_label.pack(anchor="w", pady=(2, 0))
 
+            age_label = tk.Label(
+                card,
+                text="No data yet",
+                font=("Segoe UI", 9),
+                bg=self.C_CARD_BG,
+                fg="#9ca3af",
+            )
+            age_label.pack(anchor="w", pady=(2, 0))
+
             self.gas_card_widgets[col_name] = (val_label, unit_label, card, stats_label)
+            self.gas_card_age_labels[col_name] = age_label
+
+        self.after(1000, self._tick_gas_card_ages)
 
         # Create split pane: graphs on top, table on bottom
         split = ttk.Panedwindow(self.live_tab, orient=tk.VERTICAL)
@@ -1883,12 +1902,6 @@ class App(tk.Tk):
         
         self.live_table_columns = []
         self.live_table_col_indices: list[int] = []
-
-    def _set_live_indicator(self, active: bool) -> None:
-        self.conn_indicator.itemconfig(
-            self.conn_circle,
-            fill="#22c55e" if active else "#3b82fb"
-        )
 
     def _on_graphs_content_configure(self, _event=None) -> None:
         self.graphs_canvas.configure(scrollregion=self.graphs_canvas.bbox("all"))
@@ -2776,7 +2789,6 @@ class App(tk.Tk):
                     messagebox.showerror("Error", str(payload))
                 elif kind == "connected":
                     self.connected = True
-                    self.conn_indicator.itemconfig(self.conn_circle, fill="#3b82f6") # blue = connected to port
                     self.connected_port = str(payload)
                     self.status_var.set(f"Connected: {payload}")
                     self.connect_btn.configure(text="✖  Disconnect")
@@ -2798,9 +2810,7 @@ class App(tk.Tk):
                     # Check firmware/GUI version compatibility
                     self._about_refresh()
                 elif kind == "disconnected":
-                    self._set_live_indicator(False)
                     self.connected = False
-                    self.conn_indicator.itemconfig(self.conn_circle, fill="#9ca3af")
                     self.connected_port = None
                     self.live_running = False
                     self.files_refresh_inflight = False
@@ -2875,7 +2885,6 @@ class App(tk.Tk):
                     self._reset_live_history()
                 elif kind == "live_started":
                     self.live_running = True
-                    self._set_live_indicator(True)
                     self.status_var.set("Live stream running")
                     self.live_start_btn.configure(state=tk.DISABLED)
                     self.live_stop_btn.configure(state=tk.NORMAL)
@@ -2883,7 +2892,6 @@ class App(tk.Tk):
                     self._update_files_controls()
                 elif kind == "live_stopped":
                     self.live_running = False
-                    self._set_live_indicator(False)
                     self.status_var.set("Connected")
                     self.live_start_btn.configure(state=tk.NORMAL)
                     self.live_stop_btn.configure(state=tk.DISABLED)
@@ -3071,8 +3079,9 @@ class App(tk.Tk):
                     self._eeprom_confirm_write(result)
                 elif kind == "eeprom_write_ok":
                     ch_disp, tgs_id, lot, board = payload
+                    dash = "\u2014"
                     self.eeprom_status_var.set(
-                        f"ch{ch_disp}: ID={tgs_id}, Lot={lot or '\u2014'}, Board={board or '\u2014'} \u2713")
+                        f"ch{ch_disp}: ID={tgs_id}, Lot={lot or dash}, Board={board or dash} \u2713")
                     self.status_var.set(f"TGS ch{ch_disp} EEPROM written")
                 elif kind == "eeprom_write_done":
                     self._update_wifi_controls()
@@ -3923,13 +3932,15 @@ class App(tk.Tk):
         self.live_series = []
         self.live_last_values.clear()
         self.gas_card_stats.clear()
+        self.gas_card_last_update.clear()
 
         for col_name, (val_lbl, unit_lbl, card, stats_lbl) in self.gas_card_widgets.items():
             val_lbl.configure(text="N/A", fg=self.C_CARD_NA)
             unit_lbl.configure(fg="#9ca3af")
             card.configure(highlightbackground=self.C_CARD_BORDER_NA)
             stats_lbl.configure(text="")
-        
+            self.gas_card_age_labels[col_name].configure(text="No data yet", fg="#9ca3af")
+
         self._refresh_live_graphs()
 
     def _update_gas_cards(self, fields: list[str]) -> None:
@@ -3969,6 +3980,35 @@ class App(tk.Tk):
                 val_lbl.configure(text=display, fg=text_col)
                 unit_lbl.configure(fg=text_col)
                 card.configure(highlightbackground=border_col)
+
+                self.gas_card_last_update[col_name] = time.monotonic()
+                self.gas_card_age_labels[col_name].configure(text="Updated just now", fg="#9ca3af")
+
+    @staticmethod
+    def _format_age(seconds: float) -> str:
+        if seconds < 2:
+            return "just now"
+        if seconds < 60:
+            return f"{int(seconds)}s ago"
+        if seconds < 3600:
+            return f"{int(seconds // 60)}m {int(seconds % 60)}s ago"
+        return f"{int(seconds // 3600)}h {int(seconds % 3600 // 60)}m ago"
+
+    def _tick_gas_card_ages(self) -> None:
+        """Refresh each gas card's "Updated … ago" text and grey out stale cards."""
+        now = time.monotonic()
+        for col_name, last in self.gas_card_last_update.items():
+            val_lbl, unit_lbl, card, _stats_lbl = self.gas_card_widgets[col_name]
+            age = now - last
+            age_lbl = self.gas_card_age_labels[col_name]
+            if age >= self.GAS_CARD_STALE_S:
+                age_lbl.configure(text=f"updated {self._format_age(age)}", fg="#b45309")
+                val_lbl.configure(fg=self.C_CARD_NA)
+                unit_lbl.configure(fg="#9ca3af")
+                card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+            else:
+                age_lbl.configure(text=f"Updated {self._format_age(age)}", fg="#9ca3af")
+        self.after(1000, self._tick_gas_card_ages)
 
     def _ensure_live_series_shape(self, n_vars: int) -> None:
         if n_vars <= 0:
