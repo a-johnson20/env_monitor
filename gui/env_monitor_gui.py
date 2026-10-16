@@ -2207,6 +2207,21 @@ class App(ctk.CTk):
             button_hover_color=C_ACCENT_HOVER,
         )
         self.pump_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
+
+        def _block_pump_wheel(_event):
+            return "break"
+
+        wheel_tag = "PumpSliderWheelBlock"
+        for sequence in ("<MouseWheel>", "<Button-4>", "<Button-5>"):
+            self.bind_class(wheel_tag, sequence, _block_pump_wheel)
+
+        def _add_wheel_block(widget):
+            widget.bindtags((wheel_tag, *widget.bindtags()))
+            for child in widget.winfo_children():
+                _add_wheel_block(child)
+
+        _add_wheel_block(self.pump_slider)
+
         self.pump_label_var = tk.StringVar(value="0%")
         make_label(slider_row, textvariable=self.pump_label_var, width=45).pack(side=tk.LEFT)
 
