@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 
 datas = [('fonts/DejaVuSansMono-wifi-ramp.ttf', 'fonts'), ('assets/GEM_icon_256.ico', 'assets')]
-datas += collect_data_files('ttkbootstrap')
+datas += collect_data_files('customtkinter')
 
 
 a = Analysis(

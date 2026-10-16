@@ -10,11 +10,13 @@ Features:
 
 Requires:
 - pyserial
+- customtkinter
 """
 
 from __future__ import annotations
 
 import csv
+import ctypes
 import io
 import math
 import os
@@ -33,14 +35,9 @@ from queue import Empty, Queue
 from tkinter import filedialog, messagebox, ttk
 from PIL import Image, ImageTk
 
+import customtkinter as ctk
 import serial
 from serial.tools import list_ports
-try:
-    import ttkbootstrap as tb
-    HAS_TTKBOOTSTRAP = True
-except Exception:
-    tb = None
-    HAS_TTKBOOTSTRAP = False
 
 try:
     import paho.mqtt.client as mqtt
@@ -96,29 +93,74 @@ VERSION_UNKNOWN_TEXT = "Compatibility unknown (firmware protocol unknown)"
 PUMP_SEND_DEBOUNCE_MS = 250
 
 
-# Configure DPI awareness.
-#
-# We use PER_MONITOR_DPI_AWARE (value 2) rather than SYSTEM_DPI_AWARE. Under
-# system-DPI-aware mode, Windows never delivers WM_DPICHANGED to the process,
-# so it falls back to DWM bitmap-stretching the whole window whenever it is
-# maximized/moved/resized on a non-launch monitor — that stretch-then-repaint
-# is what shows up as blurry text and brief black rendering artifacts on
-# maximize. Per-monitor awareness renders natively on every monitor (no DWM
-# stretch, no black flash) and lets our own WM_DPICHANGED handler below
-# (_bind_dpi_change) pin Tk's scaling factor so the UI still doesn't
-# auto-rescale/blow up when moved to a different-DPI monitor.
-try:
-    import ctypes
-    if hasattr(ctypes, "windll") and hasattr(ctypes.windll, "shcore"):
-        try:
-            ctypes.windll.shcore.SetProcessDpiAwareness(2)  # PROCESS_PER_MONITOR_DPI_AWARE
-        except Exception:
-            try:
-                ctypes.windll.user32.SetProcessDPIAware()
-            except Exception:
-                pass
-except Exception:
-    pass  # Non-Windows or older Windows version
+# CustomTkinter look & feel. The app is light-only: the graph canvases and
+# Treeview tables draw with the fixed palette below (CustomTkinter has no
+# canvas or table widget of its own).
+# CustomTkinter enables per-monitor DPI awareness and rescales its own widgets
+# when the window moves between monitors, so no manual DPI handling is needed.
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
+
+C_BG = "#eef2f8"
+C_SURFACE = "#ffffff"
+C_TEXT = "#1f2937"
+C_MUTED = "#5b6678"
+C_ACCENT = "#0b66d6"
+C_ACCENT_HOVER = "#0a58bc"
+C_ACCENT_DISABLED = "#a8b5cc"
+C_BORDER = "#d4dbe6"
+C_ROW_ALT = "#f7f9fc"
+C_TAB_IDLE = "#e3e9f3"
+C_HINT = "#888888"
+
+
+def ui_font(size: int = 13, weight: str = "normal") -> ctk.CTkFont:
+    """Segoe UI font; ``size`` is in pixels (13 px ≈ the old 10 pt)."""
+    return ctk.CTkFont(family="Segoe UI", size=size, weight=weight)
+
+
+class AccentButton(ctk.CTkButton):
+    """Accent-coloured button that greys out while disabled."""
+
+    def __init__(self, master, **kwargs) -> None:
+        kwargs.setdefault("font", ui_font(13, "bold"))
+        kwargs.setdefault("fg_color", C_ACCENT)
+        kwargs.setdefault("hover_color", C_ACCENT_HOVER)
+        kwargs.setdefault("text_color_disabled", "#ecf2ff")
+        kwargs.setdefault("height", 32)
+        if kwargs.get("state") == tk.DISABLED:
+            kwargs["fg_color"] = C_ACCENT_DISABLED
+        super().__init__(master, **kwargs)
+
+    def configure(self, require_redraw=False, **kwargs):
+        if "state" in kwargs:
+            kwargs["fg_color"] = C_ACCENT if kwargs["state"] == tk.NORMAL else C_ACCENT_DISABLED
+        return super().configure(require_redraw=require_redraw, **kwargs)
+
+
+class Section(ctk.CTkFrame):
+    """Bordered group with a title; children are packed straight into it."""
+
+    def __init__(self, master, title: str) -> None:
+        super().__init__(master, fg_color=C_SURFACE, border_width=1, border_color=C_BORDER, corner_radius=8)
+        ctk.CTkLabel(self, text=title, font=ui_font(13, "bold"), text_color=C_TEXT).pack(
+            anchor="w", padx=10, pady=(6, 0))
+
+
+def make_frame(master, **kwargs) -> ctk.CTkFrame:
+    """Transparent layout frame that shows whatever is behind it."""
+    return ctk.CTkFrame(master, fg_color="transparent", **kwargs)
+
+
+def make_label(master, text: str = "", *, hint: bool = False, **kwargs) -> ctk.CTkLabel:
+    kwargs.setdefault("font", ui_font(13))
+    kwargs.setdefault("text_color", C_HINT if hint else C_TEXT)
+    return ctk.CTkLabel(master, text=text, **kwargs)
+
+
+def make_readonly_entry(master, textvariable: tk.StringVar, width: int = 200) -> ctk.CTkEntry:
+    """Selectable, copyable but not editable entry."""
+    return ctk.CTkEntry(master, textvariable=textvariable, state="readonly", width=width, font=ui_font(13))
 
 # Load WiFi icon font if available
 def get_font_path() -> Path | None:
@@ -1309,13 +1351,13 @@ class SerialMenuClient:
 
 # ============ GUI APPLICATION ============
 
-class _StatsRow(tk.Frame):
+class _StatsRow(ctk.CTkFrame):
     """Min/avg/max readout: one row when it fits, stacked when the card is narrow."""
 
-    def __init__(self, master, bg: str) -> None:
-        super().__init__(master, bg=bg)
+    def __init__(self, master) -> None:
+        super().__init__(master, fg_color="transparent")
         self._labels = [
-            tk.Label(self, text="", font=("Segoe UI", 9), bg=bg, fg="#6b7280", anchor="w")
+            ctk.CTkLabel(self, text="", font=ui_font(12), text_color="#6b7280", anchor="w", height=16)
             for _ in range(3)
         ]
         self._stacked: bool | None = None
@@ -1349,7 +1391,7 @@ class _StatsRow(tk.Frame):
             lbl.configure(text="")
 
 
-class App(tk.Tk):
+class App(ctk.CTk):
 
     # Choose which readings to hide from the raw data log table
     HIDDEN_LOG_COLS: frozenset[str] = frozenset({
@@ -1399,33 +1441,23 @@ class App(tk.Tk):
 
         self.title("GEM GUI")
         if APP_ICON_PATH:
-            self.iconbitmap(str(APP_ICON_PATH))
+            # CustomTkinter installs its own icon shortly after start-up, so ours
+            # has to be applied afterwards.
+            self.after(250, lambda: self.iconbitmap(str(APP_ICON_PATH)))
 
-        # Reduce initial size to account for DPI scaling and prevent blurriness
         self.geometry("900x680")
         self.minsize(850, 620)
 
-        # Capture Tk's natural (system) scaling factor at startup before we
-        # subclass the window procedure. Under per-monitor DPI awareness, Tk
-        # auto-computes this from the monitor DPI; we save it so the
-        # WM_DPICHANGED handler can re-apply the same constant and prevent Tk
-        # 8.6.10+ from auto-rescaling on a monitor change.
-        try:
-            self._tk_natural_scaling = float(self.tk.call("tk", "scaling"))
-        except Exception:
-            self._tk_natural_scaling = 1.0
-        self._bind_dpi_change()
-
-        self.c_bg = "#eef2f8"
-        self.c_surface = "#ffffff"
-        self.c_text = "#1f2937"
-        self.c_muted = "#5b6678"
-        self.c_accent = "#0b66d6"
-        self.c_accent_hover = "#0a58bc"
-        self.c_accent_press = "#084b9e"
-        self.c_border = "#d4dbe6"
-        self.c_row_alt = "#f7f9fc"
-        self.c_tab_idle = "#e3e9f3"
+        self.c_bg = C_BG
+        self.c_surface = C_SURFACE
+        self.c_text = C_TEXT
+        self.c_muted = C_MUTED
+        self.c_accent = C_ACCENT
+        self.c_accent_hover = C_ACCENT_HOVER
+        self.c_accent_press = C_ACCENT_HOVER
+        self.c_border = C_BORDER
+        self.c_row_alt = C_ROW_ALT
+        self.c_tab_idle = C_TAB_IDLE
 
         self.client = SerialMenuClient()
         self.events: Queue[tuple[str, object]] = Queue()
@@ -1445,8 +1477,8 @@ class App(tk.Tk):
         self.live_hold_timeout_s = 15.0
         self.live_autoscroll = tk.BooleanVar(value=True)
         self.gas_card_stats: dict[str, list[float]] = {}
-        self.gas_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
-        self.gas_card_age_labels: dict[str, tk.Label] = {}
+        self.gas_card_widgets: dict[str, tuple[ctk.CTkLabel, ctk.CTkLabel, ctk.CTkFrame, _StatsRow]] = {}
+        self.gas_card_age_labels: dict[str, ctk.CTkLabel] = {}
         # time.monotonic() of each card's last valid reading
         self.gas_card_last_update: dict[str, float] = {}
 
@@ -1456,7 +1488,7 @@ class App(tk.Tk):
         self.mqtt_devices: dict[str, dict] = {}
         self.mqtt_history: dict[str, dict[str, deque]] = {}
         self.mqtt_selected_device = tk.StringVar(value="")
-        self.mqtt_card_widgets: dict[str, tuple[ttk.Label, ttk.Label, ttk.Frame]] = {}
+        self.mqtt_card_widgets: dict[str, tuple[ctk.CTkLabel, ctk.CTkLabel, ctk.CTkFrame]] = {}
         self.mqtt_graph_canvases: dict[str, tk.Canvas] = {}
         self.mqtt_history_limit = 300
         self.mqtt_row_counter = 0
@@ -1475,11 +1507,11 @@ class App(tk.Tk):
         self.wifi_current_rssi = ""
         self.wifi_current_form_type: str | None = None
         self.wifi_current_form_ssid: str = ""
-        self.wifi_form_password: ttk.Entry | None = None
-        self.wifi_form_username: ttk.Entry | None = None
-        self.wifi_form_ssid: ttk.Entry | None = None
-        self.wifi_form_security: ttk.Combobox | None = None
-        self.wifi_form_fields_frame: ttk.Frame | None = None
+        self.wifi_form_password: ctk.CTkEntry | None = None
+        self.wifi_form_username: ctk.CTkEntry | None = None
+        self.wifi_form_ssid: ctk.CTkEntry | None = None
+        self.wifi_form_security: ctk.CTkComboBox | None = None
+        self.wifi_form_fields_frame: ctk.CTkFrame | None = None
         
         # RTC settings
         self.rtc_poll_timer: int | None = None
@@ -1516,142 +1548,29 @@ class App(tk.Tk):
         # Prevent selecting a different COM port while an active connection exists.
         self.port_combo.configure(state=tk.DISABLED if self.connected else "readonly")
 
-    def _on_port_selected(self, _event=None) -> None:
-        # Remove selection highlight in the readonly field after choice.
-        try:
-            self.port_combo.selection_clear()
-        except Exception:
-            pass
+    def _on_port_selected(self, _value=None) -> None:
         self.focus_set()
 
-    def _on_port_focus_in(self, _event=None) -> None:
-        try:
-            self.port_combo.selection_clear()
-        except Exception:
-            pass
-
-    def _bind_dpi_change(self) -> None:
-        """Keep Tk's natural scaling factor across monitor DPI changes.
-
-        Under per-monitor DPI awareness, Windows sends WM_DPICHANGED when the
-        window moves to a different-DPI monitor. Tk 8.6.x then automatically
-        re-scales every font and widget, which is exactly the "blows up" behaviour
-        we want to avoid. We subclass this window's WNDPROC and, on every
-        WM_DPICHANGED, re-assert our saved natural tk scaling so the UI keeps its
-        size while Windows itself keeps the text rendered at the monitor's native
-        DPI (crisp, not blurry).
-        """
-        if not (sys.platform.startswith("win") and ctypes.windll is not None):
-            return
-        try:
-            from ctypes import wintypes
-
-            user32 = ctypes.windll.user32
-            WM_DPICHANGED = 0x02E0
-            GWL_WNDPROC = -4
-            WNDPROC = ctypes.WINFUNCTYPE(
-                wintypes.LRESULT,
-                wintypes.HWND,
-                wintypes.UINT,
-                wintypes.WPARAM,
-                wintypes.LPARAM,
-            )
-
-            hwnd = self.winfo_id()
-
-            def new_wndproc(hwnd_, msg, wparam, lparam):
-                if msg == WM_DPICHANGED:
-                    try:
-                        self.tk.call("tk", "scaling", self._tk_natural_scaling)
-                    except Exception:
-                        pass
-                return ctypes.cast(self._old_wndproc, WNDPROC)(hwnd_, msg, wparam, lparam)
-
-            self._new_wndproc = WNDPROC(new_wndproc)
-            prev = user32.SetWindowLongPtrW(hwnd, GWL_WNDPROC, self._new_wndproc)
-            self._old_wndproc = prev
-        except Exception:
-            pass
-
     def _configure_theme(self) -> None:
-        if HAS_TTKBOOTSTRAP and tb is not None:
-            self.style = tb.Style(theme="united")
-            colors = getattr(self.style, "colors", None)
-            if colors is not None:
-                self.c_bg = getattr(colors, "bg", self.c_bg)
-                self.c_surface = getattr(colors, "light", self.c_surface)
-                self.c_text = getattr(colors, "fg", self.c_text)
-                self.c_muted = getattr(colors, "secondary", self.c_muted)
-                self.c_accent = getattr(colors, "primary", self.c_accent)
-                self.c_accent_hover = self.c_accent
-                self.c_accent_press = self.c_accent
-                self.c_border = getattr(colors, "border", self.c_border)
-                self.c_row_alt = getattr(colors, "bg_alt", self.c_row_alt)
-        else:
-            self.style = ttk.Style(self)
-            available = set(self.style.theme_names())
-            for candidate in ("clam", "vista", "xpnative", "default"):
-                if candidate in available:
-                    self.style.theme_use(candidate)
-                    break
+        """Window background plus the ttk styles for the Treeview tables.
 
-        self.configure(bg=self.c_bg)
+        CustomTkinter has no table widget, so tables stay ttk.Treeview; they are
+        restyled here to match the CustomTkinter widgets.
+        """
+        self.configure(fg_color=self.c_bg)
 
-        self.style.configure(".", font=("Segoe UI", 10))
-        self.style.configure("TFrame", background=self.c_bg)
-        self.style.configure("TLabel", background=self.c_bg, foreground=self.c_text)
-        self.style.configure("Section.TLabel", background=self.c_bg, foreground=self.c_text, font=("Segoe UI Semibold", 10))
-        self.style.configure("Muted.TLabel", background=self.c_bg, foreground=self.c_muted)
-
-        self.style.configure("TButton", padding=(10, 6), font=("Segoe UI", 10))
-        self.style.configure(
-            "Accent.TButton",
-            padding=(10, 6),
-            font=("Segoe UI Semibold", 10),
-            foreground="#ffffff",
-            background=self.c_accent,
-            borderwidth=0,
-        )
-        
-        self.style.map(
-            "Accent.TButton",
-            background=[
-                ("disabled", "#a8b5cc"),
-                ("pressed", self.c_accent_press),
-                ("active", self.c_accent_hover),
-            ],
-            foreground=[("disabled", "#ecf2ff")],
-        )
-
-        self.style.configure("TEntry", padding=5)
-        self.style.configure("TCombobox", padding=4)
-        self.option_add("*TCombobox*Listbox.background", self.c_surface)
-        self.option_add("*TCombobox*Listbox.foreground", self.c_text)
-        self.option_add("*TCombobox*Listbox.selectBackground", self.c_accent)
-        self.option_add("*TCombobox*Listbox.selectForeground", "#ffffff")
-        self.option_add("*TCombobox*Listbox.font", "{Segoe UI} 10")
-
-        self.style.configure("TNotebook", background=self.c_bg, borderwidth=0, tabmargins=(2, 0, 2, 0))
-        self.style.configure("TNotebook.Tab", padding=(14, 8), font=("Segoe UI Semibold", 10))
-        self.style.map(
-            "TNotebook.Tab",
-            background=[("selected", self.c_surface), ("!selected", self.c_tab_idle)],
-            foreground=[("selected", self.c_text), ("!selected", self.c_muted)],
-        )
-
-        self.style.configure("TPanedwindow", background=self.c_bg)
-        self.style.configure("TLabelframe", background=self.c_bg, bordercolor=self.c_border)
-        self.style.configure("TLabelframe.Label", background=self.c_bg, foreground=self.c_text, font=("Segoe UI Semibold", 10))
+        self.style = ttk.Style(self)
+        if "clam" in self.style.theme_names():
+            self.style.theme_use("clam")
 
         self.style.configure(
             "Treeview",
             background=self.c_surface,
             fieldbackground=self.c_surface,
             foreground=self.c_text,
-            rowheight=24,
-            bordercolor=self.c_border,
-            lightcolor=self.c_border,
-            darkcolor=self.c_border,
+            rowheight=26,
+            borderwidth=0,
+            font=("Segoe UI", 10),
         )
         self.style.configure(
             "Treeview.Heading",
@@ -1663,7 +1582,34 @@ class App(tk.Tk):
         )
         self.style.map("Treeview", background=[("selected", "#dbeafe")], foreground=[("selected", "#111827")])
         self.style.map("Treeview.Heading", background=[("active", "#dce5f2")])
-        
+
+    def _make_paned(self, master, orient: str) -> tk.PanedWindow:
+        """Resizable split pane (CustomTkinter has no paned window)."""
+        return tk.PanedWindow(
+            master, orient=orient, bg=self.c_bg, bd=0, sashwidth=6, sashrelief=tk.FLAT, opaqueresize=True,
+        )
+
+    def _make_scrollbar(self, master, orientation: str, command) -> ctk.CTkScrollbar:
+        return ctk.CTkScrollbar(master, orientation=orientation, command=command)
+
+    def _make_card(self, master) -> ctk.CTkFrame:
+        return ctk.CTkFrame(
+            master,
+            fg_color=self.C_CARD_BG,
+            border_width=1,
+            border_color=self.C_CARD_BORDER_NA,
+            corner_radius=10,
+        )
+
+    def _make_graph_canvas(self, master, height: int) -> tk.Canvas:
+        """Plain canvas used for the line graphs, wired for the hover tooltip."""
+        canvas = tk.Canvas(
+            master, bg=self.c_surface, highlightthickness=1, highlightbackground=self.c_border, height=height,
+        )
+        canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
+        canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
+        return canvas
+
     def _apply_tree_stripes(self, tree: ttk.Treeview, rows: list[tuple]) -> None:
         tree.tag_configure("even", background=self.c_surface)
         tree.tag_configure("odd", background=self.c_row_alt)
@@ -1672,72 +1618,72 @@ class App(tk.Tk):
             tree.insert("", tk.END, values=values, tags=(tag,))
 
     def _build_ui(self) -> None:
-        top = ttk.Frame(self, padding=10)
-        top.pack(fill=tk.X)
+        top = make_frame(self)
+        top.pack(fill=tk.X, padx=10, pady=10)
 
-        ttk.Label(top, text="Port:", style="Section.TLabel").pack(side=tk.LEFT)
-        self.port_combo = ttk.Combobox(top, textvariable=self.port_var, width=20, state="readonly")
+        make_label(top, "Port:", font=ui_font(13, "bold")).pack(side=tk.LEFT)
+        self.port_combo = ctk.CTkComboBox(
+            top, variable=self.port_var, values=[], width=170, state="readonly",
+            font=ui_font(13), dropdown_font=ui_font(13), command=self._on_port_selected,
+        )
         self.port_combo.pack(side=tk.LEFT, padx=(6, 10))
 
-        self.port_combo.bind("<<ComboboxSelected>>", self._on_port_selected)
-        self.port_combo.bind("<FocusIn>", self._on_port_focus_in)
-        ttk.Button(top, text="↻  Refresh Ports", command=self.refresh_ports, style="Accent.TButton").pack(side=tk.LEFT)
+        AccentButton(top, text="↻  Refresh Ports", command=self.refresh_ports).pack(side=tk.LEFT)
 
-        ttk.Label(top, text="Baud:", style="Section.TLabel").pack(side=tk.LEFT, padx=(14, 0))
+        make_label(top, "Baud:", font=ui_font(13, "bold")).pack(side=tk.LEFT, padx=(14, 0))
         _baud_rates = ["9600", "19200", "38400", "57600", "115200"]
-        self.baud_combo = ttk.Combobox(top, textvariable=self.baud_var, values=_baud_rates, width=10, state="readonly")
+        self.baud_combo = ctk.CTkComboBox(
+            top, variable=self.baud_var, values=_baud_rates, width=100, state="readonly",
+            font=ui_font(13), dropdown_font=ui_font(13),
+        )
         self.baud_combo.pack(side=tk.LEFT, padx=(6, 10))
 
-        self.connect_btn = ttk.Button(top, text="🔗  Connect", command=self.toggle_connection, style="Accent.TButton")
+        self.connect_btn = AccentButton(top, text="🔗  Connect", command=self.toggle_connection)
         self.connect_btn.pack(side=tk.LEFT, padx=(0, 10))
 
-        ttk.Label(top, textvariable=self.status_var, style="Muted.TLabel").pack(side=tk.LEFT, padx=(8, 0))
+        make_label(top, textvariable=self.status_var, text_color=self.c_muted).pack(side=tk.LEFT, padx=(8, 0))
 
-        # Right side: RTC time and WiFi status
-        right_frame = ttk.Frame(top)
+        # Right side: WiFi status and RTC time
+        right_frame = make_frame(top)
         right_frame.pack(side=tk.RIGHT, padx=(8, 0))
-        
-        # WiFi status frame (on the left of right_frame)
-        wifi_icon_font = (WIFI_FONT_NAME, 10) if WIFI_FONT_PATH else ("Segoe UI", 10)
-        
-        # Create a frame to hold WiFi icon and SSID
-        wifi_frame = tk.Frame(right_frame, bg=self.c_bg)
+
+        wifi_icon_font = ctk.CTkFont(family=WIFI_FONT_NAME, size=13) if WIFI_FONT_PATH else ui_font(13)
+        small_font = ui_font(12)
+
+        wifi_frame = make_frame(right_frame)
         wifi_frame.pack(side=tk.LEFT)
-        
-        # RTC date/time label on far right (after WiFi)
-        standard_font = ("Segoe UI", 9)
-        self.rtc_time_label = tk.Label(right_frame, text=self.rtc_current_datetime, font=standard_font, bg=self.c_bg, fg=self.c_muted)
+
+        self.rtc_time_label = make_label(
+            right_frame, self.rtc_current_datetime, font=small_font, text_color=self.c_muted)
         self.rtc_time_label.pack(side=tk.LEFT, padx=(12, 0))
-        
-        # Name label on left uses standard font
-        self.wifi_name_label = tk.Label(wifi_frame, text="", font=standard_font, bg=self.c_bg, fg=self.c_muted)
+
+        self.wifi_name_label = make_label(wifi_frame, "", font=small_font, text_color=self.c_muted)
         self.wifi_name_label.pack(side=tk.LEFT)
-        
-        # Icon label on right uses WiFi font
-        self.wifi_icon_label = tk.Label(wifi_frame, text="", font=wifi_icon_font, bg=self.c_bg, fg=self.c_muted)
+
+        self.wifi_icon_label = make_label(wifi_frame, "", font=wifi_icon_font, text_color=self.c_muted)
         self.wifi_icon_label.pack(side=tk.LEFT, padx=(4, 0))
-        
-        body = ttk.Frame(self)
+
+        body = make_frame(self)
         body.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        sidebar = tk.Frame(body, bg=self.c_surface, width=170)
+        sidebar = ctk.CTkFrame(body, fg_color=self.c_surface, width=170, corner_radius=10)
         sidebar.pack(side=tk.LEFT, fill=tk.Y)
         sidebar.pack_propagate(False)
 
-        content = ttk.Frame(body)
+        content = make_frame(body)
         content.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(10, 0))
         content.rowconfigure(0, weight=1)
         content.columnconfigure(0, weight=1)
 
-        self.live_tab = ttk.Frame(content, padding=10)
-        self.files_tab = ttk.Frame(content, padding=10)
-        self.mqtt_tab = ttk.Frame(content, padding=10)
-        self.wifi_tab = ttk.Frame(content, padding=10)
+        self.live_tab = make_frame(content)
+        self.files_tab = make_frame(content)
+        self.mqtt_tab = make_frame(content)
+        self.wifi_tab = make_frame(content)
 
         for page in (self.live_tab, self.files_tab, self.mqtt_tab, self.wifi_tab):
-            page.grid(row=0, column=0, sticky="nsew")
+            page.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
 
-        self.sidebar_buttons: dict[str, tk.Button] = {}
+        self.sidebar_buttons: dict[str, ctk.CTkButton] = {}
         nav_items = [
             ("live", "▶  Live Data", self.live_tab),
             ("files", "🗂  Files", self.files_tab),
@@ -1745,23 +1691,19 @@ class App(tk.Tk):
             ("settings", "⚙  Settings", self.wifi_tab),
         ]
         for key, label, frame in nav_items:
-            btn = tk.Button(
+            btn = ctk.CTkButton(
                 sidebar,
                 text=label,
                 anchor="w",
-                relief="flat",
-                bd=0,
-                bg=self.c_surface,
-                fg=self.c_text,
-                activebackground=self.c_tab_idle,
-                activeforeground=self.c_text,
-                font=("Segoe UI", 10),
-                padx=12,
-                pady=10,
-                cursor="hand2",
+                fg_color="transparent",
+                text_color=self.c_text,
+                hover_color=self.c_tab_idle,
+                font=ui_font(13),
+                height=40,
+                corner_radius=8,
                 command=lambda f=frame, k=key: self._show_page(f, k),
             )
-            btn.pack(fill=tk.X)
+            btn.pack(fill=tk.X, padx=6, pady=(6, 0))
             self.sidebar_buttons[key] = btn
 
         self._build_live_tab()
@@ -1770,66 +1712,48 @@ class App(tk.Tk):
         self._build_wifi_tab()
 
         self._show_page(self.live_tab, "live")
-        
+
         # Initialize WiFi status display
         self._update_wifi_top_bar()
 
 
-    def _show_page(self, frame: ttk.Frame, key: str) -> None:
+    def _show_page(self, frame: ctk.CTkFrame, key: str) -> None:
         frame.tkraise()
         for k, btn in self.sidebar_buttons.items():
             if k == key:
-                btn.configure(bg=self.c_accent, fg="#ffffff")
+                btn.configure(fg_color=self.c_accent, hover_color=self.c_accent_hover, text_color="#ffffff")
             else:
-                btn.configure(bg=self.c_surface, fg=self.c_text)
+                btn.configure(fg_color="transparent", hover_color=self.c_tab_idle, text_color=self.c_text)
 
 
     def _build_live_tab(self) -> None:
         # The whole page scrolls so cards, graphs and the log keep a readable size.
-        self.live_page_canvas = tk.Canvas(self.live_tab, highlightthickness=0, bg=self.c_bg)
-        live_vsb = ttk.Scrollbar(self.live_tab, orient=tk.VERTICAL, command=self.live_page_canvas.yview)
-        self.live_page_canvas.configure(yscrollcommand=live_vsb.set)
-        live_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.live_page_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        live_page = ctk.CTkScrollableFrame(self.live_tab, fg_color="transparent")
+        live_page.pack(fill=tk.BOTH, expand=True)
 
-        live_page = ttk.Frame(self.live_page_canvas)
-        live_page_id = self.live_page_canvas.create_window((0, 0), window=live_page, anchor="nw")
-        live_page.bind(
-            "<Configure>",
-            lambda _e: self.live_page_canvas.configure(scrollregion=self.live_page_canvas.bbox("all")),
-        )
-        self.live_page_canvas.bind(
-            "<Configure>",
-            lambda e: self.live_page_canvas.itemconfigure(live_page_id, width=e.width),
-        )
-        self.bind("<MouseWheel>", self._on_live_page_mousewheel, add="+")
-
-        btns = ttk.Frame(live_page)
+        btns = make_frame(live_page)
         btns.pack(fill=tk.X)
-        self.live_start_btn = ttk.Button(
+        self.live_start_btn = AccentButton(
             btns,
             text="▶  Start Live",
             command=self.start_live,
             state=tk.DISABLED,
-            style="Accent.TButton",
         )
         self.live_start_btn.pack(side=tk.LEFT)
-        self.live_stop_btn = ttk.Button(btns, text="⏹  Stop Live", command=self.stop_live, state=tk.DISABLED, style="Accent.TButton")
+        self.live_stop_btn = AccentButton(btns, text="⏹  Stop Live", command=self.stop_live, state=tk.DISABLED)
         self.live_stop_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         # Gas reading cards
-        cards_outer = tk.Frame(live_page, bg=self.c_bg)
-        cards_outer.pack(fill=tk.X, pady=(0, 12))
+        cards_outer = make_frame(live_page)
+        cards_outer.pack(fill=tk.X, pady=(10, 12))
 
-        tk.Label(
+        make_label(
             cards_outer,
-            text="Current Readings",
-            font=("Segoe UI Semibold", 11),
-            bg=self.c_bg,
-            fg=self.c_text,
+            "Current Readings",
+            font=ui_font(15, "bold"),
         ).pack(anchor="w", padx=4, pady=(0, 6))
 
-        cards_row = tk.Frame(cards_outer, bg=self.c_bg)
+        cards_row = make_frame(cards_outer)
         cards_row.pack(fill=tk.X)
 
         cards_per_row = 4
@@ -1837,54 +1761,45 @@ class App(tk.Tk):
             cards_row.columnconfigure(c, weight=1, uniform="gas_cards")
 
         for i, (col_name, (label, unit)) in enumerate(self.GAS_COLS.items()):
-            card = tk.Frame(
-                cards_row,
-                bg=self.C_CARD_BG,
-                highlightbackground=self.C_CARD_BORDER_NA,
-                highlightthickness=1,
-                relief="flat",
-            )
+            card = self._make_card(cards_row)
             row, col = divmod(i, cards_per_row)
             card.grid(row=row, column=col, sticky="nsew", padx=(0 if col == 0 else 8, 0), pady=(0 if row == 0 else 8, 0))
 
-            tk.Label(
+            make_label(
                 card,
-                text=label,
-                font=("Segoe UI Semibold", 9),
-                bg=self.C_CARD_BG,
-                fg="#6b7280").pack(anchor="w", padx=12, pady=(10, 0))
-            
-            val_frame = tk.Frame(card, bg=self.C_CARD_BG)
+                label,
+                font=ui_font(12, "bold"),
+                text_color="#6b7280",
+            ).pack(anchor="w", padx=12, pady=(10, 0))
+
+            val_frame = make_frame(card)
             val_frame.pack(anchor="w", padx=12)
 
-            val_label = tk.Label(
+            val_label = make_label(
                 val_frame,
-                text="N/A",
-                font=("Segoe UI", 28, "bold"),
-                bg=self.C_CARD_BG,
-                fg=self.C_CARD_NA,
+                "N/A",
+                font=ui_font(37, "bold"),
+                text_color=self.C_CARD_NA,
             )
 
             val_label.pack(side=tk.LEFT, anchor="s")
 
-            unit_label = tk.Label(
+            unit_label = make_label(
                 val_frame,
-                text=f" {unit}",
-                font=("Segoe UI", 12),
-                bg=self.C_CARD_BG,
-                fg="#9ca3af",
+                f" {unit}",
+                font=ui_font(16),
+                text_color="#9ca3af",
             )
-            unit_label.pack(side=tk.LEFT, anchor="s", pady=(0, 4))
+            unit_label.pack(side=tk.LEFT, anchor="s", pady=(0, 6))
 
-            stats_label = _StatsRow(card, self.C_CARD_BG)
+            stats_label = _StatsRow(card)
             stats_label.pack(fill=tk.X, padx=12, pady=(2, 0))
 
-            age_label = tk.Label(
+            age_label = make_label(
                 card,
-                text="No data yet",
-                font=("Segoe UI", 9),
-                bg=self.C_CARD_BG,
-                fg="#9ca3af",
+                "No data yet",
+                font=ui_font(12),
+                text_color="#9ca3af",
             )
             age_label.pack(anchor="w", padx=12, pady=(2, 10))
 
@@ -1894,12 +1809,12 @@ class App(tk.Tk):
         self.after(1000, self._tick_gas_card_ages)
 
         # Graphs on top, table below; the page scrolls instead of a split pane
-        graphs_frame = ttk.Frame(live_page)
+        graphs_frame = make_frame(live_page)
         graphs_frame.pack(fill=tk.X, pady=(10, 0))
 
-        ttk.Label(graphs_frame, text="Live Graphs", style="Section.TLabel").pack(anchor="w")
+        make_label(graphs_frame, "Live Graphs", font=ui_font(13, "bold")).pack(anchor="w")
 
-        self.graphs_content = ttk.Frame(graphs_frame)
+        self.graphs_content = make_frame(graphs_frame)
         self.graphs_content.pack(fill=tk.X, expand=True)
 
         self.graph_names: list[str] = []
@@ -1908,157 +1823,125 @@ class App(tk.Tk):
         self._graph_redraw_pending = False
 
         # Bottom: Table
-        table_frame = ttk.Frame(live_page)
+        table_frame = make_frame(live_page)
         table_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        table_header = ttk.Frame(table_frame)
+        table_header = make_frame(table_frame)
         table_header.pack(fill=tk.X)
-        ttk.Label(table_header, text="Raw Data Log", style="Section.TLabel").pack(side=tk.LEFT)
-        ttk.Checkbutton(
+        make_label(table_header, "Raw Data Log", font=ui_font(13, "bold")).pack(side=tk.LEFT)
+        ctk.CTkCheckBox(
             table_header,
             text="Auto-scroll",
             variable=self.live_autoscroll,
-        ).pack(side=tk.LEFT, padx=(12,0))
+            font=ui_font(13),
+            text_color=self.c_text,
+            checkbox_width=20,
+            checkbox_height=20,
+        ).pack(side=tk.LEFT, padx=(12, 0))
 
-        # Create frame to hold table and scrollbars using grid layout
-        table_inner = ttk.Frame(table_frame)
+        table_inner = make_frame(table_frame)
         table_inner.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         table_inner.rowconfigure(0, weight=1)
         table_inner.columnconfigure(0, weight=1)
-        
-        # Create Treeview for live data table
+
         self.live_table = ttk.Treeview(table_inner, show="headings", height=10)
         self.live_table.grid(row=0, column=0, sticky="nsew")
-        
-        # Add scrollbars
-        scroll_y = ttk.Scrollbar(table_inner, orient=tk.VERTICAL, command=self.live_table.yview)
+
+        scroll_y = self._make_scrollbar(table_inner, "vertical", self.live_table.yview)
         scroll_y.grid(row=0, column=1, sticky="ns")
-        scroll_x = ttk.Scrollbar(table_inner, orient=tk.HORIZONTAL, command=self.live_table.xview)
+        scroll_x = self._make_scrollbar(table_inner, "horizontal", self.live_table.xview)
         scroll_x.grid(row=1, column=0, sticky="ew")
         self.live_table.configure(yscrollcommand=scroll_y.set, xscrollcommand=scroll_x.set)
-        
+
         self.live_table_columns = []
         self.live_table_col_indices: list[int] = []
 
-    def _on_live_page_mousewheel(self, event) -> None:
-        widget = self.winfo_containing(event.x_root, event.y_root)
-        while widget is not None:
-            if widget is self.live_page_canvas:
-                break
-            widget = widget.master
-        else:
-            return
-        self.live_page_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-    def _on_mqtt_graphs_content_configure(self, _event=None) -> None:
-        self.mqtt_graphs_canvas.configure(scrollregion=self.mqtt_graphs_canvas.bbox("all"))
-
-    def _on_mqtt_graphs_canvas_configure(self, event) -> None:
-        self.mqtt_graphs_canvas.itemconfigure(self.mqtt_graphs_content_id, width=event.width)
-
-    def _on_mqtt_graphs_mousewheel(self, event) -> None:
-        self.mqtt_graphs_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
 
     def _build_mqtt_tab(self) -> None:
-        conn = ttk.Frame(self.mqtt_tab)
+        conn = make_frame(self.mqtt_tab)
         conn.pack(fill=tk.X)
 
-        ttk.Label(conn, text="Broker").grid(row=0, column=0, sticky="w", padx=(0, 4))
+        make_label(conn, "Broker").grid(row=0, column=0, sticky="w", padx=(0, 4))
         self.mqtt_broker_var = tk.StringVar(value="eu1.cloud.thethings.network")
-        ttk.Entry(conn, textvariable=self.mqtt_broker_var, width=28).grid(row=0, column=1, padx=(0, 10))
+        ctk.CTkEntry(conn, textvariable=self.mqtt_broker_var, width=240, font=ui_font(13)).grid(row=0, column=1, padx=(0, 10))
 
-        ttk.Label(conn, text="Port").grid(row=0, column=2, sticky="w", padx=(0, 4))
+        make_label(conn, "Port").grid(row=0, column=2, sticky="w", padx=(0, 4))
         self.mqtt_port_var = tk.StringVar(value="1883")
-        ttk.Entry(conn, textvariable=self.mqtt_port_var, width=6).grid(row=0, column=3, padx=(0, 10))
+        ctk.CTkEntry(conn, textvariable=self.mqtt_port_var, width=70, font=ui_font(13)).grid(row=0, column=3, padx=(0, 10))
 
-        ttk.Label(conn, text="Application ID").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(6, 0))
+        make_label(conn, "Application ID").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=(6, 0))
         self.mqtt_app_id_var = tk.StringVar(value="")
-        ttk.Entry(conn, textvariable=self.mqtt_app_id_var, width=28).grid(row=1, column=1, pady=(6, 0), padx=(0, 10))
+        ctk.CTkEntry(conn, textvariable=self.mqtt_app_id_var, width=240, font=ui_font(13)).grid(row=1, column=1, pady=(6, 0), padx=(0, 10))
 
-        ttk.Label(conn, text="Tenant").grid(row=1, column=2, sticky="w", padx=(0, 4), pady=(6, 0))
+        make_label(conn, "Tenant").grid(row=1, column=2, sticky="w", padx=(0, 4), pady=(6, 0))
         self.mqtt_tenant_var = tk.StringVar(value="ttn")
-        ttk.Entry(conn, textvariable=self.mqtt_tenant_var, width=6).grid(row=1, column=3, pady=(6, 0), padx=(0, 10))
+        ctk.CTkEntry(conn, textvariable=self.mqtt_tenant_var, width=70, font=ui_font(13)).grid(row=1, column=3, pady=(6, 0), padx=(0, 10))
 
-        ttk.Label(conn, text="API Key").grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(6, 0))
+        make_label(conn, "API Key").grid(row=2, column=0, sticky="w", padx=(0, 4), pady=(6, 0))
         self.mqtt_api_key_var = tk.StringVar(value="")
-        ttk.Entry(conn, textvariable=self.mqtt_api_key_var, width=42, show="*").grid(
+        ctk.CTkEntry(conn, textvariable=self.mqtt_api_key_var, width=360, show="*", font=ui_font(13)).grid(
             row=2, column=1, columnspan=3, sticky="w", pady=(6, 0), padx=(0, 10)
         )
 
-        btns = ttk.Frame(conn)
+        btns = make_frame(conn)
         btns.grid(row=0, column=4, rowspan=3, padx=(16, 0), sticky="n")
-        self.mqtt_connect_btn = ttk.Button(btns, text="🔗  Connect", command=self.mqtt_connect, style="Accent.TButton")
+        self.mqtt_connect_btn = AccentButton(btns, text="🔗  Connect", command=self.mqtt_connect)
         self.mqtt_connect_btn.pack(fill=tk.X)
-        self.mqtt_disconnect_btn = ttk.Button(
-            btns, text="✖  Disconnect", command=self.mqtt_disconnect, state=tk.DISABLED, style="Accent.TButton"
+        self.mqtt_disconnect_btn = AccentButton(
+            btns, text="✖  Disconnect", command=self.mqtt_disconnect, state=tk.DISABLED
         )
         self.mqtt_disconnect_btn.pack(fill=tk.X, pady=(4, 0))
 
         if not HAS_PAHO_MQTT:
             self.mqtt_connect_btn.configure(state=tk.DISABLED)
-            ttk.Label(
+            make_label(
                 conn,
-                text="Install paho-mqtt to enable this tab: pip install paho-mqtt",
-                foreground="#dc2626",
+                "Install paho-mqtt to enable this tab: pip install paho-mqtt",
+                text_color="#dc2626",
             ).grid(row=3, column=0, columnspan=5, sticky="w", pady=(6, 0))
 
-        status_row = ttk.Frame(self.mqtt_tab)
+        status_row = make_frame(self.mqtt_tab)
         status_row.pack(fill=tk.X, pady=(8, 0))
         self.mqtt_status_var = tk.StringVar(value="Disconnected")
-        ttk.Label(status_row, textvariable=self.mqtt_status_var).pack(side=tk.LEFT)
+        make_label(status_row, textvariable=self.mqtt_status_var).pack(side=tk.LEFT)
 
-        ttk.Label(status_row, text="Device:").pack(side=tk.LEFT, padx=(20, 4))
-        self.mqtt_device_combo = ttk.Combobox(
-            status_row, textvariable=self.mqtt_selected_device, state="readonly", width=24, values=[],
+        make_label(status_row, "Device:").pack(side=tk.LEFT, padx=(20, 4))
+        self.mqtt_device_combo = ctk.CTkComboBox(
+            status_row, variable=self.mqtt_selected_device, state="readonly", width=200, values=[],
+            font=ui_font(13), dropdown_font=ui_font(13),
+            command=lambda _v: self._refresh_mqtt_display(),
         )
         self.mqtt_device_combo.pack(side=tk.LEFT)
-        self.mqtt_device_combo.bind("<<ComboboxSelected>>", lambda _e: self._refresh_mqtt_display())
 
-        cards_outer = tk.Frame(self.mqtt_tab, bg=self.c_bg)
+        cards_outer = make_frame(self.mqtt_tab)
         cards_outer.pack(fill=tk.X, pady=(12, 12))
-        tk.Label(
-            cards_outer, text="Current Readings", font=("Segoe UI Semibold", 11), bg=self.c_bg, fg=self.c_text
-        ).pack(anchor="w", padx=4, pady=(0, 6))
-        cards_row = tk.Frame(cards_outer, bg=self.c_bg)
+        make_label(cards_outer, "Current Readings", font=ui_font(15, "bold")).pack(anchor="w", padx=4, pady=(0, 6))
+        cards_row = make_frame(cards_outer)
         cards_row.pack(fill=tk.X)
 
         for col_name, (label, unit) in self.LORA_COLS.items():
-            card = tk.Frame(
-                cards_row, bg=self.C_CARD_BG, highlightbackground=self.C_CARD_BORDER_NA, highlightthickness=1, relief="flat"
-            )
-            card.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 10), ipady=10, ipadx=10)
+            card = self._make_card(cards_row)
+            card.pack(side=tk.LEFT, expand=True, fill=tk.X, padx=(0, 10))
 
-            tk.Label(card, text=label, font=("Segoe UI", 9), bg=self.C_CARD_BG, fg="#6b7280").pack(anchor="w")
-            val_frame = tk.Frame(card, bg=self.C_CARD_BG)
-            val_frame.pack(anchor="w")
-            val_label = tk.Label(val_frame, text="N/A", font=("Segoe UI", 22, "bold"), bg=self.C_CARD_BG, fg=self.C_CARD_NA)
+            make_label(card, label, font=ui_font(12), text_color="#6b7280").pack(anchor="w", padx=10, pady=(10, 0))
+            val_frame = make_frame(card)
+            val_frame.pack(anchor="w", padx=10, pady=(0, 10))
+            val_label = make_label(val_frame, "N/A", font=ui_font(29, "bold"), text_color=self.C_CARD_NA)
             val_label.pack(side=tk.LEFT, anchor="s")
-            unit_label = tk.Label(val_frame, text=f" {unit}", font=("Segoe UI", 11), bg=self.C_CARD_BG, fg="#9ca3af")
+            unit_label = make_label(val_frame, f" {unit}", font=ui_font(14), text_color="#9ca3af")
             unit_label.pack(side=tk.LEFT, anchor="s", pady=(0, 3))
 
             self.mqtt_card_widgets[col_name] = (val_label, unit_label, card)
 
-        split = ttk.Panedwindow(self.mqtt_tab, orient=tk.VERTICAL)
+        split = self._make_paned(self.mqtt_tab, tk.VERTICAL)
         split.pack(fill=tk.BOTH, expand=True)
 
-        graphs_frame = ttk.Frame(split)
-        split.add(graphs_frame, weight=3)
-        ttk.Label(graphs_frame, text="Live Graphs", style="Section.TLabel").pack(anchor="w")
+        graphs_frame = make_frame(split)
+        split.add(graphs_frame, stretch="always", minsize=120)
+        make_label(graphs_frame, "Live Graphs", font=ui_font(13, "bold")).pack(anchor="w")
 
-        self.mqtt_graphs_canvas = tk.Canvas(graphs_frame, highlightthickness=0, bg=self.c_bg)
-        self.mqtt_graphs_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        mqtt_graphs_vsb = ttk.Scrollbar(graphs_frame, orient=tk.VERTICAL, command=self.mqtt_graphs_canvas.yview)
-        mqtt_graphs_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.mqtt_graphs_canvas.configure(yscrollcommand=mqtt_graphs_vsb.set)
-
-        self.mqtt_graphs_content = ttk.Frame(self.mqtt_graphs_canvas)
-        self.mqtt_graphs_content_id = self.mqtt_graphs_canvas.create_window((0, 0), window=self.mqtt_graphs_content, anchor="nw")
-        self.mqtt_graphs_content.bind("<Configure>", self._on_mqtt_graphs_content_configure)
-        self.mqtt_graphs_canvas.bind("<Configure>", self._on_mqtt_graphs_canvas_configure)
-        self.mqtt_graphs_canvas.bind("<Enter>", lambda _: self.mqtt_graphs_canvas.bind_all("<MouseWheel>", self._on_mqtt_graphs_mousewheel))
-        self.mqtt_graphs_canvas.bind("<Leave>", lambda _: self.mqtt_graphs_canvas.unbind_all("<MouseWheel>"))
+        self.mqtt_graphs_content = ctk.CTkScrollableFrame(graphs_frame, fg_color="transparent")
+        self.mqtt_graphs_content.pack(fill=tk.BOTH, expand=True)
 
         self.mqtt_graphs_content.columnconfigure(0, weight=1)
         self.mqtt_graphs_content.columnconfigure(1, weight=1)
@@ -2066,18 +1949,16 @@ class App(tk.Tk):
         for i, (col_name, (label, unit)) in enumerate(self.LORA_COLS.items()):
             row, col = divmod(i, 2)
             self.mqtt_graphs_content.rowconfigure(row, weight=1)
-            pane = ttk.LabelFrame(self.mqtt_graphs_content, text=f"{label} ({unit})" if unit else label)
+            pane = Section(self.mqtt_graphs_content, f"{label} ({unit})" if unit else label)
             pane.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
-            canvas = tk.Canvas(pane, bg=self.c_surface, highlightthickness=1, highlightbackground=self.c_border, height=160)
-            canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-            canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
-            canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
+            canvas = self._make_graph_canvas(pane, height=160)
+            canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=(4, 8))
             self.mqtt_graph_canvases[col_name] = canvas
 
 
-        table_frame = ttk.Frame(split)
-        split.add(table_frame, weight=1)
-        ttk.Label(table_frame, text="Raw Uplinks", style="Section.TLabel").pack(anchor="w")
+        table_frame = make_frame(split)
+        split.add(table_frame, stretch="always", minsize=80)
+        make_label(table_frame, "Raw Uplinks", font=ui_font(13, "bold")).pack(anchor="w")
 
         table_cols = ["timestamp", "device_id"] + list(self.LORA_COLS.keys())
         self.mqtt_table = ttk.Treeview(table_frame, columns=table_cols, show="headings", height=8)
@@ -2085,36 +1966,36 @@ class App(tk.Tk):
             self.mqtt_table.heading(c, text=c)
             self.mqtt_table.column(c, width=90, anchor="center")
         self.mqtt_table.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-        mqtt_table_vsb = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.mqtt_table.yview)
+        mqtt_table_vsb = self._make_scrollbar(table_frame, "vertical", self.mqtt_table.yview)
         mqtt_table_vsb.pack(side=tk.RIGHT, fill=tk.Y)
         self.mqtt_table.configure(yscrollcommand=mqtt_table_vsb.set)
 
 
     def _build_files_tab(self) -> None:
-        btns = ttk.Frame(self.files_tab)
+        btns = make_frame(self.files_tab)
         btns.pack(fill=tk.X)
-        self.refresh_files_btn = ttk.Button(
-            btns, text="Refresh File List", command=self.refresh_files, state=tk.DISABLED, style="Accent.TButton"
+        self.refresh_files_btn = AccentButton(
+            btns, text="Refresh File List", command=self.refresh_files, state=tk.DISABLED
         )
         self.refresh_files_btn.pack(side=tk.LEFT)
-        self.select_all_btn = ttk.Button(
-            btns, text="Select All", command=self._select_all_files, state=tk.DISABLED, style="Accent.TButton"
+        self.select_all_btn = AccentButton(
+            btns, text="Select All", command=self._select_all_files, state=tk.DISABLED
         )
         self.select_all_btn.pack(side=tk.LEFT, padx=(8, 0))
-        self.download_btn = ttk.Button(
-            btns, text="Download Selected CSV(s)", command=self.download_selected, state=tk.DISABLED, style="Accent.TButton"
+        self.download_btn = AccentButton(
+            btns, text="Download Selected CSV(s)", command=self.download_selected, state=tk.DISABLED
         )
         self.download_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        split = ttk.Panedwindow(self.files_tab, orient=tk.VERTICAL)
+        split = self._make_paned(self.files_tab, tk.VERTICAL)
         split.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
 
-        top = ttk.Frame(split)
-        bottom = ttk.Frame(split)
-        split.add(top, weight=1)
-        split.add(bottom, weight=2)
+        top = make_frame(split)
+        bottom = make_frame(split)
+        split.add(top, stretch="always", minsize=80)
+        split.add(bottom, stretch="always", minsize=160)
 
-        files_wrap = ttk.Frame(top)
+        files_wrap = make_frame(top)
         files_wrap.pack(fill=tk.BOTH, expand=True)
         files_wrap.rowconfigure(0, weight=1)
         files_wrap.columnconfigure(0, weight=1)
@@ -2129,69 +2010,44 @@ class App(tk.Tk):
         self.files_tree.grid(row=0, column=0, sticky="nsew")
         self.files_tree.bind("<<TreeviewSelect>>", self.on_file_selected)
 
-        files_vsb = ttk.Scrollbar(files_wrap, orient=tk.VERTICAL, command=self.files_tree.yview)
+        files_vsb = self._make_scrollbar(files_wrap, "vertical", self.files_tree.yview)
         files_vsb.grid(row=0, column=1, sticky="ns")
-        files_hsb = ttk.Scrollbar(files_wrap, orient=tk.HORIZONTAL, command=self.files_tree.xview)
+        files_hsb = self._make_scrollbar(files_wrap, "horizontal", self.files_tree.xview)
         files_hsb.grid(row=1, column=0, sticky="ew")
         self.files_tree.configure(yscrollcommand=files_vsb.set, xscrollcommand=files_hsb.set)
 
-        ttk.Label(bottom, textvariable=self.preview_title_var, style="Section.TLabel").pack(anchor="w")
+        make_label(bottom, textvariable=self.preview_title_var, font=ui_font(13, "bold")).pack(anchor="w")
 
         # Metadata / truncation info line. Packed here — *before* the expanding
         # panedwindow below — because a widget packed after an expanding sibling
         # gets clipped first when the pane is short. It is packed on demand (see
         # _set_preview_info) so an empty line costs no vertical space.
-        self.preview_info_label = ttk.Label(
-            bottom, textvariable=self.preview_info_var, style="Muted.TLabel",
+        self.preview_info_label = make_label(
+            bottom, textvariable=self.preview_info_var, hint=True,
             anchor="w", justify="left")
         self.preview_info_label.bind(
             "<Configure>",
             lambda e: e.widget.configure(wraplength=max(200, e.width - 4)),
         )
 
-        self.inner_split = ttk.Panedwindow(bottom, orient=tk.VERTICAL)
+        self.inner_split = self._make_paned(bottom, tk.VERTICAL)
         self.inner_split.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
 
-        graphs_frame = ttk.Frame(self.inner_split)
-        self.inner_split.add(graphs_frame, weight=3)
+        graphs_frame = make_frame(self.inner_split)
+        self.inner_split.add(graphs_frame, stretch="always", minsize=120)
 
-        self.log_graphs_canvas = tk.Canvas(graphs_frame, highlightthickness=0, bg=self.c_bg)
-        self.log_graphs_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        log_graphs_vsb = ttk.Scrollbar(graphs_frame, orient=tk.VERTICAL, command=self.log_graphs_canvas.yview)
-        log_graphs_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self.log_graphs_canvas.configure(yscrollcommand=log_graphs_vsb.set)
-
-        self.log_graphs_content = ttk.Frame(self.log_graphs_canvas)
-        self.log_graphs_content_id = self.log_graphs_canvas.create_window(
-            (0, 0), window=self.log_graphs_content, anchor="nw"
-        )
-        self.log_graphs_content.bind(
-            "<Configure>",
-            lambda e: self.log_graphs_canvas.configure(scrollregion=self.log_graphs_canvas.bbox("all")),
-        )
-        self.log_graphs_canvas.bind(
-            "<Configure>",
-            lambda e: self.log_graphs_canvas.itemconfigure(self.log_graphs_content_id, width=e.width),
-        )
-        self.log_graphs_canvas.bind(
-            "<Enter>",
-            lambda _: self.log_graphs_canvas.bind_all(
-                "<MouseWheel>",
-                lambda e: self.log_graphs_canvas.yview_scroll(int(-1 * (e.delta / 120)), "units"),
-            ),
-        )
-        self.log_graphs_canvas.bind("<Leave>", lambda _: self.log_graphs_canvas.unbind_all("<MouseWheel>"))
+        self.log_graphs_content = ctk.CTkScrollableFrame(graphs_frame, fg_color="transparent")
+        self.log_graphs_content.pack(fill=tk.BOTH, expand=True)
 
         self.log_graph_canvases: list[tk.Canvas] = []
         self.log_graph_series: dict = {}
 
-        table_frame = ttk.Frame(self.inner_split)
-        self.inner_split.add(table_frame, weight=1)
+        table_frame = make_frame(self.inner_split)
+        self.inner_split.add(table_frame, stretch="always", minsize=80)
 
-        ttk.Label(table_frame, text="Raw Data Log", style="Section.TLabel").pack(anchor="w")
+        make_label(table_frame, "Raw Data Log", font=ui_font(13, "bold")).pack(anchor="w")
 
-        preview_wrap = ttk.Frame(table_frame)
+        preview_wrap = make_frame(table_frame)
         preview_wrap.pack(fill=tk.BOTH, expand=True, pady=(4, 0))
         preview_wrap.rowconfigure(0, weight=1)
         preview_wrap.columnconfigure(0, weight=1)
@@ -2199,9 +2055,9 @@ class App(tk.Tk):
         self.preview_tree = ttk.Treeview(preview_wrap, show="headings", height=12)
         self.preview_tree.grid(row=0, column=0, sticky="nsew")
 
-        pv_y = ttk.Scrollbar(preview_wrap, orient=tk.VERTICAL, command=self.preview_tree.yview)
+        pv_y = self._make_scrollbar(preview_wrap, "vertical", self.preview_tree.yview)
         pv_y.grid(row=0, column=1, sticky="ns")
-        pv_x = ttk.Scrollbar(preview_wrap, orient=tk.HORIZONTAL, command=self.preview_tree.xview)
+        pv_x = self._make_scrollbar(preview_wrap, "horizontal", self.preview_tree.xview)
         pv_x.grid(row=1, column=0, sticky="ew")
         self.preview_tree.configure(yscrollcommand=pv_y.set, xscrollcommand=pv_x.set)
 
@@ -2234,19 +2090,14 @@ class App(tk.Tk):
             self.log_graphs_content.rowconfigure(row_i, weight=1)
 
             graph_title, unit = self.GAS_COLS.get(col_name, (col_name, ""))
-            pane = ttk.LabelFrame(
+            pane = Section(
                 self.log_graphs_content,
-                text=f"{graph_title} ({unit})" if unit else graph_title,
+                f"{graph_title} ({unit})" if unit else graph_title,
             )
             pane.grid(row=row_i, column=col_i, sticky="nsew", padx=4, pady=4)
 
-            canvas = tk.Canvas(
-                pane, bg=self.c_surface, highlightthickness=1,
-                highlightbackground=self.c_border, height=200,
-            )
-            canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-            canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
-            canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
+            canvas = self._make_graph_canvas(pane, height=200)
+            canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=(4, 8))
             self.log_graph_canvases.append(canvas)
 
             col_idx = graph_headers.index(col_name)
@@ -2263,71 +2114,50 @@ class App(tk.Tk):
 
     def _build_wifi_tab(self) -> None:
         # ---- Single scrollable canvas for the entire Settings tab ----
-        _tab_canvas = tk.Canvas(self.wifi_tab, highlightthickness=0)
-        _tab_sb = ttk.Scrollbar(self.wifi_tab, orient=tk.VERTICAL, command=_tab_canvas.yview)
-        _scroll_inner = ttk.Frame(_tab_canvas)
-
-        _scroll_inner.bind(
-            "<Configure>",
-            lambda e: _tab_canvas.configure(scrollregion=_tab_canvas.bbox("all")),
-        )
-        _tab_win = _tab_canvas.create_window((0, 0), window=_scroll_inner, anchor="nw")
-        _tab_canvas.bind(
-            "<Configure>",
-            lambda e: _tab_canvas.itemconfig(_tab_win, width=e.width),
-        )
-        _tab_canvas.configure(yscrollcommand=_tab_sb.set)
-        _tab_sb.pack(side=tk.RIGHT, fill=tk.Y)
-        _tab_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        def _scroll_tab(event: tk.Event) -> None:
-            _tab_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        _tab_canvas.bind("<Enter>", lambda _: _tab_canvas.bind_all("<MouseWheel>", _scroll_tab))
-        _tab_canvas.bind("<Leave>", lambda _: _tab_canvas.unbind_all("<MouseWheel>"))
+        _scroll_inner = ctk.CTkScrollableFrame(self.wifi_tab, fg_color="transparent")
+        _scroll_inner.pack(fill=tk.BOTH, expand=True)
 
         # ---- Toolbar ----
-        btns = ttk.Frame(_scroll_inner)
+        btns = make_frame(_scroll_inner)
         btns.pack(fill=tk.X, pady=(0, 10))
 
-        self.wifi_scan_btn = ttk.Button(
+        self.wifi_scan_btn = AccentButton(
             btns,
             text="Scan Networks",
             command=self.wifi_scan,
             state=tk.DISABLED,
-            style="Accent.TButton",
         )
         self.wifi_scan_btn.pack(side=tk.LEFT)
 
-        self.wifi_saved_btn = ttk.Button(
+        self.wifi_saved_btn = AccentButton(
             btns,
             text="Saved Networks",
             command=self._toggle_saved_networks_view,
             state=tk.DISABLED,
-            style="Accent.TButton",
         )
         self.wifi_saved_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        self.wifi_reset_btn = ttk.Button(
+        self.wifi_reset_btn = AccentButton(
             btns,
             text="Forget All",
             command=self.wifi_reset,
             state=tk.DISABLED,
-            style="Accent.TButton",
         )
         self.wifi_reset_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        split = ttk.Panedwindow(_scroll_inner, orient=tk.HORIZONTAL)
+        split = make_frame(_scroll_inner)
         split.pack(fill=tk.X)
+        split.columnconfigure(0, weight=1, uniform="wifi")
+        split.columnconfigure(1, weight=1, uniform="wifi")
 
-        left = ttk.Frame(split)
-        right = ttk.Frame(split)
-        split.add(left, weight=1)
-        split.add(right, weight=1)
+        left = make_frame(split)
+        right = make_frame(split)
+        left.grid(row=0, column=0, sticky="nsew")
+        right.grid(row=0, column=1, sticky="nsew")
 
         # Left side: Available Networks (combined list of saved + scanned + "Other")
-        ttk.Label(left, text="Networks", style="Section.TLabel").pack(anchor="w")
-        net_wrap = ttk.Frame(left)
+        make_label(left, "Networks", font=ui_font(13, "bold")).pack(anchor="w")
+        net_wrap = make_frame(left)
         net_wrap.pack(fill=tk.X, pady=(4, 0))
         
         self.wifi_network_tree = ttk.Treeview(net_wrap, columns=("SSID", "RSSI", "Security"), show="headings", height=12)
@@ -2341,7 +2171,7 @@ class App(tk.Tk):
         self.wifi_network_tree.grid(row=0, column=0, sticky="nsew")
         self.wifi_network_tree.bind("<<TreeviewSelect>>", self._on_network_select)
         
-        net_y = ttk.Scrollbar(net_wrap, orient=tk.VERTICAL, command=self.wifi_network_tree.yview)
+        net_y = self._make_scrollbar(net_wrap, "vertical", self.wifi_network_tree.yview)
         net_y.grid(row=0, column=1, sticky="ns")
         self.wifi_network_tree.configure(yscrollcommand=net_y.set)
         
@@ -2349,76 +2179,78 @@ class App(tk.Tk):
         net_wrap.columnconfigure(0, weight=1)
 
         # Right side: Dynamic form area
-        ttk.Label(right, text="Connect", style="Section.TLabel").pack(anchor="w", padx=(12, 0))
-        self.wifi_form_frame = ttk.Frame(right)
+        make_label(right, "Connect", font=ui_font(13, "bold")).pack(anchor="w", padx=(12, 0))
+        self.wifi_form_frame = make_frame(right)
         self.wifi_form_frame.pack(fill=tk.X, pady=(12, 0), padx=(12, 0))
 
         # ---- Pump Control Section ----
-        pump_frame = ttk.LabelFrame(_scroll_inner, text="Pump Control")
+        pump_frame = Section(_scroll_inner, "Pump Control")
         pump_frame.pack(fill=tk.X, pady=(12, 0))
 
-        slider_row = ttk.Frame(pump_frame)
-        slider_row.pack(fill=tk.X, padx=10, pady=(8, 4))
+        slider_row = make_frame(pump_frame)
+        slider_row.pack(fill=tk.X, padx=10, pady=(8, 8))
 
-        ttk.Label(slider_row, text="Speed:").pack(side=tk.LEFT)
+        make_label(slider_row, "Speed:").pack(side=tk.LEFT)
         self.pump_pct_var = tk.IntVar(value=0)
         # The slider is the whole control: sliding sends the speed automatically
         # (debounced — see _pump_slider_moved).
-        self.pump_slider = ttk.Scale(
-            slider_row, from_=0, to=100, orient=tk.HORIZONTAL,
+        self.pump_slider = ctk.CTkSlider(
+            slider_row, from_=0, to=100, number_of_steps=100,
             variable=self.pump_pct_var,
             command=self._pump_slider_moved,
+            progress_color=self.c_accent, button_color=self.c_accent,
+            button_hover_color=C_ACCENT_HOVER,
         )
         self.pump_slider.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 8))
         self.pump_label_var = tk.StringVar(value="0%")
-        ttk.Label(slider_row, textvariable=self.pump_label_var, width=5).pack(side=tk.LEFT)
+        make_label(slider_row, textvariable=self.pump_label_var, width=45).pack(side=tk.LEFT)
 
         # ---- CH4 Calibration Section ----
-        calib_frame = ttk.LabelFrame(_scroll_inner, text="TGS2611 Sensor Calibration")
+        calib_frame = Section(_scroll_inner, "TGS2611 Sensor Calibration")
         calib_frame.pack(fill=tk.X, pady=(8, 0))
 
-        info_row = ttk.Frame(calib_frame)
+        info_row = make_frame(calib_frame)
         info_row.pack(fill=tk.X, padx=10, pady=(8, 2))
-        ttk.Label(
+        make_label(
             info_row,
-            text="Enter 1\u20135 calibration points. The GUI fits the Shah model and uploads R\u2082ppm and \u03b1 to the sensor EEPROM.",
+            "Enter 1\u20135 calibration points. The GUI fits the Shah model and uploads R\u2082ppm and \u03b1 to the sensor EEPROM.",
             justify=tk.LEFT,
         ).pack(anchor="w")
-        ttk.Label(
+        make_label(
             info_row,
-            text="1 point: fixes \u03b1 at Shah default (0.502), solves for R\u2082ppm.  2\u20135 points: fits both.",
+            "1 point: fixes \u03b1 at Shah default (0.502), solves for R\u2082ppm.  2\u20135 points: fits both.",
             justify=tk.LEFT,
-            foreground="#888888",
+            hint=True,
         ).pack(anchor="w", pady=(2, 0))
 
-        ch_row = ttk.Frame(calib_frame)
+        ch_row = make_frame(calib_frame)
         ch_row.pack(fill=tk.X, padx=10, pady=(6, 4))
-        ttk.Label(ch_row, text="Channel index:").pack(side=tk.LEFT)
+        make_label(ch_row, "Channel index:").pack(side=tk.LEFT)
         self.calib_ch_var = tk.StringVar(value="1")
-        ttk.Entry(ch_row, textvariable=self.calib_ch_var, width=5).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(ch_row, text="  (1 for first/only TGS2611)", foreground="#888888").pack(side=tk.LEFT)
+        ctk.CTkEntry(ch_row, textvariable=self.calib_ch_var, width=50, font=ui_font(13)).pack(side=tk.LEFT, padx=(6, 0))
+        make_label(ch_row, "  (1 for first/only TGS2611)", hint=True).pack(side=tk.LEFT)
 
         # Dynamic data-point rows
         MAX_CALIB_POINTS = 5
         self.calib_raw_vars: list[tk.StringVar] = []
         self.calib_ppm_vars: list[tk.StringVar] = []
-        self._calib_rows_frame = ttk.Frame(calib_frame)
+        self._calib_rows_frame = make_frame(calib_frame)
         self._calib_rows_frame.pack(fill=tk.X, padx=10, pady=(2, 0))
 
-        calib_btn_row = ttk.Frame(calib_frame)
+        calib_btn_row = make_frame(calib_frame)
         calib_btn_row.pack(fill=tk.X, padx=10, pady=(6, 10))
-        self._calib_add_btn = ttk.Button(
+        self._calib_add_btn = AccentButton(
             calib_btn_row, text="Add row",
-            command=self._calib_add_row, state=tk.DISABLED, style="Accent.TButton",
+            command=self._calib_add_row, state=tk.DISABLED,
         )
         self._calib_add_btn.pack(side=tk.LEFT)
-        self.calib_r2ppm_btn = ttk.Button(
+        self.calib_r2ppm_btn = AccentButton(
             calib_btn_row, text="Calculate & Send",
-            command=self._calib_multipoint_send, state=tk.DISABLED, style="Accent.TButton",
+            command=self._calib_multipoint_send, state=tk.DISABLED,
         )
         self.calib_r2ppm_btn.pack(side=tk.LEFT, padx=(8, 0))
         self.calib_r2ppm_status_var = tk.StringVar(value="")
-        ttk.Label(calib_btn_row, textvariable=self.calib_r2ppm_status_var, foreground="#888888").pack(
+        make_label(calib_btn_row, textvariable=self.calib_r2ppm_status_var, hint=True).pack(
             side=tk.LEFT, padx=(12, 0)
         )
 
@@ -2426,7 +2258,7 @@ class App(tk.Tk):
         self._calib_add_row()
 
         # ---- LoRa Section ----
-        lora_frame = ttk.LabelFrame(_scroll_inner, text="LoRa")
+        lora_frame = Section(_scroll_inner, "LoRa")
         lora_frame.pack(fill=tk.X, pady=(8, 4))
 
         self.lora_dev_eui_var  = tk.StringVar(value="—")
@@ -2437,178 +2269,179 @@ class App(tk.Tk):
         self._lora_dev_eui_raw = ""
         self._lora_app_eui_raw = ""
 
-        lora_grid = ttk.Frame(lora_frame)
+        lora_grid = make_frame(lora_frame)
         lora_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
         lora_grid.columnconfigure(1, weight=1)
 
-        ttk.Label(lora_grid, text="Device EUI:", anchor="w").grid(row=0, column=0, sticky="w", pady=2)
-        ttk.Entry(lora_grid, textvariable=self.lora_dev_eui_var, state="readonly", width=26).grid(
+        make_label(lora_grid, "Device EUI:", anchor="w").grid(row=0, column=0, sticky="w", pady=2)
+        make_readonly_entry(lora_grid, self.lora_dev_eui_var).grid(
             row=0, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(lora_grid, text="App EUI:", anchor="w").grid(row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(lora_grid, textvariable=self.lora_app_eui_var, state="readonly", width=26).grid(
+        make_label(lora_grid, "App EUI:", anchor="w").grid(row=1, column=0, sticky="w", pady=2)
+        make_readonly_entry(lora_grid, self.lora_app_eui_var).grid(
             row=1, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(lora_grid, text="App Key:", anchor="w").grid(row=2, column=0, sticky="w", pady=2)
-        ttk.Entry(lora_grid, textvariable=self.lora_app_key_var, state="readonly", width=34).grid(
+        make_label(lora_grid, "App Key:", anchor="w").grid(row=2, column=0, sticky="w", pady=2)
+        make_readonly_entry(lora_grid, self.lora_app_key_var).grid(
             row=2, column=1, sticky="ew", padx=(8, 0))
 
-        lora_btn_row = ttk.Frame(lora_frame)
+        lora_btn_row = make_frame(lora_frame)
         lora_btn_row.pack(fill=tk.X, padx=10, pady=(0, 8))
 
-        self.lora_refresh_btn = ttk.Button(
+        self.lora_refresh_btn = AccentButton(
             lora_btn_row, text="Refresh", command=self._lora_refresh,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.lora_refresh_btn.pack(side=tk.LEFT)
 
-        self.lora_gen_btn = ttk.Button(
+        self.lora_gen_btn = AccentButton(
             lora_btn_row, text="Generate Keys", command=self._lora_gen_keys,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.lora_gen_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        ttk.Checkbutton(
+        ctk.CTkCheckBox(
             lora_btn_row, text="Colon separators", variable=self._lora_colon_var,
-            command=self._toggle_eui_colons,
+            command=self._toggle_eui_colons, font=ui_font(13), text_color=self.c_text,
+            checkbox_width=20, checkbox_height=20,
         ).pack(side=tk.LEFT, padx=(8, 0))
 
-        ttk.Label(lora_btn_row, textvariable=self.lora_status_var, foreground="#888888").pack(
+        make_label(lora_btn_row, textvariable=self.lora_status_var, hint=True).pack(
             side=tk.LEFT, padx=(12, 0)
         )
 
         # ---- Advanced Settings (EEPROM Write) ----
-        self._eeprom_advanced_btn = ttk.Button(
+        self._eeprom_advanced_btn = AccentButton(
             _scroll_inner, text="\u2699  Advanced Settings",
-            command=self._toggle_eeprom_advanced, style="Accent.TButton",
+            command=self._toggle_eeprom_advanced,
         )
         self._eeprom_advanced_btn.pack(anchor="w", pady=(10, 2))
 
-        self._eeprom_frame = ttk.LabelFrame(_scroll_inner, text="TGS EEPROM")
+        self._eeprom_frame = Section(_scroll_inner, "TGS EEPROM")
         # packed/hidden by _toggle_eeprom_advanced
 
-        eep_grid = ttk.Frame(self._eeprom_frame)
+        eep_grid = make_frame(self._eeprom_frame)
         eep_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
         eep_grid.columnconfigure(1, weight=1)
 
-        ttk.Label(eep_grid, text="Channel index:").grid(row=0, column=0, sticky="w", pady=2)
+        make_label(eep_grid, "Channel index:").grid(row=0, column=0, sticky="w", pady=2)
         self.eeprom_ch_var = tk.StringVar(value="1")
-        ttk.Entry(eep_grid, textvariable=self.eeprom_ch_var, width=5).grid(
+        ctk.CTkEntry(eep_grid, textvariable=self.eeprom_ch_var, width=50, font=ui_font(13)).grid(
             row=0, column=1, sticky="w", padx=(8, 0))
 
-        ttk.Label(eep_grid, text="TGS ID:").grid(row=1, column=0, sticky="w", pady=2)
+        make_label(eep_grid, "TGS ID:").grid(row=1, column=0, sticky="w", pady=2)
         self.eeprom_tgs_id_var = tk.StringVar(value="")
-        ttk.Entry(eep_grid, textvariable=self.eeprom_tgs_id_var, width=12).grid(
+        ctk.CTkEntry(eep_grid, textvariable=self.eeprom_tgs_id_var, width=120, font=ui_font(13)).grid(
             row=1, column=1, sticky="w", padx=(8, 0))
 
-        ttk.Label(eep_grid, text="Lot number:").grid(row=2, column=0, sticky="w", pady=2)
+        make_label(eep_grid, "Lot number:").grid(row=2, column=0, sticky="w", pady=2)
         self.eeprom_lot_var = tk.StringVar(value="")
-        ttk.Entry(eep_grid, textvariable=self.eeprom_lot_var, width=20).grid(
+        ctk.CTkEntry(eep_grid, textvariable=self.eeprom_lot_var, width=200, font=ui_font(13)).grid(
             row=2, column=1, sticky="w", padx=(8, 0))
 
-        ttk.Label(eep_grid, text="Board ID:").grid(row=3, column=0, sticky="w", pady=2)
+        make_label(eep_grid, "Board ID:").grid(row=3, column=0, sticky="w", pady=2)
         self.eeprom_board_var = tk.StringVar(value="")
-        ttk.Entry(eep_grid, textvariable=self.eeprom_board_var, width=34).grid(
+        ctk.CTkEntry(eep_grid, textvariable=self.eeprom_board_var, width=300, font=ui_font(13)).grid(
             row=3, column=1, sticky="w", padx=(8, 0))
 
-        eep_btn_row = ttk.Frame(self._eeprom_frame)
+        eep_btn_row = make_frame(self._eeprom_frame)
         eep_btn_row.pack(fill=tk.X, padx=10, pady=(4, 8))
 
-        self.eeprom_write_btn = ttk.Button(
+        self.eeprom_write_btn = AccentButton(
             eep_btn_row, text="Write", command=self._eeprom_write_ids,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.eeprom_write_btn.pack(side=tk.LEFT)
 
-        self.eeprom_read_btn = ttk.Button(
+        self.eeprom_read_btn = AccentButton(
             eep_btn_row, text="Read", command=self._eeprom_read_info,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.eeprom_read_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        self.eeprom_clear_btn = ttk.Button(
+        self.eeprom_clear_btn = AccentButton(
             eep_btn_row, text="Erase", command=self._eeprom_clear_clicked,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.eeprom_clear_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.eeprom_status_var = tk.StringVar(value="")
-        ttk.Label(eep_btn_row, textvariable=self.eeprom_status_var, foreground="#888888").pack(
+        make_label(eep_btn_row, textvariable=self.eeprom_status_var, hint=True).pack(
             side=tk.LEFT, padx=(12, 0)
         )
 
         # ---- Mainboard ID (ESP32 NVS) — inside Advanced Settings ----
-        self._board_id_frame = ttk.LabelFrame(_scroll_inner, text="Mainboard NVS")
+        self._board_id_frame = Section(_scroll_inner, "Mainboard NVS")
         # packed/hidden by _toggle_eeprom_advanced
 
-        bid_grid = ttk.Frame(self._board_id_frame)
+        bid_grid = make_frame(self._board_id_frame)
         bid_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
         bid_grid.columnconfigure(1, weight=1)
 
-        ttk.Label(bid_grid, text="Board ID:").grid(row=0, column=0, sticky="w", pady=2)
+        make_label(bid_grid, "Board ID:").grid(row=0, column=0, sticky="w", pady=2)
         self.board_id_var = tk.StringVar(value="")
-        ttk.Entry(bid_grid, textvariable=self.board_id_var, width=34).grid(
+        ctk.CTkEntry(bid_grid, textvariable=self.board_id_var, width=300, font=ui_font(13)).grid(
             row=0, column=1, sticky="w", padx=(8, 0))
 
-        bid_btn_row = ttk.Frame(self._board_id_frame)
+        bid_btn_row = make_frame(self._board_id_frame)
         bid_btn_row.pack(fill=tk.X, padx=10, pady=(4, 8))
 
-        self.board_id_write_btn = ttk.Button(
+        self.board_id_write_btn = AccentButton(
             bid_btn_row, text="Write", command=self._board_id_write_clicked,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.board_id_write_btn.pack(side=tk.LEFT)
 
-        self.board_id_read_btn = ttk.Button(
+        self.board_id_read_btn = AccentButton(
             bid_btn_row, text="Read", command=self._board_id_read_clicked,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.board_id_read_btn.pack(side=tk.LEFT, padx=(8, 0))
 
-        self.board_id_clear_btn = ttk.Button(
+        self.board_id_clear_btn = AccentButton(
             bid_btn_row, text="Erase", command=self._board_id_clear_clicked,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.board_id_clear_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         self.board_id_status_var = tk.StringVar(value="")
-        ttk.Label(bid_btn_row, textvariable=self.board_id_status_var, foreground="#888888").pack(
+        make_label(bid_btn_row, textvariable=self.board_id_status_var, hint=True).pack(
             side=tk.LEFT, padx=(12, 0)
         )
 
         # ---- About (version compatibility) ----
-        about_frame = ttk.LabelFrame(_scroll_inner, text="About")
+        about_frame = Section(_scroll_inner, "About")
         about_frame.pack(fill=tk.X, pady=(12, 4))
 
         self.gui_version_var = tk.StringVar(value=GUI_VERSION)
         self.fw_version_var = tk.StringVar(value="\u2014")
         self.version_status_var = tk.StringVar(value="")
 
-        about_grid = ttk.Frame(about_frame)
+        about_grid = make_frame(about_frame)
         about_grid.pack(fill=tk.X, padx=10, pady=(8, 4))
         about_grid.columnconfigure(1, weight=1)
 
-        ttk.Label(about_grid, text="GUI version:", anchor="w").grid(
+        make_label(about_grid, "GUI version:", anchor="w").grid(
             row=0, column=0, sticky="w", pady=2)
-        ttk.Entry(about_grid, textvariable=self.gui_version_var, state="readonly",
-                  width=26).grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        make_readonly_entry(about_grid, self.gui_version_var).grid(
+            row=0, column=1, sticky="ew", padx=(8, 0))
 
-        ttk.Label(about_grid, text="Firmware version:", anchor="w").grid(
+        make_label(about_grid, "Firmware version:", anchor="w").grid(
             row=1, column=0, sticky="w", pady=2)
-        ttk.Entry(about_grid, textvariable=self.fw_version_var, state="readonly",
-                  width=26).grid(row=1, column=1, sticky="ew", padx=(8, 0))
+        make_readonly_entry(about_grid, self.fw_version_var).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0))
 
-        about_btn_row = ttk.Frame(about_frame)
+        about_btn_row = make_frame(about_frame)
         about_btn_row.pack(fill=tk.X, padx=10, pady=(0, 8))
 
-        self.about_refresh_btn = ttk.Button(
+        self.about_refresh_btn = AccentButton(
             about_btn_row, text="Refresh", command=self._about_refresh,
-            state=tk.DISABLED, style="Accent.TButton",
+            state=tk.DISABLED,
         )
         self.about_refresh_btn.pack(side=tk.LEFT)
 
-        self.version_status_label = ttk.Label(
-            about_btn_row, textvariable=self.version_status_var, foreground="#888888")
+        self.version_status_label = make_label(
+            about_btn_row, textvariable=self.version_status_var, hint=True)
         self.version_status_label.pack(side=tk.LEFT, padx=(12, 0))
 
     def _about_refresh(self) -> None:
@@ -2618,7 +2451,7 @@ class App(tk.Tk):
         self.about_refresh_btn.configure(state=tk.DISABLED)
         self.fw_version_var.set("\u2026")
         self.version_status_var.set("Reading\u2026")
-        self.version_status_label.configure(foreground="#888888")
+        self.version_status_label.configure(text_color=C_HINT)
 
         def worker() -> None:
             try:
@@ -2640,7 +2473,7 @@ class App(tk.Tk):
         _compatible, text, level = version_compat(GUI_VERSION, version)
         self.version_status_var.set(text)
         self.version_status_label.configure(
-            foreground=VERSION_LEVEL_COLOURS.get(level, "#888888"))
+            text_color=VERSION_LEVEL_COLOURS.get(level, C_HINT))
 
     def _toggle_eeprom_advanced(self) -> None:
         """Show/hide the EEPROM Write + Mainboard ID sections."""
@@ -2668,18 +2501,18 @@ class App(tk.Tk):
         
         is_connected = self.wifi_current_ssid == ssid
 
-        ttk.Label(self.wifi_form_frame, text=f"Saved Network: {ssid}", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        make_label(self.wifi_form_frame, f"Saved Network: {ssid}", font=ui_font(13, "bold")).pack(anchor="w", pady=(0, 10))
         
-        btn_frame = ttk.Frame(self.wifi_form_frame)
+        btn_frame = make_frame(self.wifi_form_frame)
         btn_frame.pack(fill=tk.X)
         btn_frame.columnconfigure(0, weight=1)
         btn_frame.columnconfigure(1, weight=1)
         
         if is_connected:
-            ttk.Button(btn_frame, text="Disconnect", command=self._do_disconnect_from_form, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 4))
+            AccentButton(btn_frame, text="Disconnect", command=self._do_disconnect_from_form).grid(row=0, column=0, sticky="ew", padx=(0, 4))
         else:
-            ttk.Button(btn_frame, text="Connect", command=self._do_connect_saved, style="Accent.TButton").grid(row=0, column=0, sticky="ew", padx=(0, 4))
-        ttk.Button(btn_frame, text="Forget", command=self._do_forget_saved, style="Accent.TButton").grid(row=0, column=1, sticky="ew")
+            AccentButton(btn_frame, text="Connect", command=self._do_connect_saved).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        AccentButton(btn_frame, text="Forget", command=self._do_forget_saved).grid(row=0, column=1, sticky="ew")
 
     def _show_psk_network_form(self, ssid: str, security: str) -> None:
         """Show form for a PSK network (password field and Connect/Disconnect button)."""
@@ -2689,16 +2522,16 @@ class App(tk.Tk):
         
         is_connected = self.wifi_current_ssid == ssid
 
-        ttk.Label(self.wifi_form_frame, text=f"Network: {ssid}", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
-        ttk.Label(self.wifi_form_frame, text=f"Security: {security}", style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+        make_label(self.wifi_form_frame, f"Network: {ssid}", font=ui_font(13, "bold")).pack(anchor="w", pady=(0, 10))
+        make_label(self.wifi_form_frame, f"Security: {security}", hint=True).pack(anchor="w", pady=(0, 10))
 
         if not is_connected:
-            ttk.Label(self.wifi_form_frame, text="Password:").pack(anchor="w")
-            self.wifi_form_password = ttk.Entry(self.wifi_form_frame, show="*")
+            make_label(self.wifi_form_frame, "Password:").pack(anchor="w")
+            self.wifi_form_password = ctk.CTkEntry(self.wifi_form_frame, show="*", font=ui_font(13))
             self.wifi_form_password.pack(fill=tk.X, pady=(4, 12))
-            ttk.Button(self.wifi_form_frame, text="Connect", command=self._do_connect_psk, style="Accent.TButton").pack(fill=tk.X)
+            AccentButton(self.wifi_form_frame, text="Connect", command=self._do_connect_psk).pack(fill=tk.X)
         else:
-            ttk.Button(self.wifi_form_frame, text="Disconnect", command=self._do_disconnect_from_form, style="Accent.TButton").pack(fill=tk.X)
+            AccentButton(self.wifi_form_frame, text="Disconnect", command=self._do_disconnect_from_form).pack(fill=tk.X)
 
     def _show_ent_network_form(self, ssid: str, security: str) -> None:
         """Show form for an ENT network (username, password, and Connect/Disconnect button)."""
@@ -2708,49 +2541,51 @@ class App(tk.Tk):
         
         is_connected = self.wifi_current_ssid == ssid
 
-        ttk.Label(self.wifi_form_frame, text=f"Network: {ssid}", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
-        ttk.Label(self.wifi_form_frame, text=f"Security: {security}", style="Muted.TLabel").pack(anchor="w", pady=(0, 10))
+        make_label(self.wifi_form_frame, f"Network: {ssid}", font=ui_font(13, "bold")).pack(anchor="w", pady=(0, 10))
+        make_label(self.wifi_form_frame, f"Security: {security}", hint=True).pack(anchor="w", pady=(0, 10))
 
         if not is_connected:
-            ttk.Label(self.wifi_form_frame, text="Username:").pack(anchor="w")
-            self.wifi_form_username = ttk.Entry(self.wifi_form_frame)
+            make_label(self.wifi_form_frame, "Username:").pack(anchor="w")
+            self.wifi_form_username = ctk.CTkEntry(self.wifi_form_frame, font=ui_font(13))
             self.wifi_form_username.pack(fill=tk.X, pady=(4, 8))
 
-            ttk.Label(self.wifi_form_frame, text="Password:").pack(anchor="w")
-            self.wifi_form_password = ttk.Entry(self.wifi_form_frame, show="*")
+            make_label(self.wifi_form_frame, "Password:").pack(anchor="w")
+            self.wifi_form_password = ctk.CTkEntry(self.wifi_form_frame, show="*", font=ui_font(13))
             self.wifi_form_password.pack(fill=tk.X, pady=(4, 12))
-            ttk.Button(self.wifi_form_frame, text="Connect", command=self._do_connect_ent, style="Accent.TButton").pack(fill=tk.X)
+            AccentButton(self.wifi_form_frame, text="Connect", command=self._do_connect_ent).pack(fill=tk.X)
         else:
-            ttk.Button(self.wifi_form_frame, text="Disconnect", command=self._do_disconnect_from_form, style="Accent.TButton").pack(fill=tk.X)
+            AccentButton(self.wifi_form_frame, text="Disconnect", command=self._do_disconnect_from_form).pack(fill=tk.X)
 
     def _show_other_network_form(self) -> None:
         """Show form for 'Other' network (SSID, security type, and password/username fields)."""
         self._clear_wifi_form()
         self.wifi_current_form_type = "other"
 
-        ttk.Label(self.wifi_form_frame, text="Manual Network Entry", style="Section.TLabel").pack(anchor="w", pady=(0, 10))
+        make_label(self.wifi_form_frame, "Manual Network Entry", font=ui_font(13, "bold")).pack(anchor="w", pady=(0, 10))
 
-        ttk.Label(self.wifi_form_frame, text="Network Name (SSID):").pack(anchor="w")
-        self.wifi_form_ssid = ttk.Entry(self.wifi_form_frame)
+        make_label(self.wifi_form_frame, "Network Name (SSID):").pack(anchor="w")
+        self.wifi_form_ssid = ctk.CTkEntry(self.wifi_form_frame, font=ui_font(13))
         self.wifi_form_ssid.pack(fill=tk.X, pady=(4, 8))
 
-        ttk.Label(self.wifi_form_frame, text="Security Type:").pack(anchor="w")
-        self.wifi_form_security = ttk.Combobox(
+        make_label(self.wifi_form_frame, "Security Type:").pack(anchor="w")
+        self.wifi_form_security = ctk.CTkComboBox(
             self.wifi_form_frame,
             values=["None", "WPA2-PSK", "WPA2-ENT"],
             state="readonly",
+            font=ui_font(13), dropdown_font=ui_font(13),
+            command=self._on_other_security_changed,
         )
+        self.wifi_form_security.set("")
         self.wifi_form_security.pack(fill=tk.X, pady=(4, 8))
-        self.wifi_form_security.bind("<<ComboboxSelected>>", self._on_other_security_changed)
 
         # Container for dynamic fields
-        self.wifi_form_fields_frame = ttk.Frame(self.wifi_form_frame)
+        self.wifi_form_fields_frame = make_frame(self.wifi_form_frame)
         self.wifi_form_fields_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 12))
 
         # Add Connect button at the bottom
-        ttk.Button(self.wifi_form_frame, text="Connect", command=self._do_connect_other, style="Accent.TButton").pack(fill=tk.X)
+        AccentButton(self.wifi_form_frame, text="Connect", command=self._do_connect_other).pack(fill=tk.X)
 
-    def _on_other_security_changed(self, _event=None) -> None:
+    def _on_other_security_changed(self, _value=None) -> None:
         """Update form fields when security type changes in 'Other' form."""
         # Clear previous fields
         for widget in self.wifi_form_fields_frame.winfo_children():
@@ -2762,15 +2597,15 @@ class App(tk.Tk):
             # No fields needed
             pass
         elif security == "WPA2-PSK":
-            ttk.Label(self.wifi_form_fields_frame, text="Password:").pack(anchor="w")
-            self.wifi_form_password = ttk.Entry(self.wifi_form_fields_frame, show="*")
+            make_label(self.wifi_form_fields_frame, "Password:").pack(anchor="w")
+            self.wifi_form_password = ctk.CTkEntry(self.wifi_form_fields_frame, show="*", font=ui_font(13))
             self.wifi_form_password.pack(fill=tk.X, pady=(4, 0))
         elif security == "WPA2-ENT":
-            ttk.Label(self.wifi_form_fields_frame, text="Username:").pack(anchor="w")
-            self.wifi_form_username = ttk.Entry(self.wifi_form_fields_frame)
+            make_label(self.wifi_form_fields_frame, "Username:").pack(anchor="w")
+            self.wifi_form_username = ctk.CTkEntry(self.wifi_form_fields_frame, font=ui_font(13))
             self.wifi_form_username.pack(fill=tk.X, pady=(4, 8))
-            ttk.Label(self.wifi_form_fields_frame, text="Password:").pack(anchor="w")
-            self.wifi_form_password = ttk.Entry(self.wifi_form_fields_frame, show="*")
+            make_label(self.wifi_form_fields_frame, "Password:").pack(anchor="w")
+            self.wifi_form_password = ctk.CTkEntry(self.wifi_form_fields_frame, show="*", font=ui_font(13))
             self.wifi_form_password.pack(fill=tk.X, pady=(4, 0))
 
     def _on_network_select(self, _event=None) -> None:
@@ -3191,7 +3026,7 @@ class App(tk.Tk):
                     self.fw_version_var.set("\u2014")
                     self.version_status_var.set(VERSION_UNKNOWN_TEXT)
                     self.version_status_label.configure(
-                        foreground=VERSION_LEVEL_COLOURS[VERSION_LEVEL_UNKNOWN])
+                        text_color=VERSION_LEVEL_COLOURS[VERSION_LEVEL_UNKNOWN])
                     msg = str(payload or "")
                     if "code 1" in msg or "Timeout" in msg:
                         self.status_var.set(
@@ -3225,7 +3060,7 @@ class App(tk.Tk):
             mapping[label] = dev
 
         self.port_display_to_device = mapping
-        self.port_combo["values"] = displays
+        self.port_combo.configure(values=displays)
 
         current = self.port_var.get()
         if current in mapping:
@@ -3628,20 +3463,22 @@ class App(tk.Tk):
 
     def _ask_sensor_number(self) -> None:
 
-        dialog = tk.Toplevel(self)
+        dialog = ctk.CTkToplevel(self)
         dialog.title("Sensor Number")
         dialog.resizable(False, False)
-        dialog.grab_set()
+        dialog.transient(self)
+        dialog.after(150, dialog.grab_set)
 
         result: list[str | None] = [None]
 
-        ttk.Label(dialog, text="Enter sensor number:").pack(padx=20, pady=(16, 4))
+        make_label(dialog, "Enter sensor number:").pack(padx=20, pady=(16, 4))
         var = tk.StringVar()
 
         vcmd = dialog.register(lambda P: P == "" or (P.isdigit() and len(P) <= 3))
-        entry = ttk.Entry(dialog, textvariable=var, width=10, validate="key", validatecommand=(vcmd, "%P"))
+        entry = ctk.CTkEntry(dialog, textvariable=var, width=100, validate="key",
+                             validatecommand=(vcmd, "%P"), font=ui_font(13))
         entry.pack(padx=20)
-        entry.focus_set()
+        dialog.after(200, entry.focus_set)
 
         def on_ok() -> None:
             val = var.get().strip()
@@ -3654,10 +3491,10 @@ class App(tk.Tk):
         def on_cancel() -> None:
             dialog.destroy()
 
-        btn_frame = ttk.Frame(dialog)
+        btn_frame = make_frame(dialog)
         btn_frame.pack(pady=(8, 16))
-        ttk.Button(btn_frame, text="OK", command=on_ok, style="Accent.TButton").pack(side=tk.LEFT)
-        ttk.Button(btn_frame, text="Cancel", command=on_cancel).pack(side=tk.LEFT, padx=(8, 0))
+        AccentButton(btn_frame, text="OK", command=on_ok, width=80).pack(side=tk.LEFT)
+        AccentButton(btn_frame, text="Cancel", command=on_cancel, width=80).pack(side=tk.LEFT, padx=(8, 0))
 
         entry.bind("<Return>", lambda _: on_ok())
         dialog.bind("<Escape>", lambda _: on_cancel())
@@ -3785,13 +3622,11 @@ class App(tk.Tk):
             self.graphs_content.rowconfigure(row, weight=1)
 
             graph_title, unit = self.GAS_COLS.get(name, (name, ""))
-            pane = ttk.LabelFrame(self.graphs_content, text=f"{graph_title} ({unit})" if unit else graph_title)
+            pane = Section(self.graphs_content, f"{graph_title} ({unit})" if unit else graph_title)
             pane.grid(row=row, column=col, sticky="nsew", padx=4, pady=4)
 
-            canvas = tk.Canvas(pane, bg=self.c_surface, height=220, highlightthickness=1, highlightbackground=self.c_border)
-            canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-            canvas.bind("<Motion>", lambda e, c=canvas: self._on_graph_hover(e, c))
-            canvas.bind("<Leave>", lambda e, c=canvas: c.delete("hover"))
+            canvas = self._make_graph_canvas(pane, height=220)
+            canvas.pack(fill=tk.BOTH, expand=True, padx=6, pady=(4, 8))
             self.graph_canvases.append(canvas)
             self.graph_index_map.append(name)
 
@@ -3973,11 +3808,11 @@ class App(tk.Tk):
         self.gas_card_last_update.clear()
 
         for col_name, (val_lbl, unit_lbl, card, stats_lbl) in self.gas_card_widgets.items():
-            val_lbl.configure(text="N/A", fg=self.C_CARD_NA)
-            unit_lbl.configure(fg="#9ca3af")
-            card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+            val_lbl.configure(text="N/A", text_color=self.C_CARD_NA)
+            unit_lbl.configure(text_color="#9ca3af")
+            card.configure(border_color=self.C_CARD_BORDER_NA)
             stats_lbl.clear()
-            self.gas_card_age_labels[col_name].configure(text="No data yet", fg="#9ca3af")
+            self.gas_card_age_labels[col_name].configure(text="No data yet", text_color="#9ca3af")
 
         self._refresh_live_graphs()
 
@@ -3994,9 +3829,9 @@ class App(tk.Tk):
             parsed = self._parse_float_or_none(raw)
 
             if parsed is None:
-                val_lbl.configure(text="NA", fg=self.C_CARD_NA)
-                unit_lbl.configure(fg="#9ca3af")
-                card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+                val_lbl.configure(text="NA", text_color=self.C_CARD_NA)
+                unit_lbl.configure(text_color="#9ca3af")
+                card.configure(border_color=self.C_CARD_BORDER_NA)
             else:
                 if unit in ("\u00b0C", "%RH"):
                     display = f"{parsed:.1f}"
@@ -4013,12 +3848,12 @@ class App(tk.Tk):
                 text_col = self.C_CARD_NEUTRAL
                 border_col = self.C_CARD_BORDER_NEUTRAL
 
-                val_lbl.configure(text=display, fg=text_col)
-                unit_lbl.configure(fg=text_col)
-                card.configure(highlightbackground=border_col)
+                val_lbl.configure(text=display, text_color=text_col)
+                unit_lbl.configure(text_color=text_col)
+                card.configure(border_color=border_col)
 
                 self.gas_card_last_update[col_name] = time.monotonic()
-                self.gas_card_age_labels[col_name].configure(text="Updated just now", fg="#9ca3af")
+                self.gas_card_age_labels[col_name].configure(text="Updated just now", text_color="#9ca3af")
 
     @staticmethod
     def _format_age(seconds: float) -> str:
@@ -4038,12 +3873,12 @@ class App(tk.Tk):
             age = now - last
             age_lbl = self.gas_card_age_labels[col_name]
             if age >= self.GAS_CARD_STALE_S:
-                age_lbl.configure(text=f"updated {self._format_age(age)}", fg="#b45309")
-                val_lbl.configure(fg=self.C_CARD_NA)
-                unit_lbl.configure(fg="#9ca3af")
-                card.configure(highlightbackground=self.C_CARD_BORDER_NA)
+                age_lbl.configure(text=f"updated {self._format_age(age)}", text_color="#b45309")
+                val_lbl.configure(text_color=self.C_CARD_NA)
+                unit_lbl.configure(text_color="#9ca3af")
+                card.configure(border_color=self.C_CARD_BORDER_NA)
             else:
-                age_lbl.configure(text=f"Updated {self._format_age(age)}", fg="#9ca3af")
+                age_lbl.configure(text=f"Updated {self._format_age(age)}", text_color="#9ca3af")
         self.after(1000, self._tick_gas_card_ages)
 
     def _ensure_live_series_shape(self, n_vars: int) -> None:
@@ -4358,12 +4193,12 @@ class App(tk.Tk):
         self.calib_ppm_vars.append(ppm_var)
         self.calib_raw_vars.append(raw_var)
 
-        row = ttk.Frame(self._calib_rows_frame)
+        row = make_frame(self._calib_rows_frame)
         row.pack(fill=tk.X, pady=2)
-        ttk.Label(row, text="CH\u2084 standard (ppm):").pack(side=tk.LEFT)
-        ttk.Entry(row, textvariable=ppm_var, width=8).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Label(row, text="  Measured value (raw):").pack(side=tk.LEFT, padx=(10, 0))
-        ttk.Entry(row, textvariable=raw_var, width=8).pack(side=tk.LEFT, padx=(6, 0))
+        make_label(row, "CH\u2084 standard (ppm):").pack(side=tk.LEFT)
+        ctk.CTkEntry(row, textvariable=ppm_var, width=80, font=ui_font(13)).pack(side=tk.LEFT, padx=(6, 0))
+        make_label(row, "  Measured value (raw):").pack(side=tk.LEFT, padx=(10, 0))
+        ctk.CTkEntry(row, textvariable=raw_var, width=80, font=ui_font(13)).pack(side=tk.LEFT, padx=(6, 0))
 
         # Disable Add row when at max
         if len(self.calib_raw_vars) >= MAX_CALIB_POINTS:
@@ -5266,8 +5101,8 @@ class App(tk.Tk):
                 "series": {col: deque(maxlen=self.mqtt_history_limit) for col in self.LORA_COLS},
             }
 
-            values = list(self.mqtt_device_combo["values"]) + [device_id]
-            self.mqtt_device_combo["values"] = values
+            values = list(self.mqtt_device_combo.cget("values")) + [device_id]
+            self.mqtt_device_combo.configure(values=values)
             if not self.mqtt_selected_device.get():
                 self.mqtt_selected_device.set(device_id)
 
@@ -5304,10 +5139,10 @@ class App(tk.Tk):
         for col_name, (val_label, unit_label, _card) in self.mqtt_card_widgets.items():
             val = row.get(col_name)
             if val is None:
-                val_label.configure(text="N/A", fg=self.C_CARD_NA)
+                val_label.configure(text="N/A", text_color=self.C_CARD_NA)
             else:
                 text = f"{val:.2f}" if isinstance(val, float) else str(val)
-                val_label.configure(text=text, fg=self.C_CARD_NEUTRAL)
+                val_label.configure(text=text, text_color=self.C_CARD_NEUTRAL)
 
     def _redraw_mqtt_graph(self, device_id: str, col: str) -> None:
         canvas = self.mqtt_graph_canvases.get(col)

@@ -4,7 +4,7 @@
 
 ### Prerequisites
 ```bash
-pip install pyserial ttkbootstrap  # Optional: ttkbootstrap for better styling
+pip install pyserial customtkinter pillow
 ```
 
 ### Running the GUI
