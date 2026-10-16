@@ -107,6 +107,31 @@ def test_live_data_frame_is_skipped():
     expect(r["success"] is True, f"expected success, got {r}")
 
 
+def test_live_stream_forwards_status_and_data_frames():
+    """Live diagnostics must reach the GUI instead of being silently discarded."""
+    status = b"WARNING: TGS2611 sampling took 2500 ms"
+    line = b"2026-08-28 12:00:00,415,22.5"
+    data = (
+        bytes([0x02, len(status)]) + status
+        + bytes([0xFE, len(line)]) + line
+    )
+    c = make_client(data=data)
+    c.live_stop.clear()
+    statuses = []
+    lines = []
+
+    def on_status(message):
+        statuses.append(message)
+
+    def on_line(message):
+        lines.append(message)
+        c.live_stop.set()
+
+    c._live_loop(on_line, on_status)
+    expect(statuses == [status.decode()], f"status not forwarded: {statuses}")
+    expect(lines == [line.decode()], f"live data not forwarded: {lines}")
+
+
 def test_late_rtc_reply_does_not_break_connect():
     """A late RTC_RESPONSE (from the periodic RTC poll) is consumed, OK parsed."""
     ts = b"2026-08-28 12:34:56"

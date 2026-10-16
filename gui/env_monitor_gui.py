@@ -629,7 +629,7 @@ class SerialMenuClient:
         output_path.write_bytes(payload)
         return len(payload)
 
-    def start_live(self, on_line) -> None:
+    def start_live(self, on_line, on_status=None) -> None:
         """Start live streaming"""
         if self.live_thread is not None and self.live_thread.is_alive():
             return
@@ -655,17 +655,17 @@ class SerialMenuClient:
         self.live_stop.clear()
         self.live_thread = threading.Thread(
             target=self._live_loop,
-            args=(on_line,),
+            args=(on_line, on_status),
             daemon=True,
         )
         self.live_thread.start()
 
-    def _live_loop(self, on_line) -> None:
+    def _live_loop(self, on_line, on_status=None) -> None:
         """Live stream loop - reads typed messages from device
         
         Format: [type byte][length byte][message data]
         Types: 0x02 = STATUS (debug), 0xFE = LIVE_DATA (CSV)
-        Only CSV data (0xFE) is passed to on_line callback.
+        CSV and STATUS messages are passed to their respective callbacks.
         """
         ser = self._require_open()
         
@@ -677,13 +677,11 @@ class SerialMenuClient:
                     continue
                 
                 msg_type = b[0]
-                
-                # Read message length
-                b = ser.read(1)
-                if not b:
-                    continue
-                
-                length = b[0]
+                if msg_type not in (0x02, 0xFE):
+                    continue  # not a frame start; skip a byte to resync
+
+                # Length byte: wait for it rather than abandoning the frame
+                length = self._read_exact(1, timeout_s=2.0)[0]
                 if length == 0:
                     continue  # Skip zero-length messages
                 
@@ -695,15 +693,11 @@ class SerialMenuClient:
                 if msg_type == 0xFE:
                     if line:
                         on_line(line)
-                # Ignore STATUS (0x02) debug messages
+                elif msg_type == ProtoResp.STATUS and on_status is not None:
+                    on_status(line)
             except Exception:
-                # On any serial error, drain the buffer to resync framing
-                try:
-                    ser.reset_input_buffer()
-                except Exception:
-                    pass
-        
-        # Stop live mode
+                # Timeout mid-frame; keep buffered bytes and resync on a frame type
+                time.sleep(0.01)
         try:
             self._send_cmd(ProtoCmd.LIVE_STOP)
         except:
@@ -2877,10 +2871,11 @@ class App(tk.Tk):
                 elif kind == "preview_done":
                     if self.preview_loading_index == payload:
                         self.preview_loading_index = None
+                elif kind == "live_starting":
+                    self._reset_live_history()
                 elif kind == "live_started":
                     self.live_running = True
                     self._set_live_indicator(True)
-                    self._reset_live_history()
                     self.status_var.set("Live stream running")
                     self.live_start_btn.configure(state=tk.DISABLED)
                     self.live_stop_btn.configure(state=tk.NORMAL)
@@ -3263,10 +3258,16 @@ class App(tk.Tk):
         def on_line(line: str) -> None:
             self.events.put(("live_line", line))
 
+        def on_status(message: str) -> None:
+            self.events.put(("device_status", message))
+
         def worker() -> None:
             try:
                 self.events.put(("busy", "Starting live stream..."))
-                self.client.start_live(on_line)
+                # Reset the display state before the reader can enqueue the
+                # firmware header and first data rows.
+                self.events.put(("live_starting", None))
+                self.client.start_live(on_line, on_status)
                 self.events.put(("live_started", None))
             except Exception as exc:
                 self.events.put(("error", exc))
@@ -5270,4 +5271,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

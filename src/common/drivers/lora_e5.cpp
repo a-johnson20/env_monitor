@@ -2,15 +2,27 @@
 #include <HardwareSerial.h>
 #include <Preferences.h>
 #include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 
 namespace lora {
 
 static HardwareSerial& _uart  = Serial2;
 static Preferences      _prefs;
-static IdlePollFn       s_idle_poll = nullptr;
+static SemaphoreHandle_t s_uart_mutex = nullptr;
 
-void set_idle_poll(IdlePollFn fn) { s_idle_poll = fn; }
-static inline void idle_tick() { if (s_idle_poll) s_idle_poll(); }
+class UartLock {
+public:
+    UartLock()
+        : locked_(s_uart_mutex && xSemaphoreTake(s_uart_mutex, portMAX_DELAY) == pdTRUE) {}
+    ~UartLock() {
+        if (locked_) xSemaphoreGive(s_uart_mutex);
+    }
+    explicit operator bool() const { return locked_; }
+
+private:
+    bool locked_;
+};
 
 // ---------------------------------------------------------------------------
 // Internal: send AT command, collect response until "+OK" / "+ERR",
@@ -26,7 +38,6 @@ static String at_cmd(const String& cmd, uint32_t timeout_ms = 2000,
     String resp;
     uint32_t t0 = millis();
     while (millis() - t0 < timeout_ms) {
-        idle_tick();
         if (_uart.available()) {
             resp += (char)_uart.read();
             if (resp.indexOf("+OK")  >= 0) { if (ok_out) *ok_out = true;  return resp; }
@@ -39,6 +50,7 @@ static String at_cmd(const String& cmd, uint32_t timeout_ms = 2000,
                 return resp;
             }
         }
+        delay(1);
     }
     if (ok_out) *ok_out = false;
     return resp;   // timeout — return whatever arrived
@@ -48,7 +60,10 @@ static String at_cmd(const String& cmd, uint32_t timeout_ms = 2000,
 // Public API
 // ---------------------------------------------------------------------------
 
-void begin() {
+bool begin() {
+    if (!s_uart_mutex) s_uart_mutex = xSemaphoreCreateMutex();
+    if (!s_uart_mutex) return false;
+
     // Configure BOOT pin HIGH before any reset so the module always starts in
     // AT-firmware mode.  PB13 on LoRa-E5: HIGH = AT app, LOW = bootloader.
     pinMode(PIN_LORA_BOOT, OUTPUT);
@@ -65,7 +80,8 @@ void begin() {
     uint32_t t0 = millis();
     while (millis() - t0 < 800) {
         if (_uart.available()) probe += (char)_uart.read();
-        if (probe.indexOf("+OK") >= 0) return;  // already alive — no reset needed
+        if (probe.indexOf("+OK") >= 0) return true;  // already alive — no reset needed
+        delay(1);
     }
 
     // No response — pulse RST to force the module into a known state.
@@ -82,9 +98,13 @@ void begin() {
         while (_uart.available()) _uart.read();
         delay(10);
     }
+    return true;
 }
 
 String get_dev_eui() {
+    UartLock lock;
+    if (!lock) return "";
+
     // Send a simple AT ping first to verify the module is alive.
     // LoRa-E5 responds to "AT" with "+AT: OK".
     String ping = at_cmd("AT", 1000, nullptr, "+AT: OK");
@@ -135,6 +155,9 @@ uint32_t stagger_offset_ms(uint32_t max_offset_ms) {
 }
 
 bool program_keys(const String& eui, const String& key) {
+    UartLock lock;
+    if (!lock) return false;
+
     // Setting AppEui returns "+ID: AppEui, ..." with no +OK.
     bool ok1 = false;
     at_cmd("AT+ID=AppEui,\"" + eui + "\"", 2000, &ok1, "+ID: AppEui,");
@@ -189,6 +212,9 @@ void save_keys(const String& eui, const String& key) {
 }
 
 bool join(uint32_t timeout_ms) {
+    UartLock lock;
+    if (!lock) return false;
+
     // Configure region, power, and mode (idempotent — safe to repeat)
     at_cmd("AT+DR=EU868",    1000, nullptr, "+DR:");
     at_cmd("AT+TXP=14",      1000, nullptr, "+TXP:"); // +14 dBm max (EU868 limit)
@@ -204,17 +230,20 @@ bool join(uint32_t timeout_ms) {
     String resp;
     uint32_t t0 = millis();
     while (millis() - t0 < timeout_ms) {
-        idle_tick();
         if (_uart.available()) resp += (char)_uart.read();
         if (resp.indexOf("+JOIN: Network joined") >= 0) return true;
         if (resp.indexOf("+JOIN: Joined already") >= 0) return true;
         if (resp.indexOf("+JOIN: Join failed")    >= 0) return false;
         if (resp.indexOf("+JOIN: Done")            >= 0) return false;
+        delay(1);
     }
     return false;  // timeout
 }
 
 bool send_hex(const uint8_t* data, size_t len, uint8_t port, uint32_t timeout_ms) {
+    UartLock lock;
+    if (!lock) return false;
+
     at_cmd("AT+PORT=" + String(port), 1000, nullptr, "+PORT:");
 
     String hex;

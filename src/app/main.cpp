@@ -10,6 +10,9 @@
 #include <driver/ledc.h>   // ESP-IDF LEDC driver
 #include <Preferences.h>
 #include <array>
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/task.h>
 
 #include "app/boot_read.hpp"
 #include "hal/mux_map.hpp"
@@ -39,7 +42,7 @@
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
 // Keep this version independent of GUI_VERSION in gui/env_monitor_gui.py; both
 // are compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.4.4"
+#define FIRMWARE_VERSION "1.4.5"
 
 // Metadata line written above the heading of new CSV log files (built in
 // build_log_metadata_line(), defined further down after the TGS EEPROM and
@@ -1001,8 +1004,16 @@ static String build_log_metadata_line() {
 // LoRa uplink helpers
 // ---------------------------------------------------------------------------
 
-static bool     s_lora_joined       = false;
 static uint32_t s_last_lora_send_ms = 0;
+struct LoraTxPayload {
+  uint8_t bytes[20];
+};
+struct LoraWorkerEvent {
+  bool join_result;
+  bool success;
+};
+static QueueHandle_t s_lora_tx_queue = nullptr;
+static QueueHandle_t s_lora_event_queue = nullptr;
 
 // Get the current RTC time as a UTC Unix epoch (0 = unavailable).
 static uint32_t get_utc_epoch() {
@@ -1092,9 +1103,11 @@ static void lora_build_payload(uint8_t* buf) {
   buf[18] = n2o_enc >> 8;   buf[19] = n2o_enc & 0xFF;
 }
 
-static bool lora_send_reading() {
-  uint8_t payload[20];
-  lora_build_payload(payload);
+static bool lora_queue_reading() {
+  if (!s_lora_tx_queue) return false;
+  LoraTxPayload payload{};
+  lora_build_payload(payload.bytes);
+  if (xQueueOverwrite(s_lora_tx_queue, &payload) != pdPASS) return false;
 
   // Reset LoRa accumulators after reading
   lora_rh.reset();
@@ -1105,7 +1118,76 @@ static bool lora_send_reading() {
   lora_air.reset();
   lora_n2o.reset();
 
-  return lora::send_hex(payload, sizeof(payload));
+  return true;
+}
+
+static void lora_worker_task(void*) {
+  constexpr uint32_t JOIN_RETRY_MS = 30000UL;
+  bool joined = false;
+  uint32_t last_join_ms = millis() - JOIN_RETRY_MS;
+
+  for (;;) {
+    if (!joined) {
+      if (millis() - last_join_ms < JOIN_RETRY_MS) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+        continue;
+      }
+
+      ui::set_lora_op_active(true);
+      joined = lora::join(15000);
+      ui::set_lora_op_active(false);
+      last_join_ms = millis();
+      const LoraWorkerEvent event{true, joined};
+      xQueueSend(s_lora_event_queue, &event, 0);
+      continue;
+    }
+
+    LoraTxPayload payload{};
+    if (xQueueReceive(s_lora_tx_queue, &payload, pdMS_TO_TICKS(1000)) == pdTRUE) {
+      ui::set_lora_op_active(true);
+      const bool sent = lora::send_hex(payload.bytes, sizeof(payload.bytes));
+      ui::set_lora_op_active(false);
+      const LoraWorkerEvent event{false, sent};
+      xQueueSend(s_lora_event_queue, &event, 0);
+      if (!sent) joined = false;
+    }
+  }
+}
+
+static bool lora_worker_begin() {
+  s_lora_tx_queue = xQueueCreate(1, sizeof(LoraTxPayload));
+  s_lora_event_queue = xQueueCreate(4, sizeof(LoraWorkerEvent));
+  if (!s_lora_tx_queue || !s_lora_event_queue) {
+    if (s_lora_tx_queue) vQueueDelete(s_lora_tx_queue);
+    if (s_lora_event_queue) vQueueDelete(s_lora_event_queue);
+    s_lora_tx_queue = nullptr;
+    s_lora_event_queue = nullptr;
+    return false;
+  }
+
+  const BaseType_t created = xTaskCreatePinnedToCore(
+      lora_worker_task, "lora_worker", 8192, nullptr, 1, nullptr, 0);
+  if (created != pdPASS) {
+    vQueueDelete(s_lora_tx_queue);
+    vQueueDelete(s_lora_event_queue);
+    s_lora_tx_queue = nullptr;
+    s_lora_event_queue = nullptr;
+    return false;
+  }
+  return true;
+}
+
+static void poll_lora_worker_events() {
+  if (!s_lora_event_queue) return;
+  LoraWorkerEvent event{};
+  while (xQueueReceive(s_lora_event_queue, &event, 0) == pdTRUE) {
+    if (event.join_result) {
+      leds::led1_flash(event.success, 2000);
+      ui::proto::write_message(0x02, event.success ? "LoRa: joined" : "LoRa: join failed (will retry)");
+    } else {
+      leds::led1_flash(event.success);
+    }
+  }
 }
 
 namespace {
@@ -1270,24 +1352,15 @@ void setup() {
   pump_percent = pump_prefs.getFloat("pct", 0.0f);
   pump_set_percent(pump_percent);
 
-  lora::begin();
-  // Service LEDs/serial commands while at_cmd()/join() block on the module's
-  // UART response, instead of freezing the whole loop for the AT timeout.
-  lora::set_idle_poll([]() {
-    leds::poll(millis());
-    ui::poll();
-  });
-
-  // Attempt LoRaWAN OTAA join (blocks up to 15 s; module retains session across resets).
-  ui::set_lora_op_active(true);
-  s_lora_joined = lora::join(15000);
-  ui::set_lora_op_active(false);
-  leds::led1_flash(s_lora_joined, 2000);
-  ui::proto::write_message(0x02, s_lora_joined ? "LoRa: joined" : "LoRa: join failed (will retry in loop)");
-
-  // Deterministic stagger offset so co-located units don't transmit simultaneously.
-  // First send happens 'offset' ms after boot; subsequent sends maintain the 60s period.
-  s_last_lora_send_ms = millis() - lora::stagger_offset_ms(60000UL);
+  if (lora::begin()) {
+    // Keep AT-command waits off the sensor loop so they cannot delay live rows.
+    s_last_lora_send_ms = millis() - lora::stagger_offset_ms(60000UL);
+    if (!lora_worker_begin()) {
+      ui::proto::write_message(0x02, "WARNING: LoRa worker failed to start.");
+    }
+  } else {
+    ui::proto::write_message(0x02, "WARNING: LoRa UART synchronization unavailable.");
+  }
 
   // SHORT delay to let devices settle
   delay(1000);
@@ -1306,8 +1379,11 @@ void setup() {
 void loop() {
   const uint32_t now = millis();
 
-  rtc_sync::poll();
-  ui::poll();
+  {
+    rtc_sync::poll();
+    ui::poll();
+    poll_lora_worker_events();
+  }
 
   // --- Send CSV header periodically (every ~10 seconds) when live streaming ---
   // This ensures the GUI always has a fresh header, even if it connects after startup
@@ -1316,26 +1392,15 @@ void loop() {
   // --- LED1: turn off after flash duration ---
   leds::poll(now);
 
-  // --- LoRa periodic uplink (every 60 s) ---
+  // --- Queue LoRa periodic uplink (every 60 s); radio transactions run separately. ---
   {
     constexpr uint32_t LORA_SEND_INTERVAL = 60000UL;
-    constexpr uint32_t LORA_JOIN_RETRY    = 30000UL;
-    static uint32_t s_last_lora_join_ms = 0;
-    if (!s_lora_joined) {
-      if (now - s_last_lora_join_ms >= LORA_JOIN_RETRY) {
-        ui::set_lora_op_active(true);
-        s_lora_joined = lora::join(15000);
-        ui::set_lora_op_active(false);
-        leds::led1_flash(s_lora_joined, 2000);
-        s_last_lora_join_ms = now;
+    if (now - s_last_lora_send_ms >= LORA_SEND_INTERVAL) {
+      if (lora_queue_reading()) {
+        s_last_lora_send_ms += LORA_SEND_INTERVAL;
+      } else {
+        s_last_lora_send_ms = now;
       }
-    } else if (now - s_last_lora_send_ms >= LORA_SEND_INTERVAL) {
-      ui::set_lora_op_active(true);
-      bool tx_ok = lora_send_reading();
-      ui::set_lora_op_active(false);
-      leds::led1_flash(tx_ok);
-      if (!tx_ok) s_lora_joined = false;           // failure → re-join next cycle
-      s_last_lora_send_ms += LORA_SEND_INTERVAL;   // maintain fixed 60s period
     }
   }
 
@@ -1764,6 +1829,8 @@ void loop() {
     }
   }
 
-  oled.update(m, STEP_MS);
+  {
+    oled.update(m, STEP_MS);
+  }
   delay(100);
 }

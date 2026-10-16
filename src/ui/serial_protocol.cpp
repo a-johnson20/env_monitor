@@ -70,9 +70,14 @@ void write_line(const String& str) {
 void write_message(uint8_t type, const char* str, size_t len) {
   // Clamp to 255 bytes (single byte length field)
   if (len > 255) len = 255;
-  Serial.write(type);           // Message type (0x02 = STATUS, 0xFE = LIVE_DATA, etc)
-  Serial.write((uint8_t)len);   // Payload length
-  Serial.write((const uint8_t*)str, len);  // Payload data
+  uint8_t frame[257];
+  frame[0] = type;              // 0x02 = STATUS, 0xFE = LIVE_DATA, etc
+  frame[1] = (uint8_t)len;
+  memcpy(frame + 2, str, len);
+  // One write keeps the frame in a single USB packet so the host can't see a
+  // type byte without its length/payload.
+  Serial.write(frame, len + 2);
+  Serial.flush();
 }
 
 void write_message(uint8_t type, const String& str) {
