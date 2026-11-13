@@ -42,7 +42,7 @@
 // SemVer: MAJOR = protocol change, MINOR = feature addition, PATCH = fix only.
 // Keep this version independent of GUI_VERSION in gui/env_monitor_gui.py; both
 // are compared on connect and shown in the GUI's Settings > About section.
-#define FIRMWARE_VERSION "1.4.5"
+#define FIRMWARE_VERSION "1.5.0"
 
 // Metadata line written above the heading of new CSV log files (built in
 // build_log_metadata_line(), defined further down after the TGS EEPROM and
@@ -152,6 +152,8 @@ constexpr size_t N_TGS2616 =  hal::Mux::TGS2616.size();
 enum class AdsVariant : uint8_t { Unknown, ADS1113, ADS1114 };
 std::array<AdsVariant, N_TGS2611> tgs2611_ads_variants{};
 std::array<AdsVariant, N_TGS2616> tgs2616_ads_variants{};
+std::array<uint8_t, N_TGS2611> tgs2611_pga_codes{};
+std::array<uint8_t, N_TGS2616> tgs2616_pga_codes{};
 
 // Per-SCD4x instance readings (one struct per node)
 std::array<Scd4xReading, N_SCD4X> scd4x_nodes{};
@@ -168,10 +170,12 @@ std::array<RunningAvg, N_TRHP> win_trhp_lps_t{};
 
 std::array<RunningAvg, N_TGS2611> win_tgs2611_raw{};
 std::array<RunningAvg, N_TGS2611> win_tgs2611_v{};
+std::array<RunningAvg, N_TGS2611> win_tgs2611_pga_lsb_uv{};
 std::array<RunningAvg, N_TGS2611> win_tgs2611_rs{};   // sensor resistance (kΩ)
 std::array<RunningAvg, N_TGS2611> win_tgs2611_ppm{};  // CH4 ppm via Shah 2023 Eq.(6)
 std::array<RunningAvg, N_TGS2616> win_tgs2616_raw{};
 std::array<RunningAvg, N_TGS2616> win_tgs2616_v{};
+std::array<RunningAvg, N_TGS2616> win_tgs2616_pga_lsb_uv{};
 std::array<RunningAvg, N_SFM3505> win_sfm3505_air{};
 std::array<RunningAvg, N_SFM3505> win_sfm3505_o2{};
 
@@ -330,10 +334,12 @@ static void reset_windows_and_flags() {
 
   for (auto &w : win_tgs2611_raw) w.reset();
   for (auto &w : win_tgs2611_v)   w.reset();
+  for (auto &w : win_tgs2611_pga_lsb_uv) w.reset();
   for (auto &w : win_tgs2611_rs)  w.reset();
   for (auto &w : win_tgs2611_ppm) w.reset();
   for (auto &w : win_tgs2616_raw) w.reset();
   for (auto &w : win_tgs2616_v)   w.reset();
+  for (auto &w : win_tgs2616_pga_lsb_uv) w.reset();
   for (auto &w : win_sfm3505_air) w.reset();
   for (auto &w : win_sfm3505_o2)  w.reset();
 
@@ -375,12 +381,14 @@ static void commit_and_reset_all_windows() {
   for (size_t i = 0; i < N_TGS2611; ++i) {
     line += ','; line += (win_tgs2611_raw[i].count ? String(win_tgs2611_raw[i].mean(), 0) : "NA");
     line += ','; line += (win_tgs2611_v[i].count   ? String(win_tgs2611_v[i].mean(),   5) : "NA");
+    line += ','; line += (win_tgs2611_pga_lsb_uv[i].count ? String(win_tgs2611_pga_lsb_uv[i].mean(), 4) : "NA");
     line += ','; line += (win_tgs2611_rs[i].count  ? String(win_tgs2611_rs[i].mean(),  3) : "NA");
     line += ','; line += (win_tgs2611_ppm[i].count ? String(win_tgs2611_ppm[i].mean(), 2) : "NA");
   }
   for (size_t i = 0; i < N_TGS2616; ++i) {
     line += ','; line += (win_tgs2616_raw[i].count ? String(win_tgs2616_raw[i].mean(), 0) : "NA");
     line += ','; line += (win_tgs2616_v[i].count   ? String(win_tgs2616_v[i].mean(),   5) : "NA");
+    line += ','; line += (win_tgs2616_pga_lsb_uv[i].count ? String(win_tgs2616_pga_lsb_uv[i].mean(), 4) : "NA");
   }
 
   // SFM3505 avgs
@@ -577,20 +585,67 @@ bool lps22df_read_with_autorecover(Lps22dfReading &st) {
 }
 
 // ---------- ADS1113 / ADS1114 ----------
-// Both ADC variants use the ±2.048 V range here, giving 62.5 µV/LSB.
-// V_RL must be kept below ~1.8 V via the digipot R_L setting to avoid saturation.
+// ADS1113 has a fixed ±2.048 V range. ADS1114 readings auto-range with 10%
+// headroom, choosing the narrowest PGA range that remains below saturation.
 static const float    ADS_LSB_V = 0.0000625f;
-bool ads_single_shot(int16_t &raw, AdsVariant variant) {
+static constexpr float ADS_PGA_LSB_V[] = {
+  0.0001875f, 0.000125f, 0.0000625f, 0.00003125f, 0.000015625f, 0.0000078125f
+};
+static constexpr int32_t ADS_PGA_SAFE_RAW = 29490;
+
+bool ads_single_shot(int16_t &raw, AdsVariant variant, uint8_t& pga_code,
+                     float& lsb_v) {
   const uint8_t a = hal::I2CAddr::ADS1113;
-  const uint16_t pga = variant == AdsVariant::ADS1114 ? (0b010u << 9) : 0;
-  const uint16_t cfg = (1u << 15) | (0b100u << 12) | pga |
-                       (1u << 8) | (0b100u << 5) | 0b11u;
-  Wire.beginTransmission(a); Wire.write(0x01); Wire.write((uint8_t)(cfg>>8)); Wire.write((uint8_t)(cfg&0xFF));
-  if (Wire.endTransmission()!=0) return false;
-  delay(9);
-  Wire.beginTransmission(a); Wire.write(0x00); Wire.endTransmission(false);
-  Wire.requestFrom(a, (uint8_t)2); if (Wire.available()!=2) return false;
-  raw = (int16_t)((Wire.read()<<8)|Wire.read()); return true;
+  const bool has_pga = variant == AdsVariant::ADS1114;
+  auto convert = [&](uint8_t code, int16_t& sample) {
+    const uint16_t pga = has_pga ? (static_cast<uint16_t>(code) << 9) : 0;
+    const uint16_t cfg = (1u << 15) | (0b100u << 12) | pga |
+                         (1u << 8) | (0b100u << 5) | 0b11u;
+    Wire.beginTransmission(a);
+    Wire.write(0x01);
+    Wire.write(static_cast<uint8_t>(cfg >> 8));
+    Wire.write(static_cast<uint8_t>(cfg & 0xFF));
+    if (Wire.endTransmission() != 0) return false;
+    delay(9);
+    Wire.beginTransmission(a);
+    Wire.write(0x00);
+    if (Wire.endTransmission(false) != 0) return false;
+    if (Wire.requestFrom(a, static_cast<uint8_t>(2)) != 2 || Wire.available() != 2) return false;
+    sample = static_cast<int16_t>((Wire.read() << 8) | Wire.read());
+    return true;
+  };
+
+  if (!has_pga) {
+    pga_code = variant == AdsVariant::ADS1113 ? 2 : 0;
+    lsb_v = ADS_LSB_V;
+    return convert(0, raw);
+  }
+
+  uint8_t selected = pga_code <= 5 ? pga_code : 2;
+  int16_t selected_raw = 0;
+  if (!convert(selected, selected_raw)) return false;
+  for (;;) {
+    if (abs(static_cast<int32_t>(selected_raw)) > ADS_PGA_SAFE_RAW) {
+      if (selected > 0) {
+        --selected;
+        if (!convert(selected, selected_raw)) return false;
+        continue;
+      }
+      break;
+    }
+
+    if (selected == 5) break;
+    int16_t narrower_raw = 0;
+    if (!convert(static_cast<uint8_t>(selected + 1), narrower_raw)) return false;
+    if (abs(static_cast<int32_t>(narrower_raw)) > ADS_PGA_SAFE_RAW) break;
+    ++selected;
+    selected_raw = narrower_raw;
+  }
+
+  raw = selected_raw;
+  pga_code = selected;
+  lsb_v = ADS_PGA_LSB_V[selected];
+  return true;
 }
 
 // Store pre-fitted calibration parameters (R2ppm and alpha) into the sensor EEPROM
@@ -1258,6 +1313,8 @@ void setup() {
   // Identify each daughterboard from its EEPROM board ID before ADC sampling.
   detect_ads_variants(hal::Mux::TGS2611, tgs2611_ads_variants, "TGS2611");
   detect_ads_variants(hal::Mux::TGS2616, tgs2616_ads_variants, "TGS2616");
+  tgs2611_pga_codes.fill(2);
+  tgs2616_pga_codes.fill(2);
 
   // Calibrate TGS2611 channels
   app::calibrate_all_tgs2611(muxStateWire);
@@ -1631,12 +1688,15 @@ void loop() {
 
       readings.ads.valid = false;
       int16_t raw;
-      if (ads_single_shot(raw, tgs2611_ads_variants[i])) {
+      float lsb_v = ADS_LSB_V;
+      if (ads_single_shot(raw, tgs2611_ads_variants[i], tgs2611_pga_codes[i], lsb_v)) {
         readings.ads.raw   = raw;
-        readings.ads.volts = raw * ADS_LSB_V;
+        readings.ads.volts = raw * lsb_v;
         readings.ads.valid = true;
-        win_tgs2611_raw[i].add((float)raw);
+        // Keep the legacy 62.5 uV/count raw scale for existing calibration/UI consumers.
+        win_tgs2611_raw[i].add(raw * lsb_v / ADS_LSB_V);
         win_tgs2611_v[i].add(readings.ads.volts);
+        win_tgs2611_pga_lsb_uv[i].add(lsb_v * 1000000.0f);
 
         float rs = tgs2611::calc_rs_kohm(readings.ads.volts);
         if (!isnan(rs)) {
@@ -1658,12 +1718,14 @@ void loop() {
 
       readings.ads.valid = false;
       int16_t raw;
-      if (ads_single_shot(raw, tgs2616_ads_variants[i])) {
+      float lsb_v = ADS_LSB_V;
+      if (ads_single_shot(raw, tgs2616_ads_variants[i], tgs2616_pga_codes[i], lsb_v)) {
         readings.ads.raw   = raw;
-        readings.ads.volts = raw * ADS_LSB_V;
+        readings.ads.volts = raw * lsb_v;
         readings.ads.valid = true;
-        win_tgs2616_raw[i].add((float)raw);
+        win_tgs2616_raw[i].add(raw * lsb_v / ADS_LSB_V);
         win_tgs2616_v[i].add(readings.ads.volts);
+        win_tgs2616_pga_lsb_uv[i].add(lsb_v * 1000000.0f);
       }
       ++i;
     }

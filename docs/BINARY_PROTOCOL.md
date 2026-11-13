@@ -171,6 +171,12 @@ treat the line as a comment; `gui/download_csv.py` transfers it verbatim, and
 the GUI logs viewer skips it when parsing (so the heading stays row 1) while
 preserving the line in Excel-safe exports.
 
+ADS1114 PGA auto-ranging chooses the narrowest input range that keeps readings
+at or below 90% of full scale. Each TGS channel's `*_pga_lsb_uv_avg` column
+records the average ADC resolution in microvolts per count during that row's
+averaging window. TGS `*_raw_avg` remains normalized to the legacy 62.5 µV/count
+scale for compatibility; `*_v_avg` is the averaged voltage in volts.
+
 In the GUI the key/value pairs are shown in the muted "Meta:" line directly
 under the preview title (`Preview: /logs/....csv (N bytes)`) when a file is
 selected — the line is packed above the preview/graph pane so it cannot be

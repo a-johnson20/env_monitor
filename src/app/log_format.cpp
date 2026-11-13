@@ -53,12 +53,14 @@ String make_header(size_t n_scd4x,
   for (size_t i = 0; i < n_tgs2611; ++i) {
     h += ",tgs2611_"; h += String(i+1); h += "_raw_avg";
     h += ",tgs2611_"; h += String(i+1); h += "_v_avg";
+    h += ",tgs2611_"; h += String(i+1); h += "_pga_lsb_uv_avg";
     h += ",tgs2611_"; h += String(i+1); h += "_rs_avg";
     h += ",tgs2611_"; h += String(i+1); h += "_ppm_avg";
   }
   for (size_t i = 0; i < n_tgs2616; ++i) {
     h += ",tgs2616_"; h += String(i+1); h += "_raw_avg";
     h += ",tgs2616_"; h += String(i+1); h += "_v_avg";
+    h += ",tgs2616_"; h += String(i+1); h += "_pga_lsb_uv_avg";
   }
 
   // SFM3505 per-probe averages

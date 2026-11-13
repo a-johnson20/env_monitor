@@ -3078,6 +3078,14 @@ class App(ctk.CTk):
         if self.connected_port and self.connected_port not in ports:
             ports.append(self.connected_port)
 
+        def port_sort_key(device: str) -> tuple[int, int, str]:
+            match = re.fullmatch(r"COM(\d+)", device, re.IGNORECASE)
+            if match:
+                return 1, int(match.group(1)), device.casefold()
+            return 0, -1, device.casefold()
+
+        ports.sort(key=port_sort_key, reverse=True)
+
         displays: list[str] = []
         mapping: dict[str, str] = {}
         for dev in ports:

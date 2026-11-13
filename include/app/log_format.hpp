@@ -5,7 +5,7 @@
 
 namespace logfmt {
 
-// Build /logs/YYYYMMDD.csv using the RTC if present, otherwise /logs/nodate.csv
+// Build /logs/YYYYMMDD.csv using the RTC if present, otherwise /logs/nodate.csv.
 String current_log_path(bool rtc_present, RV3028& rtc);
 
 // Build the CSV header line based on how many sensors/channels are compiled-in.
